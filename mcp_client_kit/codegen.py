@@ -116,6 +116,85 @@ _DIG_LIST = '''def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
     return cur'''
 
 
+def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict,
+                       required: set, shape: dict) -> str:
+    """Emit @overload stubs (one per discriminator value) + impl signature."""
+    disc: str = shape["discriminator"]
+    variants: dict = shape["variants"]
+    unwrap: list = shape.get("unwrap") or []
+    overrides: dict = shape.get("input_overrides") or {}
+    container: str | None = shape.get("return_container")
+
+    ordered = sorted(props.items(), key=lambda kv: kv[0] not in required)
+    sorted_variants = sorted(variants.items(), key=lambda kv: int(kv[0]))
+
+    def _build_params(disc_type: str) -> list[str]:
+        out = []
+        for pname, pschema in ordered:
+            py = sanitize(pname)
+            ann = overrides.get(pname) or py_type(pschema)
+            if pname == disc:
+                out.append(f"{py}: {disc_type}")
+            elif pname in required:
+                out.append(f"{py}: {ann}")
+            else:
+                opt_ann = ann if ann.endswith("| None") else f"{ann} | None"
+                out.append(f"{py}: {opt_ann} = None")
+        return out
+
+    def _sig(params: list[str]) -> str:
+        all_p = ["caller: McpCaller", "*", *params] if params else ["caller: McpCaller"]
+        return ", ".join(all_p)
+
+    variant_models = [
+        (int(k), v.get("return_model", "Any"))
+        for k, v in sorted_variants
+        if v.get("return_model")
+    ]
+    union_ret = " | ".join(m for _, m in variant_models) if variant_models else "Any"
+
+    blocks: list[str] = []
+
+    for val, model in variant_models:
+        ret = f"list[{model}]" if container == "list" else model
+        params = _build_params(f"Literal[{val}]")
+        blocks.append(f"@overload\nasync def {fn}({_sig(params)}) -> {ret}: ...")
+
+    impl_ret = f"list[{union_ret}]" if container == "list" else union_ret
+    impl_lines = [f"async def {fn}({_sig(_build_params('int'))}) -> {impl_ret}:"]
+    impl_lines.append(_docstring(tool.get("description"), "    "))
+
+    body_args = [(sanitize(pname), pname, pname in required or pname == disc) for pname, _ in ordered]
+    req_pairs = [(py, pname) for py, pname, is_req in body_args if is_req]
+    opt_pairs = [(py, pname) for py, pname, is_req in body_args if not is_req]
+
+    if not body_args:
+        args_expr = "{}"
+    else:
+        if req_pairs:
+            inits = ", ".join(f'"{pname}": {py}' for py, pname in req_pairs)
+            impl_lines.append(f"    args: dict[str, Any] = {{{inits}}}")
+        else:
+            impl_lines.append("    args: dict[str, Any] = {}")
+        for py, pname in opt_pairs:
+            impl_lines.append(f"    if {py} is not None:")
+            impl_lines.append(f'        args["{pname}"] = {py}')
+        args_expr = "args"
+
+    call = f'await caller.call(SERVER, "{raw_name}", {args_expr})'
+    if unwrap:
+        path = "(" + "".join(f"{k!r}, " for k in unwrap) + ")"
+        impl_lines.append(f"    result = {call}")
+        digger = "_dig_list" if container == "list" else "_dig"
+        dug = f"{digger}(result, {path})"
+        impl_lines.append(f'    return cast("{impl_ret}", {dug})')
+    else:
+        impl_lines.append(f'    return cast("{impl_ret}", {call})')
+
+    blocks.append("\n".join(impl_lines))
+    return "\n\n".join(blocks)
+
+
 def render_tool(tool: dict, shape: dict | None = None) -> str:
     """Render one MCP tool into a typed `async def` against the McpCaller seam.
 
@@ -130,6 +209,9 @@ def render_tool(tool: dict, shape: dict | None = None) -> str:
     required = set(schema.get("required") or [])
 
     shape = shape or {}
+    if shape.get("discriminator") and shape.get("variants"):
+        return _render_overloaded(tool, fn, raw_name, props, required, shape)
+
     unwrap: list = shape.get("unwrap") or []
     return_model: str | None = shape.get("return_model")
     overrides: dict = shape.get("input_overrides") or {}
@@ -222,14 +304,26 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None,
     """
     shapes = shapes or {}
     note = f"\n{probe_note}\n" if probe_note else ""
-    imports = "from typing import Any, TypedDict, cast" if shapes else "from typing import Any"
+    has_disc = any(s.get("discriminator") and s.get("variants") for s in shapes.values())
+    if has_disc:
+        imports = "from typing import Any, Literal, TypedDict, cast, overload"
+    elif shapes:
+        imports = "from typing import Any, TypedDict, cast"
+    else:
+        imports = "from typing import Any"
     parts = [_HEADER.format(server=server, probe_note=note, imports=imports)]
 
     if shapes:
         models = []
         for tool in sorted(tools, key=lambda t: t["name"]):
             sp = shapes.get(tool["name"])
-            if sp and sp.get("return_model"):
+            if not sp:
+                continue
+            if sp.get("discriminator") and sp.get("variants"):
+                for _, variant in sorted(sp["variants"].items(), key=lambda kv: int(kv[0])):
+                    if variant.get("return_model"):
+                        models.append(render_model(variant["return_model"], variant.get("fields") or {}))
+            elif sp.get("return_model"):
                 models.append(render_model(sp["return_model"], sp.get("fields") or {}))
         parts.extend(models)
         specs = [shapes.get(t["name"]) or {} for t in tools]

@@ -240,6 +240,147 @@ def test_generated_unwrap_matches_unwrap_results_oracle():
         assert got == oracle(resp), resp
 
 
+# ── discriminator / @overload mode ──────────────────────────────────────────
+
+_GET_ENTITY_DISC_TOOL = {
+    "name": "get_entity",
+    "description": "Fetch an entity.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "entityId": {"type": "string"},
+            "entityType": {"type": "number"},
+            "fields": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["entityId", "entityType"],
+    },
+}
+_GET_ENTITY_DISC_SHAPE = {
+    "unwrap": ["data", "entity"],
+    "discriminator": "entityType",
+    "variants": {
+        "1": {"return_model": "Person", "fields": {"fullName": "str"}, "source": "fixture"},
+        "2": {"return_model": "Position", "fields": {"headline": "str"}, "source": "fixture"},
+    },
+    "input_overrides": {"entityType": "int"},
+}
+
+
+def test_render_tool_discriminated_emits_overloads():
+    src = codegen.render_tool(_GET_ENTITY_DISC_TOOL, _GET_ENTITY_DISC_SHAPE)
+    assert "@overload" in src
+    assert "entityType: Literal[1]" in src
+    assert "entityType: Literal[2]" in src
+    assert ") -> Person: ..." in src
+    assert ") -> Position: ..." in src
+    assert "entityType: int" in src
+    assert ") -> Person | Position:" in src
+    assert "_dig(result, ('data', 'entity', ))" in src
+    assert "@overload" not in src.split("async def get_entity")[-1]  # no overload in impl
+
+
+def test_render_tool_discriminated_parses():
+    src = codegen.render_module(
+        "radar", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
+    )
+    ast.parse(src)
+
+
+def test_render_module_discriminated_imports_and_models():
+    src = codegen.render_module(
+        "radar", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
+    )
+    assert "from typing import Any, Literal, TypedDict, cast, overload" in src
+    assert "class Person(TypedDict, total=False):" in src
+    assert "class Position(TypedDict, total=False):" in src
+    assert "def _dig(" in src
+
+
+def test_render_tool_flat_path_not_affected():
+    """Flat (non-discriminated) shape → no @overload, byte-identical to pre-change."""
+    src = codegen.render_tool(_GET_ENTITY, _GET_ENTITY_SHAPE)
+    assert "@overload" not in src
+    assert ") -> Entity:" in src
+
+
+def test_generated_discriminated_unwrap_matches_oracle():
+    """Both discriminated variants unwrap the same envelope (same oracle as flat)."""
+    src = codegen.render_module(
+        "radar", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
+    )
+    ns: dict = {}
+    exec(compile(src, "radar_disc_gen.py", "exec"), ns)
+
+    class _Caller:
+        def __init__(self, resp):
+            self.resp = resp
+
+        async def call(self, server, tool, arguments):
+            return self.resp
+
+    def oracle(result):
+        if isinstance(result, dict) and "data" in result:
+            data = result["data"]
+            if isinstance(data, dict) and "entity" in data:
+                return data["entity"]
+        return result
+
+    for resp in (
+        {"data": {"entity": {"entityId": "1", "entityType": 1, "fullName": "Alice"}}},
+        {"data": {"entity": {"entityId": "2", "entityType": 2, "headline": "Eng"}}},
+        {"unexpected": 1},
+    ):
+        got = asyncio.run(ns["get_entity"](_Caller(resp), entityId="x", entityType=1))
+        assert got == oracle(resp), resp
+
+
+def test_generated_discriminated_fallback_for_unmodeled_variant():
+    """Unmodeled entityType (99) hits the int impl — no raise, union returned."""
+    src = codegen.render_module(
+        "radar", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
+    )
+    ns: dict = {}
+    exec(compile(src, "radar_disc_gen.py", "exec"), ns)
+
+    class _Caller:
+        def __init__(self, resp):
+            self.resp = resp
+
+        async def call(self, server, tool, arguments):
+            return self.resp
+
+    resp = {"data": {"entity": {"entityType": 99, "_id": "x"}}}
+    got = asyncio.run(ns["get_entity"](_Caller(resp), entityId="x", entityType=99))
+    assert got == {"entityType": 99, "_id": "x"}
+
+
+def test_discriminator_always_required_in_body():
+    """Discriminator not in schema required → still treated as required in body (no None-check)."""
+    tool = {
+        "name": "get_entity",
+        "description": "x",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "entityId": {"type": "string"},
+                "entityType": {"type": "number"},
+            },
+            "required": ["entityId"],  # entityType deliberately omitted from required
+        },
+    }
+    shape = {
+        "unwrap": ["data", "entity"],
+        "discriminator": "entityType",
+        "variants": {"1": {"return_model": "Person", "fields": {}}},
+        "input_overrides": {"entityType": "int"},
+    }
+    src = codegen.render_tool(tool, shape)
+    # impl must have entityType: int with no default (required)
+    assert "entityType: int" in src
+    # body must NOT have conditional None-check for entityType
+    assert "if entityType is not None" not in src
+
+
 def test_summarize_shape_collapses_lists_and_records_types():
     obj = {"success": True, "data": {"items": [{"id": "x"}, {"id": "y"}], "n": 3}}
     shape = codegen.summarize_shape(obj)
