@@ -19,8 +19,8 @@ from typing import Any
 from . import _bridge, codegen
 
 
-async def _list_tools(server: str) -> list[dict]:
-    async with _bridge.session(server) as s:
+async def _list_tools(server: str, *, cmd: str | None = None) -> list[dict]:
+    async with _bridge.session(server, cmd=cmd) as s:
         result = await s.list_tools()
     tools = []
     for t in result.tools:
@@ -32,8 +32,8 @@ async def _list_tools(server: str) -> list[dict]:
     return tools
 
 
-async def _probe(server: str, tool: str, args: dict) -> Any:
-    caller = _bridge.McpBridgeCaller()
+async def _probe(server: str, tool: str, args: dict, *, cmd: str | None = None) -> Any:
+    caller = _bridge.McpBridgeCaller(cmd=cmd)
     raw = await caller.call(server, tool, args)
     return codegen.summarize_shape(raw)
 
@@ -55,7 +55,8 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
 
 
 def _cmd_codegen(ns: argparse.Namespace) -> int:
-    tools = asyncio.run(_list_tools(ns.server))
+    cmd = getattr(ns, "stdio", None)
+    tools = asyncio.run(_list_tools(ns.server, cmd=cmd))
     print(f"[codegen] {ns.server}: {len(tools)} tools", file=sys.stderr)
 
     shapes = _load_shapes(ns)
@@ -64,7 +65,7 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
     if ns.probe:
         args = json.loads(ns.probe_args) if ns.probe_args else {}
         print(f"[codegen] probing {ns.probe}({args}) …", file=sys.stderr)
-        shape = asyncio.run(_probe(ns.server, ns.probe, args))
+        shape = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd))
         shape_json = json.dumps(shape, indent=2)
         probe_note = (
             f"\nObserved response shape of {ns.probe!r} (keys/types/nesting only):\n"
@@ -87,9 +88,10 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     with `unwrap: []`. The judgment part (set unwrap, fix types, drop deep nests)
     is the skill's — see skills/generate-mcp-wrappers/SKILL.md.
     """
+    cmd = getattr(ns, "stdio", None)
     args = json.loads(ns.args) if ns.args else {}
     print(f"[probe] {ns.server}.{ns.tool}({args}) …", file=sys.stderr)
-    shape = asyncio.run(_probe(ns.server, ns.tool, args))
+    shape = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd))
 
     # Only top-level scalars become skeleton fields; nested dicts/lists are left
     # out (skill decides whether to unwrap to them or keep them as Any).
@@ -114,24 +116,35 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_login(ns: argparse.Namespace) -> int:
+    asyncio.run(_bridge.login(ns.server))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mcp-kit")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     cg = sub.add_parser("codegen", help="generate typed wrappers for a server")
-    cg.add_argument("server", help="server name (e.g. radar)")
+    cg.add_argument("server", help="server name (e.g. radar) or URL")
     cg.add_argument("--out", help="output .py path (default: stdout)")
     cg.add_argument("--shapes", help="shape-spec JSON sidecar (default: <server>.shapes.json beside --out)")
     cg.add_argument("--probe", help="tool to call live and record response shape (docstring note only)")
     cg.add_argument("--probe-args", help="JSON args for --probe (default: {})")
+    cg.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     cg.set_defaults(func=_cmd_codegen)
 
     pr = sub.add_parser("probe", help="live-call a tool and emit a shape-spec skeleton")
-    pr.add_argument("server", help="server name (e.g. radar)")
+    pr.add_argument("server", help="server name (e.g. radar) or URL")
     pr.add_argument("tool", help="tool to call live")
     pr.add_argument("--args", help="JSON args for the call (default: {})")
     pr.add_argument("--emit-shape", help="write skeleton to this path (default: stdout)")
+    pr.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     pr.set_defaults(func=_cmd_probe)
+
+    lg = sub.add_parser("login", help="browser OAuth login for a named server")
+    lg.add_argument("server", help="server name (e.g. radar)")
+    lg.set_defaults(func=_cmd_login)
 
     ns = parser.parse_args(argv)
     return ns.func(ns)
