@@ -1,15 +1,23 @@
 # Distribution plan: mcp-client-kit
 
-**Decision:** public GitHub repo + PyPI. Not internal-only.
+**Decision:** public GitHub repo. Ships **two artifacts from one repo (monorepo):**
 
-## Why PyPI
+| Artifact | What | Channel | Consumer command |
+|---|---|---|---|
+| **engine** — `mcp_client_kit` | the codegen CLI + OAuth bridge (Python package) | **PyPI** | `uvx mcp-client-kit …` / `uv add` |
+| **skill** — `generate-mcp-wrappers` | the judgment layer (Claude Code plugin/skill) | **marketplace** (git repo) | `/plugin marketplace add …` |
+
+They are one product with one contract (the CLI command surface + shape-spec
+format), so they live in one repo: atomic commits, one issue tracker, lockstep
+review. The skill drives the engine via `uvx` — see [Wiring](#wiring).
+
+---
+
+## Why PyPI (engine)
 
 `mcp-client-kit` is a general-purpose tool ("typed Python wrappers for any MCP
-server"). The audience is wider than one org. PyPI gives:
-
-- `uv add mcp-client-kit` / `pip install mcp-client-kit` discoverability.
-- No special repo access for contributors or early adopters.
-- Standard release semantics (tags → versions → changelogs).
+server"). Audience is wider than one org. PyPI gives `uv add mcp-client-kit`
+discoverability, no special repo access, and standard release semantics.
 
 **Alternatives dismissed:**
 
@@ -23,44 +31,121 @@ server"). The audience is wider than one org. PyPI gives:
 
 ---
 
-## Install snippet
+## Wiring: how the skill reaches the engine
 
-```bash
-# released — from PyPI
-uv add mcp-client-kit           # or: pip install mcp-client-kit
+The skill does **not** bundle the engine. `SKILL.md` instructs Claude to run the
+CLI via `uvx`, which fetches the package from PyPI on demand — no pre-install step
+for the user:
 
-# unreleased / pre-tag — tag-pinned from public GitHub (uv.lock pins exact commit)
-uv add "mcp-client-kit @ git+https://github.com/<owner>/mcp-client-kit.git@v0.1.0"
+```
+uvx "mcp-client-kit==0.2.0" codegen …
 ```
 
-The git+https form produces a reproducible install: `uv.lock` records the exact
-commit SHA behind the tag, so `uv sync` is deterministic even if the tag is later
-moved.
+So: **PyPI publish** makes the engine reachable; **repo-as-plugin** delivers the
+skill; **the skill's `uvx` pin** is the link. The pin is *exact* (`==`) so an old
+skill install can never silently drive a newer CLI (no skew through `uvx`).
+
+(`uvx` assumes the user has `uv`. Claude Code users mostly do; README documents the
+`pip install mcp-client-kit` + `mcp-kit` on PATH fallback.)
 
 ---
 
-## Release flow
+## Versioning: two independent numbers
 
-1. Bump `version` in `pyproject.toml`.
-2. `git tag v<X.Y.Z> && git push origin v<X.Y.Z>`.
-3. GitHub Actions runs `uv build` + `uv publish` via **Trusted Publishing** (OIDC
-   — no API token stored in secrets).
+The engine and the skill version **independently**, because a skill-only change
+(SKILL.md prose, better examples) must not force a republish of byte-identical
+Python code, and an engine refactor must not force a skill re-tag.
 
-Minimal workflow (`.github/workflows/release.yml`):
+| Number | Source of truth | Bumps when | Registry |
+|---|---|---|---|
+| **engine** | `pyproject.toml` `version` | `mcp_client_kit/**` code changes | PyPI |
+| **product** | `.claude-plugin/plugin.json` `version` | any release (skill or engine) | marketplace (git tag) |
+| **engine pin** | `SKILL.md` `uvx mcp-client-kit==<engine>` | tracks engine version | — |
+
+What you are actually versioning is **the contract** — the CLI surface + shape-spec
+format. SemVer the *engine* against it (minor = surface change, patch = bugfix,
+major = break post-1.0). The *product* version is just the user-facing release
+counter.
+
+The two drift apart over time (product release-count ≥ engine release-count). That
+is expected and fine.
+
+---
+
+## Tagging: prefixed, per-artifact
+
+One git-tag namespace would force a choice that confuses one audience. Avoid it —
+**each artifact gets the tag form its registry's convention expects:**
+
+| Artifact | Git tag | Maps to | Why this form |
+|---|---|---|---|
+| **engine** | bare **`vX.Y.Z`** | `pyproject.version` ⟷ PyPI release | Honors the universal Python convention `git tag vX.Y.Z == PyPI X.Y.Z`. Every bare tag a visitor sees **is** on PyPI — no gaps, no "where's 0.1.1?". |
+| **skill** | **`plugin-vX.Y.Z`** | `plugin.json` version ⟷ marketplace `ref` | Clearly a separate, labeled namespace — not a missing PyPI release. |
+
+The engine — the thing a repo visitor assumes the repo *is* (it's a Python package
+named `mcp-client-kit`) — keeps the bare tags. The skill takes the prefix.
+
+**README must set this expectation explicitly:**
+
+> This repo ships two artifacts: the `mcp-client-kit` Python package (PyPI; git tags
+> `vX.Y.Z`) and the `generate-mcp-wrappers` Claude Code skill (git tags
+> `plugin-vX.Y.Z`).
+
+---
+
+## Release flows
+
+**Engine changed** (code under `mcp_client_kit/**`):
+
+```bash
+# bump pyproject.toml version, update SKILL.md pin to match, bump plugin.json
+git commit -am "release: engine v0.2.0"
+git tag v0.2.0
+git push && git push --tags          # 'v*' tag fires the publish workflow
+# in agent-skills repo: bump the entry ref to v0.2.0 (or plugin-v0.2.0 if also re-tagged)
+```
+
+**Skill-only changed** (SKILL.md, docs — no engine code):
+
+```bash
+# bump plugin.json only; pyproject + SKILL.md pin unchanged
+git commit -am "release: plugin v0.1.1 (engine unchanged 0.1.0)"
+git tag plugin-v0.1.1
+git push && git push --tags          # 'plugin-v*' does NOT fire publish — no PyPI involvement
+# in agent-skills repo: bump the entry ref to plugin-v0.1.1
+```
+
+Separated triggers mean a skill-only release simply never runs the publish job —
+no phantom PyPI version, no skip-existing guard needed.
+
+**Timeline (watch the numbers drift):**
+
+```
+Release 1  initial            engine 0.1.0   tag v0.1.0         → publish engine 0.1.0
+Release 2  SKILL.md prose      engine 0.1.0   tag plugin-v0.1.1 → no publish; pin stays ==0.1.0
+Release 3  new CLI flag        engine 0.2.0   tag v0.2.0        → publish engine 0.2.0; pin → ==0.2.0
+```
+
+---
+
+## Release workflow (GitHub Actions)
+
+Publish fires **only on bare `v*` tags** (engine releases) via uv Trusted
+Publishing (OIDC — no API token in secrets):
 
 ```yaml
-name: Release
+name: Publish engine
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]   # bare engine tags only; 'plugin-v*' excluded
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: pypi           # required for Trusted Publishing
+    environment: pypi                 # required for Trusted Publishing
     permissions:
-      id-token: write           # OIDC token for uv publish
+      id-token: write                 # OIDC token for uv publish
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -69,32 +154,85 @@ jobs:
 ```
 
 **One-time setup:** register a Trusted Publisher on PyPI (Settings → Publishing →
-Add a new pending publisher). Fields: GitHub owner, repo name, workflow filename,
-environment name (`pypi`). Reference:
+Add a new pending publisher). Fields: GitHub owner, repo, workflow filename,
+environment (`pypi`). Reference:
 [astral-sh/trusted-publishing-examples](https://github.com/astral-sh/trusted-publishing-examples).
 
-**Dry run first:** swap `uv publish` for `uv publish --index-url https://test.pypi.org/legacy/`
-and register on TestPyPI to validate the workflow before the real release.
+**Dry run first:** register on TestPyPI and publish there
+(`uv publish --index-url https://test.pypi.org/legacy/`) to validate end-to-end
+before the real release.
 
 ---
 
-## Pre-publish checklist (gate before v0.1.0)
+## CI guard: pin must reference a real engine
 
-These are REQUIRED before first publish — not scope for the doc-reconciliation
-session, calling them out explicitly so they don't get skipped:
+Independent of the tag scheme, assert at release that the skill's pin points at the
+engine version actually in `pyproject.toml`, so the skill can never ship pointing
+at a non-existent engine:
 
-- [ ] **Genericize internal references.** README, docs, and eval scripts still
-  cite a real corporate server ("EPAM radar") as the validation target, and
-  `servers.example.json` uses internal naming. Replace all org-specific examples
-  with `example.com` / a public demo MCP server (e.g. a local stdio server).
-  This is a real editing pass, not a one-liner.
+```
+SKILL.md pin (mcp-client-kit==X.Y.Z)  ==  pyproject.toml version
+```
+
+A ~5-line check (grep both, compare). Fail the release on mismatch. The product /
+`plugin.json` version is free to differ — it is only the release counter.
+
+---
+
+## Discovery: aggregate via agent-skills, keep code co-located
+
+The skill stays in this repo (co-located with its engine). It is surfaced through
+the existing **`svd-agent-skills`** public marketplace as an **external-source
+entry** — the marketplace lists a pointer, it does not vendor a copy:
+
+```json
+{
+  "name": "generate-mcp-wrappers",
+  "source": { "source": "github", "repo": "<owner>/mcp-client-kit", "ref": "plugin-v0.1.1" },
+  "description": "Generate typed Python wrappers for any MCP server."
+}
+```
+
+(`git-subdir` source + `path` if the plugin sits in a subdir rather than repo root.
+The Claude Code marketplace schema supports `url`, `github`, `git-subdir`, and `npm`
+sources with `ref`/`sha` pinning.)
+
+Result: **one marketplace for users to add** (centralized discovery), **code +
+engine in one repo** (atomic commits, one tracker, lockstep). Bump the skill → move
+the `ref`.
+
+**Optional dual discovery:** this repo can also carry its own
+`.claude-plugin/marketplace.json` so it is installable standalone
+(`/plugin marketplace add <owner>/mcp-client-kit`) for anyone landing on the repo
+directly. Coexists with the aggregator entry.
+
+---
+
+## To make this repo a plugin (small, not yet done)
+
+- `.claude-plugin/plugin.json` — `name`, `version` (= product), `description`.
+  **Not** `skills`/`agents` — auto-discovered from `skills/`.
+- (optional) root `.claude-plugin/marketplace.json` for standalone install.
+
+---
+
+## Pre-publish checklist (gate before first public release)
+
+REQUIRED before first publish — not scope for the doc/versioning work, called out so
+they don't get skipped:
+
+- [ ] **Genericize internal references.** README, docs, and eval scripts still cite a
+  real corporate server ("EPAM radar") as the validation target, and
+  `servers.example.json` uses internal naming. Replace all org-specific examples with
+  `example.com` / a public demo MCP server. A real editing pass, not a one-liner.
 - [ ] **Add `LICENSE`** (MIT or Apache-2.0 — pick one).
-- [ ] **Fill `pyproject.toml` metadata:** `authors`, `license`, `readme =
-  "README.md"`, `classifiers`, `[project.urls]` (Homepage, Source, Issues).
-- [ ] **TestPyPI dry run** — confirm the build and publish workflow end-to-end
-  before touching the real index.
-- [ ] **Tag strategy** — decide: `0.0.x` pre-release series vs jump to `0.1.0`
-  on first public push; communicate in README.
+- [ ] **Fill `pyproject.toml` metadata:** `authors`, `license`, `readme = "README.md"`,
+  `classifiers`, `[project.urls]` (Homepage, Source, Issues).
+- [ ] **Add `.claude-plugin/plugin.json`** (product version) so the repo is a plugin.
+- [ ] **Pin + guard:** SKILL.md uses `uvx "mcp-client-kit==<engine>"`; add the
+  pin-equality CI check.
+- [ ] **TestPyPI dry run** — validate build + publish before the real index.
+- [ ] **Tag strategy** — decide `0.0.x` pre-release vs jump to `0.1.0`; document in README.
 
 ---
 
@@ -102,8 +240,11 @@ session, calling them out explicitly so they don't get skipped:
 
 | Concern | Answer |
 |---|---|
-| Where | PyPI (public) + GitHub |
-| Auth | uv Trusted Publishing (OIDC) — no stored tokens |
-| Build backend | `hatchling` (already in `pyproject.toml`) |
-| Lock / reproducibility | `uv.lock` pins exact commit for git+https installs |
-| First gating task | Genericize internal EPAM references |
+| Where | one public repo (monorepo): PyPI engine + marketplace skill |
+| Versioning | two independent numbers — engine (pyproject→PyPI), product (plugin.json→tag) |
+| Tags | engine `vX.Y.Z` (PyPI convention); skill `plugin-vX.Y.Z` |
+| Publish trigger | bare `v*` tags only; `plugin-v*` never publishes |
+| Skill→engine link | `uvx "mcp-client-kit==<engine>"`, exact pin; CI asserts pin == pyproject |
+| Discovery | `svd-agent-skills` marketplace external-source entry; code stays here |
+| Publish auth | uv Trusted Publishing (OIDC) — no stored tokens |
+| First gating task | genericize internal EPAM references |
