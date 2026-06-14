@@ -5,7 +5,10 @@
 | Artifact | What | Channel | Consumer command |
 |---|---|---|---|
 | **engine** — `mcp_client_kit` | the codegen CLI + OAuth bridge (Python package) | **PyPI** | `uvx mcp-client-kit …` / `uv add` |
-| **skill** — `generate-mcp-wrappers` | the judgment layer (Claude Code plugin/skill) | **marketplace** (git repo) | `/plugin marketplace add …` |
+| **plugin** — `mcp-client-kit` | the judgment layer (Claude Code plugin; skill `generate-mcp-wrappers`) | **marketplace** (git repo) | `/plugin marketplace add …` |
+
+(Plugin name = `mcp-client-kit`, matching the package and repo. The skill *inside*
+the plugin is `generate-mcp-wrappers` — filesystem `skills/generate-mcp-wrappers/`.)
 
 They are one product with one contract (the CLI command surface + shape-spec
 format), so they live in one repo: atomic commits, one issue tracker, lockstep
@@ -80,7 +83,7 @@ One git-tag namespace would force a choice that confuses one audience. Avoid it 
 | Artifact | Git tag | Maps to | Why this form |
 |---|---|---|---|
 | **engine** | bare **`vX.Y.Z`** | `pyproject.version` ⟷ PyPI release | Honors the universal Python convention `git tag vX.Y.Z == PyPI X.Y.Z`. Every bare tag a visitor sees **is** on PyPI — no gaps, no "where's 0.1.1?". |
-| **skill** | **`plugin-vX.Y.Z`** | `plugin.json` version ⟷ marketplace `ref` | Clearly a separate, labeled namespace — not a missing PyPI release. |
+| **plugin** | **`plugin-vX.Y.Z`** | `plugin.json` version ⟷ marketplace `ref` | Clearly a separate, labeled namespace — not a missing PyPI release. |
 
 The engine — the thing a repo visitor assumes the repo *is* (it's a Python package
 named `mcp-client-kit`) — keeps the bare tags. The skill takes the prefix.
@@ -88,8 +91,8 @@ named `mcp-client-kit`) — keeps the bare tags. The skill takes the prefix.
 **README must set this expectation explicitly:**
 
 > This repo ships two artifacts: the `mcp-client-kit` Python package (PyPI; git tags
-> `vX.Y.Z`) and the `generate-mcp-wrappers` Claude Code skill (git tags
-> `plugin-vX.Y.Z`).
+> `vX.Y.Z`) and the `mcp-client-kit` Claude Code plugin — which provides the
+> `generate-mcp-wrappers` skill (git tags `plugin-vX.Y.Z`).
 
 ---
 
@@ -187,11 +190,14 @@ entry** — the marketplace lists a pointer, it does not vendor a copy:
 
 ```json
 {
-  "name": "generate-mcp-wrappers",
+  "name": "mcp-client-kit",
   "source": { "source": "github", "repo": "<owner>/mcp-client-kit", "ref": "plugin-v0.1.1" },
-  "description": "Generate typed Python wrappers for any MCP server."
+  "description": "Generate typed Python wrappers for any MCP server (skill: generate-mcp-wrappers)."
 }
 ```
+
+(Marketplace entry `name` is the **plugin** name = `mcp-client-kit`. The skill it
+provides is `generate-mcp-wrappers`.)
 
 (`git-subdir` source + `path` if the plugin sits in a subdir rather than repo root.
 The Claude Code marketplace schema supports `url`, `github`, `git-subdir`, and `npm`
@@ -210,8 +216,9 @@ directly. Coexists with the aggregator entry.
 
 ## To make this repo a plugin (small, not yet done)
 
-- `.claude-plugin/plugin.json` — `name`, `version` (= product), `description`.
-  **Not** `skills`/`agents` — auto-discovered from `skills/`.
+- `.claude-plugin/plugin.json` — `name: mcp-client-kit`, `version` (= product),
+  `description`. **Not** `skills`/`agents` — the `generate-mcp-wrappers` skill is
+  auto-discovered from `skills/`.
 - (optional) root `.claude-plugin/marketplace.json` for standalone install.
 
 ---
