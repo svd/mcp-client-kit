@@ -4,7 +4,9 @@ version = "0.0.1"
 description = "Generate typed Python wrappers for any MCP server (codegen skill + CLI)."
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.27",
+    # Upper-bounded: FileTokenStorage + pre-flight refresh in _bridge.py depend on
+    # the official mcp SDK's OAuth/auth-flow behavior; a major bump may shift it.
+    "mcp[cli]>=1.27,<2",
     "httpx>=0.28",
 ]
 

@@ -107,5 +107,30 @@ layer as a small focused dependency, not a flagship.
    `async def call(server, tool, args) -> dict`. Today the seam is backed by the
    working `mcp_client`; later swap to FastMCP (Idea-1 option #3) in one place,
    wrappers untouched.
-4. **Migration path:** defer auth (#2) → prove skill → migrate seam to FastMCP when
-   justified. No flagship client.
+4. **Migration path:** defer auth (#2) → prove skill → migrate seam off
+   `staffing_extract` when justified. No flagship client.
+
+---
+
+## Correction (2026-06-1x session) — backend is the official SDK, NOT FastMCP
+
+Earlier decisions/prompts said "swap the seam to **FastMCP**". The backend swap was
+actually implemented on the **official `mcp` SDK** (`mcp[cli]>=1.27,<2`), not
+FastMCP — `fastmcp` is not a dependency. This is the better choice (lighter,
+already required transitively, avoids FastMCP's churn) — recorded here so it is
+not re-litigated:
+
+- **Backend = official `mcp` SDK** in `mcp_client_kit/_bridge.py`: `ClientSession`
+  + `streamablehttp_client`/`stdio_client` + `OAuthClientProvider` + a hand-rolled
+  `FileTokenStorage` (stores absolute `expires_at`) + out-of-band `_pre_flight_refresh`.
+- **FastMCP issue #3425 is irrelevant here** and the code comment that cited it has
+  been corrected. #3425 was a *FastMCP* token-cache bug (stale `expires_in` on
+  reload), closed as a duplicate, fixed upstream in **fastmcp 3.2.0** (PR #3572).
+  Our `FileTokenStorage` already stores absolute `expires_at`, so that class of bug
+  cannot occur regardless of backend.
+- **OPEN, do not assume:** is `_pre_flight_refresh` load-bearing or just a latency
+  optimization? OQ#1 says EPAM reactive on-401 refresh *suffices*, implying
+  optimization — but that is unproven against the official SDK's `get_tokens()→None`
+  path (which, with a cached refresh_token, might trigger full browser re-auth).
+  Eval #3 proved pre-flight *works*, not that the system recovers *without* it.
+  Next session: run the removal eval before calling it optional.

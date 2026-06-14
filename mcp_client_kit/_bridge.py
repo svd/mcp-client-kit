@@ -2,10 +2,23 @@
 
 Drop-in replacement for the temporary mcp_client bridge. Everything above
 this file (generated wrappers, codegen, seam) is unchanged — only this backend
-swaps. Auth uses the official mcp SDK OAuthClientProvider with a thin
-FileTokenStorage. Pre-flight refresh works around FastMCP bug #3425
-(expired-token-looks-fresh-after-reload): we refresh the access token before
-opening a session so the SDK always sees a live credential.
+swaps. Auth uses the official `mcp` SDK OAuthClientProvider with a thin
+FileTokenStorage that stores an absolute `expires_at` per token.
+
+Pre-flight refresh: `get_tokens()` returns None for a near/expired access token
+(see below). To stop that None from reaching the SDK mid-flow — where, with the
+refresh_token still cached, it could trigger a full browser re-auth instead of a
+silent refresh — `_pre_flight_refresh()` renews the access token out-of-band
+(plain httpx, RFC 8414 discovery) before the session opens. This mirrors the
+proven internal-project mcp_client design.
+
+NB: whether pre-flight is strictly load-bearing or merely a latency optimization
+(avoiding a cold-start 401 that reactive refresh would also recover — see
+doc/OQ1_PREFLIGHT.md) is UNVERIFIED: eval #3 proved pre-flight works, not that
+the system recovers without it. Do not drop it without an eval that removes it
+and confirms no browser prompt on cold start. This targets the official `mcp`
+SDK's auth behavior; it is unrelated to FastMCP (not a dependency) and to FastMCP
+issue #3425, which was a separate project's bug, since fixed in fastmcp 3.2.0.
 """
 from __future__ import annotations
 
@@ -96,9 +109,11 @@ class FileTokenStorage(TokenStorage):
 async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> None:
     """Refresh access token if near/past expiry via plain httpx (no MCP SDK).
 
-    Workaround for FastMCP bug #3425: the SDK doesn't set token_expiry_time on
-    cold start, so an expired token passes is_token_valid(). By refreshing before
-    opening the session, get_tokens() always returns a live credential.
+    Renews the access token out-of-band before the session opens, so
+    get_tokens() returns a live credential instead of None (which, with a cached
+    refresh_token, risks the official `mcp` SDK falling back to full browser
+    re-auth). Mirrors the internal-project mcp_client pre-flight. See the
+    module docstring for the load-bearing-vs-optimization caveat (UNVERIFIED).
     """
     data = storage._load()
     entry = data.get(server_name, {})
