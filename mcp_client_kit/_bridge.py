@@ -76,39 +76,68 @@ _SERVERS_SEARCH = [
     Path.cwd() / ".mcp.json",
 ]
 _servers_cache: dict[str, str] | None = None
+# Per-server OAuth client_name overrides, keyed by server name. Populated alongside
+# _servers_cache by servers(). A server with no override in config is absent here and
+# falls back to the default template (see _resolve_client_name()).
+_client_names_cache: dict[str, str] = {}
 
 
-def _parse_servers(raw: dict) -> dict[str, str]:
-    """Accept {"name": "url"} or Claude Code {"mcpServers": {"name": {"url": ...}}}."""
+def _parse_servers(raw: dict) -> tuple[dict[str, str], dict[str, str]]:
+    """Parse config into ({name: url}, {name: client_name}).
+
+    Accept {"name": "url"} or Claude Code {"mcpServers": {"name": {"url": ...}}}.
+    The dict form may carry an optional "clientName" (or "client_name" alias) that
+    overrides the OAuth client_name sent at Dynamic Client Registration.
+    """
     block = raw.get("mcpServers", raw)
-    out: dict[str, str] = {}
+    urls: dict[str, str] = {}
+    names: dict[str, str] = {}
     for name, val in block.items():
         if isinstance(val, str):
-            out[name] = val
+            urls[name] = val
         elif isinstance(val, dict) and val.get("url"):
-            out[name] = val["url"]
-    return out
+            urls[name] = val["url"]
+            override = val.get("clientName") or val.get("client_name")
+            if override:
+                names[name] = override
+    return urls, names
 
 
-def servers(*, refresh: bool = False) -> dict[str, str]:
-    """Return the {name: url} registry loaded from user config (cached)."""
-    global _servers_cache
-    if _servers_cache is not None and not refresh:
+def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> dict[str, str]:
+    """Return the {name: url} registry loaded from user config (cached).
+
+    config_path: if given, read that file exclusively (authoritative — no env or
+    search-order fallback) and always fresh, bypassing the cache.
+    """
+    global _servers_cache, _client_names_cache
+    if config_path is None and _servers_cache is not None and not refresh:
         return _servers_cache
     import os
-    candidates = []
-    if os.environ.get(_SERVERS_CONFIG_ENV):
-        candidates.append(Path(os.environ[_SERVERS_CONFIG_ENV]))
-    candidates += _SERVERS_SEARCH
+    candidates: list[Path] = []
+    if config_path is not None:
+        candidates.append(Path(config_path))
+    else:
+        if os.environ.get(_SERVERS_CONFIG_ENV):
+            candidates.append(Path(os.environ[_SERVERS_CONFIG_ENV]))
+        candidates += _SERVERS_SEARCH
     for path in candidates:
         if path.exists():
             try:
-                _servers_cache = _parse_servers(json.loads(path.read_text()))
+                _servers_cache, _client_names_cache = _parse_servers(
+                    json.loads(path.read_text())
+                )
                 return _servers_cache
             except (json.JSONDecodeError, OSError, AttributeError):
                 continue
-    _servers_cache = {}
+    _servers_cache, _client_names_cache = {}, {}
     return _servers_cache
+
+
+def _resolve_client_name(server_name: str) -> str:
+    """OAuth client_name for a server: config override, else default template."""
+    if _servers_cache is None:
+        servers()
+    return _client_names_cache.get(server_name) or f"mcp-client-kit ({server_name})"
 
 
 # Treat a cached token as expired this many seconds before its real expiry.
@@ -226,7 +255,7 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
 
 
 @asynccontextmanager
-async def _http_session(server_name: str, server_url: str):
+async def _http_session(server_name: str, server_url: str, *, client_name: str | None = None):
     """OAuth-authenticated HTTP MCP session. Pre-flight refresh before connecting."""
     storage = FileTokenStorage(server_name)
     await _pre_flight_refresh(server_name, storage)
@@ -248,7 +277,7 @@ async def _http_session(server_name: str, server_url: str):
     provider = OAuthClientProvider(
         server_url=server_url,
         client_metadata=OAuthClientMetadata(
-            client_name=f"mcp-client-kit ({server_name})",
+            client_name=client_name or _resolve_client_name(server_name),
             redirect_uris=[callback_uri],
             grant_types=["authorization_code", "refresh_token"],
             response_types=["code"],
@@ -276,18 +305,29 @@ async def _stdio_session(cmd: str):
 
 
 @asynccontextmanager
-async def session(server: str, *, cmd: str | None = None):
+async def session(
+    server: str,
+    *,
+    cmd: str | None = None,
+    url: str | None = None,
+    client_name: str | None = None,
+    config_path: str | Path | None = None,
+):
     """Yield an initialized MCP ClientSession.
 
     cmd: if provided, use stdio transport (no auth).
+    url: inline server URL — routes through HTTP + OAuth keyed by `server` name,
+        overriding config. client_name: inline OAuth client_name override.
+    config_path: read the server registry from this file instead of the default search.
     server: a configured name (servers()) → HTTP + OAuth; otherwise a raw URL.
     """
-    _servers = servers()
+    _servers = servers(config_path=config_path)
+    resolved_url = url or _servers.get(server)
     if cmd is not None:
         async with _stdio_session(cmd) as s:
             yield s
-    elif server in _servers:
-        async with _http_session(server, _servers[server]) as s:
+    elif resolved_url is not None:
+        async with _http_session(server, resolved_url, client_name=client_name) as s:
             yield s
     else:
         # Raw URL, no auth
@@ -300,11 +340,27 @@ async def session(server: str, *, cmd: str | None = None):
 class McpBridgeCaller:
     """McpCaller implementation backed by the standalone MCP client."""
 
-    def __init__(self, *, cmd: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        cmd: str | None = None,
+        url: str | None = None,
+        client_name: str | None = None,
+        config_path: str | Path | None = None,
+    ) -> None:
         self._cmd = cmd
+        self._url = url
+        self._client_name = client_name
+        self._config_path = config_path
 
     async def call(self, server: str, tool: str, arguments: dict) -> Any:
-        async with session(server, cmd=self._cmd) as s:
+        async with session(
+            server,
+            cmd=self._cmd,
+            url=self._url,
+            client_name=self._client_name,
+            config_path=self._config_path,
+        ) as s:
             result = await s.call_tool(tool, arguments)
             content = [
                 {"type": item.type, "text": getattr(item, "text", "")}
@@ -314,15 +370,19 @@ class McpBridgeCaller:
 
 
 def parse(content_items: list) -> Any:
-    """Extract and JSON-parse the text payload from an MCP tool result."""
+    """Extract and JSON-parse the text payload from an MCP tool result.
+
+    If the text is not valid JSON (e.g. the server returns plain text), return
+    it as a plain string so callers can still inspect the response.
+    """
     if not content_items:
         raise ValueError("MCP tool result has empty content")
     item = content_items[0]
     text = item.get("text", "") if isinstance(item, dict) else getattr(item, "text", "")
     try:
         return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"MCP server error: {text[:300]}") from exc
+    except json.JSONDecodeError:
+        return text
 
 
 # ---------------------------------------------------------------------------
@@ -374,13 +434,27 @@ async def _local_callback_server(port: int = 0) -> tuple[int, asyncio.Future]:
     return actual_port, future
 
 
-async def login(server_name: str, creds_path: Path = DEFAULT_CREDS_PATH) -> None:
-    """Full browser-based OAuth login for server_name. Caches tokens + token_endpoint."""
-    _servers = servers()
-    if server_name not in _servers:
-        raise ValueError(f"Unknown server {server_name!r}. Known: {list(_servers)}")
+async def login(
+    server_name: str,
+    creds_path: Path = DEFAULT_CREDS_PATH,
+    *,
+    url: str | None = None,
+    client_name: str | None = None,
+    config_path: str | Path | None = None,
+) -> None:
+    """Full browser-based OAuth login for server_name. Caches tokens + token_endpoint.
 
-    server_url = _servers[server_name]
+    url/client_name: inline overrides (no config entry needed).
+    config_path: read the server registry from this file instead of the default search.
+    """
+    _servers = servers(config_path=config_path)
+    server_url = url or _servers.get(server_name)
+    if server_url is None:
+        raise ValueError(
+            f"Unknown server {server_name!r}. Pass --url or add it to config. "
+            f"Known: {list(_servers)}"
+        )
+
     storage = FileTokenStorage(server_name, creds_path)
 
     # Clear existing credentials so we start fresh.
@@ -402,7 +476,7 @@ async def login(server_name: str, creds_path: Path = DEFAULT_CREDS_PATH) -> None
     provider = OAuthClientProvider(
         server_url=server_url,
         client_metadata=OAuthClientMetadata(
-            client_name=f"mcp-client-kit ({server_name})",
+            client_name=client_name or _resolve_client_name(server_name),
             redirect_uris=[callback_uri],
             grant_types=["authorization_code", "refresh_token"],
             response_types=["code"],
@@ -416,15 +490,20 @@ async def login(server_name: str, creds_path: Path = DEFAULT_CREDS_PATH) -> None
         async with streamablehttp_client(server_url, auth=provider) as (read, write, _):
             async with ClientSession(read, write) as s:
                 await s.initialize()
-                result = await s.call_tool("whoami", {})
-                content = [{"type": item.type, "text": getattr(item, "text", "")} for item in result.content]
-                print(f"Logged in as: {parse(content)}")
 
+                # Persist the token endpoint for later pre-flight refresh. Do this
+                # independently of any tool call — not every server exposes `whoami`.
                 if provider.context.oauth_metadata is not None:
                     endpoint_url = str(provider.context.oauth_metadata.token_endpoint)
                     creds_data = storage._load()
                     creds_data.setdefault(server_name, {})["token_endpoint"] = endpoint_url
                     storage._save(creds_data)
+
+                # Confirm the authenticated session works with a server-agnostic
+                # call. `list_tools` is part of the MCP protocol — every server
+                # supports it, unlike any specific tool name.
+                tools = await s.list_tools()
+                print(f"Login OK ({server_name}); {len(tools.tools)} tool(s) available")
     finally:
         if not callback_future.done():
             callback_future.set_result((None, None))

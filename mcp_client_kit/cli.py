@@ -19,8 +19,17 @@ from typing import Any
 from . import _bridge, codegen
 
 
-async def _list_tools(server: str, *, cmd: str | None = None) -> list[dict]:
-    async with _bridge.session(server, cmd=cmd) as s:
+async def _list_tools(
+    server: str,
+    *,
+    cmd: str | None = None,
+    url: str | None = None,
+    client_name: str | None = None,
+    config_path: str | None = None,
+) -> list[dict]:
+    async with _bridge.session(
+        server, cmd=cmd, url=url, client_name=client_name, config_path=config_path
+    ) as s:
         result = await s.list_tools()
     tools = []
     for t in result.tools:
@@ -32,10 +41,33 @@ async def _list_tools(server: str, *, cmd: str | None = None) -> list[dict]:
     return tools
 
 
-async def _probe(server: str, tool: str, args: dict, *, cmd: str | None = None) -> Any:
-    caller = _bridge.McpBridgeCaller(cmd=cmd)
+async def _probe(
+    server: str,
+    tool: str,
+    args: dict,
+    *,
+    cmd: str | None = None,
+    url: str | None = None,
+    client_name: str | None = None,
+    config_path: str | None = None,
+) -> Any:
+    caller = _bridge.McpBridgeCaller(
+        cmd=cmd, url=url, client_name=client_name, config_path=config_path
+    )
     raw = await caller.call(server, tool, args)
     return codegen.summarize_shape(raw)
+
+
+def _server_stem(server: str) -> str:
+    """Return a filesystem-safe stem for a server identifier (name or URL)."""
+    if server.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+        parsed = urlparse(server)
+        # e.g. "mcp.deepwiki.com" → "mcp.deepwiki.com"
+        stem = parsed.netloc or parsed.path.strip("/").replace("/", "_")
+    else:
+        stem = server
+    return stem
 
 
 def _load_shapes(ns: argparse.Namespace) -> dict | None:
@@ -44,7 +76,7 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
     if ns.shapes:
         path = Path(ns.shapes)
     elif ns.out:
-        sibling = Path(ns.out).with_name(f"{ns.server}.shapes.json")
+        sibling = Path(ns.out).with_name(f"{_server_stem(ns.server)}.shapes.json")
         if sibling.is_file():
             path = sibling
     if path is None:
@@ -56,7 +88,8 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
 
 def _cmd_codegen(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
-    tools = asyncio.run(_list_tools(ns.server, cmd=cmd))
+    conn = dict(url=ns.url, client_name=ns.client_name, config_path=ns.config)
+    tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
     print(f"[codegen] {ns.server}: {len(tools)} tools", file=sys.stderr)
 
     shapes = _load_shapes(ns)
@@ -65,7 +98,7 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
     if ns.probe:
         args = json.loads(ns.probe_args) if ns.probe_args else {}
         print(f"[codegen] probing {ns.probe}({args}) …", file=sys.stderr)
-        shape = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd))
+        shape = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, **conn))
         shape_json = json.dumps(shape, indent=2)
         probe_note = (
             f"\nObserved response shape of {ns.probe!r} (keys/types/nesting only):\n"
@@ -91,7 +124,10 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
     args = json.loads(ns.args) if ns.args else {}
     print(f"[probe] {ns.server}.{ns.tool}({args}) …", file=sys.stderr)
-    shape = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd))
+    shape = asyncio.run(
+        _probe(ns.server, ns.tool, args, cmd=cmd,
+               url=ns.url, client_name=ns.client_name, config_path=ns.config)
+    )
 
     # Only top-level scalars become skeleton fields; nested dicts/lists are left
     # out (skill decides whether to unwrap to them or keep them as Any).
@@ -117,8 +153,21 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
 
 
 def _cmd_login(ns: argparse.Namespace) -> int:
-    asyncio.run(_bridge.login(ns.server))
+    asyncio.run(
+        _bridge.login(
+            ns.server, url=ns.url, client_name=ns.client_name, config_path=ns.config
+        )
+    )
     return 0
+
+
+def _add_conn_args(p: argparse.ArgumentParser) -> None:
+    """Inline server-connection args shared by all commands (override config)."""
+    p.add_argument("--url", help="server URL inline; enables OAuth without a config entry")
+    p.add_argument("--client-name", dest="client_name",
+                   help="OAuth client_name override (shown on the server consent screen)")
+    p.add_argument("--config", dest="config",
+                   help="servers config path; overrides $MCP_KIT_SERVERS and the default search")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -132,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     cg.add_argument("--probe", help="tool to call live and record response shape (docstring note only)")
     cg.add_argument("--probe-args", help="JSON args for --probe (default: {})")
     cg.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    _add_conn_args(cg)
     cg.set_defaults(func=_cmd_codegen)
 
     pr = sub.add_parser("probe", help="live-call a tool and emit a shape-spec skeleton")
@@ -140,10 +190,12 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--args", help="JSON args for the call (default: {})")
     pr.add_argument("--emit-shape", help="write skeleton to this path (default: stdout)")
     pr.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    _add_conn_args(pr)
     pr.set_defaults(func=_cmd_probe)
 
     lg = sub.add_parser("login", help="browser OAuth login for a named server")
     lg.add_argument("server", help="server name (e.g. radar)")
+    _add_conn_args(lg)
     lg.set_defaults(func=_cmd_login)
 
     ns = parser.parse_args(argv)
