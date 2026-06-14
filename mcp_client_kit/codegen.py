@@ -68,13 +68,52 @@ def _docstring(text: str | None, indent: str) -> str:
     return f'{indent}"""{body}\n{indent}"""'
 
 
-def render_tool(tool: dict) -> str:
-    """Render one MCP tool into a typed `async def` against the McpCaller seam."""
+def render_model(name: str, fields: dict[str, str]) -> str:
+    """Render a probe-derived return model as a `TypedDict` (a hint, not validation).
+
+    `total=False` because field projection means any field may be absent; only the
+    top-level stable scalars the probe actually saw belong here (deep/variadic nests
+    stay `Any` upstream). See doc/EVAL_RADAR.md and the skill's guards.
+    """
+    lines = [f"class {name}(TypedDict, total=False):"]
+    if not fields:
+        lines.append("    pass")
+    else:
+        for fname, ftype in fields.items():
+            lines.append(f"    {fname}: {ftype}")
+    return "\n".join(lines)
+
+
+# Emitted once per module when any tool unwraps a vendor envelope. Mirrors the
+# hand-built hand-built oracle `_unwrap_entity` semantics (return as-is on miss).
+_DIG = '''def _dig(obj: Any, path: tuple[str, ...]) -> Any:
+    """Dig into a nested dict by key path; return obj unchanged if the path is absent."""
+    cur = obj
+    for key in path:
+        if not isinstance(cur, dict) or key not in cur:
+            return obj
+        cur = cur[key]
+    return cur'''
+
+
+def render_tool(tool: dict, shape: dict | None = None) -> str:
+    """Render one MCP tool into a typed `async def` against the McpCaller seam.
+
+    With a probe-derived `shape` (unwrap path / return model / input overrides),
+    the wrapper unwraps the vendor envelope and returns the typed record instead
+    of opaque `Any`. Without it, behaviour is identical to pure stub generation.
+    """
     raw_name = tool["name"]
     fn = sanitize(raw_name)
     schema = tool.get("inputSchema") or {}
     props: dict = schema.get("properties") or {}
     required = set(schema.get("required") or [])
+
+    shape = shape or {}
+    unwrap: list = shape.get("unwrap") or []
+    return_model: str | None = shape.get("return_model")
+    overrides: dict = shape.get("input_overrides") or {}
+    ret_ann = return_model or "Any"
 
     # required params first (no default), then optional (= None).
     ordered = sorted(props.items(), key=lambda kv: kv[0] not in required)
@@ -83,7 +122,7 @@ def render_tool(tool: dict) -> str:
     body_args: list[str] = []
     for pname, pschema in ordered:
         py = sanitize(pname)
-        ann = py_type(pschema)
+        ann = overrides.get(pname) or py_type(pschema)
         if pname in required:
             params.append(f"{py}: {ann}")
             body_args.append((py, pname, True))
@@ -95,14 +134,14 @@ def render_tool(tool: dict) -> str:
     sig_params = ["caller: McpCaller", "*", *params] if params else ["caller: McpCaller"]
     sig = ", ".join(sig_params)
 
-    lines = [f"async def {fn}({sig}) -> Any:"]
+    lines = [f"async def {fn}({sig}) -> {ret_ann}:"]
     lines.append(_docstring(tool.get("description"), "    "))
 
     req_pairs = [(py, pname) for py, pname, is_req in body_args if is_req]
     opt_pairs = [(py, pname) for py, pname, is_req in body_args if not is_req]
 
     if not body_args:
-        lines.append(f'    return await caller.call(SERVER, "{raw_name}", {{}})')
+        args_expr = "{}"
     else:
         if req_pairs:
             inits = ", ".join(f'"{pname}": {py}' for py, pname in req_pairs)
@@ -112,7 +151,19 @@ def render_tool(tool: dict) -> str:
         for py, pname in opt_pairs:
             lines.append(f"    if {py} is not None:")
             lines.append(f'        args["{pname}"] = {py}')
-        lines.append(f'    return await caller.call(SERVER, "{raw_name}", args)')
+        args_expr = "args"
+
+    call = f'await caller.call(SERVER, "{raw_name}", {args_expr})'
+    if unwrap:
+        path = "(" + "".join(f"{k!r}, " for k in unwrap) + ")"
+        lines.append(f"    result = {call}")
+        dug = f"_dig(result, {path})"
+        ret = f'cast("{return_model}", {dug})' if return_model else dug
+        lines.append(f"    return {ret}")
+    elif return_model:
+        lines.append(f'    return cast("{return_model}", {call})')
+    else:
+        lines.append(f"    return {call}")
 
     return "\n".join(lines)
 
@@ -125,7 +176,7 @@ caller's concern, not this module's.
 {probe_note}"""
 from __future__ import annotations
 
-from typing import Any
+{imports}
 
 from mcp_client_kit.seam import McpCaller
 
@@ -133,11 +184,31 @@ SERVER = {server!r}
 '''
 
 
-def render_module(server: str, tools: list[dict], probe_note: str = "") -> str:
+def render_module(server: str, tools: list[dict], shapes: dict | None = None,
+                  probe_note: str = "") -> str:
+    """Render a full wrapper module.
+
+    `shapes` maps tool name -> probe-derived shape-spec (see render_tool). When
+    present, the module gains TypedDict return models and a `_dig` unwrap helper;
+    the no-shapes path is byte-identical to pure stub generation.
+    """
+    shapes = shapes or {}
     note = f"\n{probe_note}\n" if probe_note else ""
-    parts = [_HEADER.format(server=server, probe_note=note)]
+    imports = "from typing import Any, TypedDict, cast" if shapes else "from typing import Any"
+    parts = [_HEADER.format(server=server, probe_note=note, imports=imports)]
+
+    if shapes:
+        models = []
+        for tool in sorted(tools, key=lambda t: t["name"]):
+            sp = shapes.get(tool["name"])
+            if sp and sp.get("return_model"):
+                models.append(render_model(sp["return_model"], sp.get("fields") or {}))
+        parts.extend(models)
+        if any((shapes.get(t["name"]) or {}).get("unwrap") for t in tools):
+            parts.append(_DIG)
+
     for tool in sorted(tools, key=lambda t: t["name"]):
-        parts.append(render_tool(tool))
+        parts.append(render_tool(tool, shapes.get(tool["name"])))
     return "\n\n\n".join(parts) + "\n"
 
 

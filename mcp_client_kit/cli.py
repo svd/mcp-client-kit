@@ -38,9 +38,27 @@ async def _probe(server: str, tool: str, args: dict) -> Any:
     return codegen.summarize_shape(raw)
 
 
+def _load_shapes(ns: argparse.Namespace) -> dict | None:
+    """Load the shape-spec sidecar: explicit --shapes, else <server>.shapes.json beside --out."""
+    path = None
+    if ns.shapes:
+        path = Path(ns.shapes)
+    elif ns.out:
+        sibling = Path(ns.out).with_name(f"{ns.server}.shapes.json")
+        if sibling.is_file():
+            path = sibling
+    if path is None:
+        return None
+    shapes = json.loads(path.read_text())
+    print(f"[codegen] shapes: {path} ({len(shapes)} tool(s))", file=sys.stderr)
+    return shapes
+
+
 def _cmd_codegen(ns: argparse.Namespace) -> int:
     tools = asyncio.run(_list_tools(ns.server))
     print(f"[codegen] {ns.server}: {len(tools)} tools", file=sys.stderr)
+
+    shapes = _load_shapes(ns)
 
     probe_note = ""
     if ns.probe:
@@ -53,12 +71,46 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
             + shape_json
         )
 
-    source = codegen.render_module(ns.server, tools, probe_note=probe_note)
+    source = codegen.render_module(ns.server, tools, shapes=shapes, probe_note=probe_note)
     if ns.out:
         Path(ns.out).write_text(source)
         print(f"[codegen] wrote {ns.out} ({len(source)} bytes)", file=sys.stderr)
     else:
         sys.stdout.write(source)
+    return 0
+
+
+def _cmd_probe(ns: argparse.Namespace) -> int:
+    """Run one live call and emit a shape-spec SKELETON for the skill to edit.
+
+    The deterministic part: dump the observed top-level shape as a `fields` map
+    with `unwrap: []`. The judgment part (set unwrap, fix types, drop deep nests)
+    is the skill's — see skills/generate-mcp-wrappers/SKILL.md.
+    """
+    args = json.loads(ns.args) if ns.args else {}
+    print(f"[probe] {ns.server}.{ns.tool}({args}) …", file=sys.stderr)
+    shape = asyncio.run(_probe(ns.server, ns.tool, args))
+
+    # Only top-level scalars become skeleton fields; nested dicts/lists are left
+    # out (skill decides whether to unwrap to them or keep them as Any).
+    fields = {k: v for k, v in shape.items() if isinstance(v, str)} if isinstance(shape, dict) else {}
+    skeleton = {
+        ns.tool: {
+            "unwrap": [],
+            "return_model": None,
+            "input_overrides": {},
+            "fields": fields,
+            "source": "live",
+            "probed_args": args,
+            "_observed_shape": shape,
+        }
+    }
+    out = json.dumps(skeleton, indent=2)
+    if ns.emit_shape:
+        Path(ns.emit_shape).write_text(out + "\n")
+        print(f"[probe] wrote skeleton {ns.emit_shape}", file=sys.stderr)
+    else:
+        sys.stdout.write(out + "\n")
     return 0
 
 
@@ -69,9 +121,17 @@ def main(argv: list[str] | None = None) -> int:
     cg = sub.add_parser("codegen", help="generate typed wrappers for a server")
     cg.add_argument("server", help="server name (e.g. radar)")
     cg.add_argument("--out", help="output .py path (default: stdout)")
-    cg.add_argument("--probe", help="tool to call live and record response shape")
+    cg.add_argument("--shapes", help="shape-spec JSON sidecar (default: <server>.shapes.json beside --out)")
+    cg.add_argument("--probe", help="tool to call live and record response shape (docstring note only)")
     cg.add_argument("--probe-args", help="JSON args for --probe (default: {})")
     cg.set_defaults(func=_cmd_codegen)
+
+    pr = sub.add_parser("probe", help="live-call a tool and emit a shape-spec skeleton")
+    pr.add_argument("server", help="server name (e.g. radar)")
+    pr.add_argument("tool", help="tool to call live")
+    pr.add_argument("--args", help="JSON args for the call (default: {})")
+    pr.add_argument("--emit-shape", help="write skeleton to this path (default: stdout)")
+    pr.set_defaults(func=_cmd_probe)
 
     ns = parser.parse_args(argv)
     return ns.func(ns)
