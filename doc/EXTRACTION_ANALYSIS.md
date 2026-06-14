@@ -46,7 +46,7 @@ from mcp_client_kit import McpClient, ServerConfig
 
 radar = ServerConfig(
     name="radar",
-    url="https://mcp.example.com/mcp/radar",
+    url="https://mcp.example.com/mcp/radar",    # real endpoints live in user config, never in repo
     verify_tool="whoami",                       # called after login to confirm identity
     login_hint="uv run staffing-extract login", # shown in ReauthenticationRequired
 )

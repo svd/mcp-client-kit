@@ -45,10 +45,52 @@ from mcp.shared.auth import (
 
 DEFAULT_CREDS_PATH = Path.home() / ".mcp-client-kit" / "credentials.json"
 
-SERVERS: dict[str, str] = {
-    "radar": "https://mcp.example.com/mcp/radar",
-    "internal": "https://mcp.example.com/mcp/internal",
-}
+# Named HTTP+OAuth servers are loaded from a user config — never hardcoded, so no
+# org-specific endpoints land in this repo. Search order:
+#   1. $MCP_KIT_SERVERS                       (explicit path)
+#   2. ~/.mcp-client-kit/servers.json         ({"name": "url", ...} or mcpServers)
+#   3. ./.mcp.json                            (Claude Code format: {"mcpServers": {...}})
+# Any name not found here is treated as a raw URL (no auth). See servers.example.json.
+_SERVERS_CONFIG_ENV = "MCP_KIT_SERVERS"
+_SERVERS_SEARCH = [
+    Path.home() / ".mcp-client-kit" / "servers.json",
+    Path.cwd() / ".mcp.json",
+]
+_servers_cache: dict[str, str] | None = None
+
+
+def _parse_servers(raw: dict) -> dict[str, str]:
+    """Accept {"name": "url"} or Claude Code {"mcpServers": {"name": {"url": ...}}}."""
+    block = raw.get("mcpServers", raw)
+    out: dict[str, str] = {}
+    for name, val in block.items():
+        if isinstance(val, str):
+            out[name] = val
+        elif isinstance(val, dict) and val.get("url"):
+            out[name] = val["url"]
+    return out
+
+
+def servers(*, refresh: bool = False) -> dict[str, str]:
+    """Return the {name: url} registry loaded from user config (cached)."""
+    global _servers_cache
+    if _servers_cache is not None and not refresh:
+        return _servers_cache
+    import os
+    candidates = []
+    if os.environ.get(_SERVERS_CONFIG_ENV):
+        candidates.append(Path(os.environ[_SERVERS_CONFIG_ENV]))
+    candidates += _SERVERS_SEARCH
+    for path in candidates:
+        if path.exists():
+            try:
+                _servers_cache = _parse_servers(json.loads(path.read_text()))
+                return _servers_cache
+            except (json.JSONDecodeError, OSError, AttributeError):
+                continue
+    _servers_cache = {}
+    return _servers_cache
+
 
 # Treat a cached token as expired this many seconds before its real expiry.
 _MARGIN = 120
@@ -218,13 +260,14 @@ async def session(server: str, *, cmd: str | None = None):
     """Yield an initialized MCP ClientSession.
 
     cmd: if provided, use stdio transport (no auth).
-    server: name in SERVERS dict → HTTP + OAuth; otherwise used as a raw URL.
+    server: a configured name (servers()) → HTTP + OAuth; otherwise a raw URL.
     """
+    _servers = servers()
     if cmd is not None:
         async with _stdio_session(cmd) as s:
             yield s
-    elif server in SERVERS:
-        async with _http_session(server, SERVERS[server]) as s:
+    elif server in _servers:
+        async with _http_session(server, _servers[server]) as s:
             yield s
     else:
         # Raw URL, no auth
@@ -313,10 +356,11 @@ async def _local_callback_server(port: int = 0) -> tuple[int, asyncio.Future]:
 
 async def login(server_name: str, creds_path: Path = DEFAULT_CREDS_PATH) -> None:
     """Full browser-based OAuth login for server_name. Caches tokens + token_endpoint."""
-    if server_name not in SERVERS:
-        raise ValueError(f"Unknown server {server_name!r}. Known: {list(SERVERS)}")
+    _servers = servers()
+    if server_name not in _servers:
+        raise ValueError(f"Unknown server {server_name!r}. Known: {list(_servers)}")
 
-    server_url = SERVERS[server_name]
+    server_url = _servers[server_name]
     storage = FileTokenStorage(server_name, creds_path)
 
     # Clear existing credentials so we start fresh.
