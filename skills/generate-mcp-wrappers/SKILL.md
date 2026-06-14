@@ -46,6 +46,10 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
      Radar double-wraps: the record lives under `data.entity` → `"unwrap": ["data", "entity"]`.
      Read `_observed_shape` to find the level where the meaningful keys appear.
    - **`return_model`**: name the `TypedDict` (e.g. `"Entity"`). Absent → return stays `Any`.
+   - **`return_container`**: set `"list"` when the unwrapped value is a *list* of records
+     (e.g. `query_radar`'s `data.results`). Return type becomes `list[<model>]` and the body
+     digs via `_dig_list` (list passes through, envelope dug, else `[]`) instead of `_dig`.
+     Omit for a single dict/scalar record (the `get_entity` case).
    - **`input_overrides`**: fix types the schema lied about. JSON Schema `number` is
      `float`, but radar id/type fields are `int` → `{"entityType": "int"}`.
    - **`fields`**: keep **only top-level stable scalars the probe actually saw**. Mark
@@ -59,7 +63,8 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
    mcp-kit codegen <server> --out <server>.py --shapes <server>.shapes.json
    ```
    (`<server>.shapes.json` sitting beside `--out` is auto-detected; `--shapes` is the
-   explicit form.) Now shaped tools return their `TypedDict`, unwrapping via `_dig`.
+   explicit form.) Now shaped tools return their `TypedDict` (or `list[<model>]`),
+   unwrapping via `_dig` / `_dig_list`.
 
 6. **Verify.** `ast.parse` the module; confirm the eval target — the shaped tool's
    signature reads `-> Entity` (not `Any`) and its body digs the envelope. Where a

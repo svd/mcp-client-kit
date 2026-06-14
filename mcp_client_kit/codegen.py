@@ -96,6 +96,26 @@ _DIG = '''def _dig(obj: Any, path: tuple[str, ...]) -> Any:
     return cur'''
 
 
+# Emitted once per module when any tool unwraps a vendor envelope to a LIST.
+# Mirrors the hand-built hand-built oracle `_unwrap_results` (radar.py:119): an
+# already-unwrapped list passes through, a full envelope is dug, otherwise fall
+# back to the last path key at top level — defaulting to [] so the return is
+# always a list (never the raw envelope dict, unlike `_dig`).
+_DIG_LIST = '''def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
+    """Unwrap to a list at the given key path, honouring the list contract.
+
+    A list passes through; a full envelope is dug; otherwise fall back to the last
+    path key at top level, defaulting to [] (never a non-list)."""
+    if isinstance(obj, list):
+        return obj
+    cur = obj
+    for key in path:
+        if not isinstance(cur, dict) or key not in cur:
+            return obj.get(path[-1], []) if isinstance(obj, dict) else []
+        cur = cur[key]
+    return cur'''
+
+
 def render_tool(tool: dict, shape: dict | None = None) -> str:
     """Render one MCP tool into a typed `async def` against the McpCaller seam.
 
@@ -113,7 +133,14 @@ def render_tool(tool: dict, shape: dict | None = None) -> str:
     unwrap: list = shape.get("unwrap") or []
     return_model: str | None = shape.get("return_model")
     overrides: dict = shape.get("input_overrides") or {}
-    ret_ann = return_model or "Any"
+    # return_container="list" => the unwrapped value is a LIST of return_model
+    # records (e.g. query_radar's data.results). Annotation/cast become
+    # list[Model] and the body digs via _dig_list. Default (None) = dict/scalar.
+    container: str | None = shape.get("return_container")
+    if return_model:
+        ret_ann = f"list[{return_model}]" if container == "list" else return_model
+    else:
+        ret_ann = "Any"
 
     # required params first (no default), then optional (= None).
     ordered = sorted(props.items(), key=lambda kv: kv[0] not in required)
@@ -157,11 +184,12 @@ def render_tool(tool: dict, shape: dict | None = None) -> str:
     if unwrap:
         path = "(" + "".join(f"{k!r}, " for k in unwrap) + ")"
         lines.append(f"    result = {call}")
-        dug = f"_dig(result, {path})"
-        ret = f'cast("{return_model}", {dug})' if return_model else dug
+        digger = "_dig_list" if container == "list" else "_dig"
+        dug = f"{digger}(result, {path})"
+        ret = f'cast("{ret_ann}", {dug})' if return_model else dug
         lines.append(f"    return {ret}")
     elif return_model:
-        lines.append(f'    return cast("{return_model}", {call})')
+        lines.append(f'    return cast("{ret_ann}", {call})')
     else:
         lines.append(f"    return {call}")
 
@@ -204,8 +232,11 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None,
             if sp and sp.get("return_model"):
                 models.append(render_model(sp["return_model"], sp.get("fields") or {}))
         parts.extend(models)
-        if any((shapes.get(t["name"]) or {}).get("unwrap") for t in tools):
+        specs = [shapes.get(t["name"]) or {} for t in tools]
+        if any(s.get("unwrap") and s.get("return_container") != "list" for s in specs):
             parts.append(_DIG)
+        if any(s.get("unwrap") and s.get("return_container") == "list" for s in specs):
+            parts.append(_DIG_LIST)
 
     for tool in sorted(tools, key=lambda t: t["name"]):
         parts.append(render_tool(tool, shapes.get(tool["name"])))

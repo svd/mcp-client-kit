@@ -158,6 +158,88 @@ def test_generated_unwrap_matches_oracle():
         assert got == oracle(resp)
 
 
+# ── list-envelope mode (query_radar: data.results is a LIST) ─────────────────
+
+# query_radar returns a LIST under data.results, a different envelope than
+# get_entity's data.entity dict. Proves the machinery isn't overfit to one shape.
+_QUERY_RADAR = {
+    "name": "query_radar",
+    "description": "Query radar.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "entityType": {"type": "number"},  # schema lies: it's really int
+            "query": {"type": "object"},
+        },
+        "required": ["entityType", "query"],
+    },
+}
+_QUERY_RADAR_SHAPE = {
+    "unwrap": ["data", "results"],
+    "return_container": "list",
+    "return_model": "RadarResult",
+    "input_overrides": {"entityType": "int"},
+    "fields": {"_id": "str", "fullName": "str"},
+    "source": "fixture",
+}
+
+
+def test_render_tool_list_envelope_returns_list_of_model():
+    src = codegen.render_tool(_QUERY_RADAR, _QUERY_RADAR_SHAPE)
+    # return type is list[Model], not Any and not a bare Model
+    assert ") -> list[RadarResult]:" in src
+    assert "entityType: int" in src
+    # body digs via the list-aware helper and casts to list[Model]
+    assert 'result = await caller.call(SERVER, "query_radar", args)' in src
+    assert 'return cast("list[RadarResult]", _dig_list(result, (\'data\', \'results\', )))' in src
+
+
+def test_render_module_list_envelope_emits_dig_list():
+    src = codegen.render_module("radar", [_QUERY_RADAR], shapes={"query_radar": _QUERY_RADAR_SHAPE})
+    ast.parse(src)
+    assert "def _dig_list(obj: Any, path: tuple[str, ...]) -> list:" in src
+    assert "class RadarResult(TypedDict, total=False):" in src
+    # a pure list envelope needs no dict _dig
+    assert "def _dig(obj" not in src
+
+
+def test_generated_unwrap_matches_unwrap_results_oracle():
+    """Diff machinery output vs the hand-built oracle (hand-built oracle:119 _unwrap_results).
+
+    Oracle semantics: already-a-list passes through; result['data']['results'] when
+    present; else result.get('results', []) — always a list.
+    """
+    src = codegen.render_module("radar", [_QUERY_RADAR], shapes={"query_radar": _QUERY_RADAR_SHAPE})
+    ns: dict = {}
+    exec(compile(src, "radar_gen.py", "exec"), ns)
+
+    class _Caller:
+        def __init__(self, resp):
+            self.resp = resp
+
+        async def call(self, server, tool, arguments):
+            return self.resp
+
+    def oracle(result):  # verbatim hand-built oracle:119 _unwrap_results
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict) and "data" in result:
+            data = result["data"]
+            if isinstance(data, dict) and "results" in data:
+                return data["results"]
+        return result.get("results", [])
+
+    for resp in (
+        {"data": {"results": [{"_id": "1"}, {"_id": "2"}]}},  # full envelope
+        [{"_id": "9"}],                                        # already unwrapped list
+        {"results": [{"_id": "7"}]},                           # flattened: top-level results
+        {"data": {"other": 1}},                                # envelope, no results -> []
+        {"unexpected": 1},                                     # nothing -> []
+    ):
+        got = asyncio.run(ns["query_radar"](_Caller(resp), entityType=1, query={}))
+        assert got == oracle(resp), resp
+
+
 def test_summarize_shape_collapses_lists_and_records_types():
     obj = {"success": True, "data": {"items": [{"id": "x"}, {"id": "y"}], "n": 3}}
     shape = codegen.summarize_shape(obj)
