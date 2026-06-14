@@ -8,14 +8,31 @@ that generates typed Python wrappers for any MCP server.
 pre-flight refresh) and per-server wrappers (`radar.py`, `internal.py`) are the
 working prototype this generalizes.
 
-## Status: research done, not yet built
+## Status: deterministic CLI prototype works (2026-06-14)
+
+`mcp-kit codegen <server>` connects to a live MCP server, lists tools, and emits a
+typed `async def` per tool against the `McpCaller` seam. Validated end-to-end
+against corporate-internal MCP server (16 tools; generated wrappers run live). Optional `--probe`
+records a tool's real response *shape* — the empirical pass that beats pure
+inputSchema codegen. See `doc/EVAL_RADAR.md`.
+
+```
+uv run mcp-kit codegen radar --out radar.py
+uv run mcp-kit codegen radar --probe get_entity --probe-args '{"entityId":"…","entityType":1}'
+```
+
+Not yet built: the skill layer (judgment pass — unwrap helpers, applying probe
+findings, tool curation), `--check` drift mode, auth extraction (deferred — see
+VERDICT.md "Fixed decisions").
 
 Read in this order:
 
-1. **`doc/VERDICT.md`** — should you build it? (TL;DR: skill yes, client mostly no)
-2. **`doc/LANDSCAPE.md`** — verified competitor landscape (mid-2026, 19 sources).
-3. **`doc/EXTRACTION_ANALYSIS.md`** — what's generic in `mcp_client.py`, API sketch, design debts.
-4. **`doc/CODEGEN_SKILL_IDEA.md`** — design for the wrapper-generator skill + CLI split.
+1. **`doc/VERDICT.md`** — should you build it? (TL;DR: skill yes, client mostly no) + Fixed decisions.
+2. **`doc/OQ1_PREFLIGHT.md`** — the settled decisive unknown (needs no pre-flight refresh).
+3. **`doc/EVAL_RADAR.md`** — the prototype's first eval against radar.
+4. **`doc/LANDSCAPE.md`** — verified competitor landscape (mid-2026, 19 sources).
+5. **`doc/EXTRACTION_ANALYSIS.md`** — what's generic in `mcp_client.py`, API sketch, design debts.
+6. **`doc/CODEGEN_SKILL_IDEA.md`** — design for the wrapper-generator skill + CLI split.
 
 ## One-line answer
 

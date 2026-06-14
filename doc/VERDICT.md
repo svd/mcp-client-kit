@@ -88,3 +88,24 @@ Two separate ideas. They have **very different** answers.
 **One-line answer:** the reusable *client* is mostly already built by others;
 the *typed-Python-wrapper generator skill* is not — build that, and keep the auth
 layer as a small focused dependency, not a flagship.
+
+---
+
+## Fixed decisions (2026-06-14 session) — do not re-litigate
+
+1. **OQ#1 settled empirically: EPAM does NOT require pre-flight refresh.** Refresh
+   tokens are long-lived (valid 44h+ past access expiry) and reuse-tolerant; RFC
+   8414 metadata exposes `token_endpoint`. Reactive on-401 refresh suffices. The
+   "extract the client" half collapses to a thin persistent `TokenStorage`. See
+   `OQ1_PREFLIGHT.md`.
+2. **Auth for now: defer.** Build the codegen skill/CLI against the *working*
+   `staffing-assistant/scripts/staffing_extract/mcp_client.py` as-is. Don't extract
+   or harden auth this phase — the skill is the goal and the unknown; prove it first.
+3. **Architectural seam (locked):** generated wrappers MUST NOT import
+   `staffing_extract.mcp_client` (would make output non-reusable for colleagues).
+   Generate against a thin injected client **Protocol** —
+   `async def call(server, tool, args) -> dict`. Today the seam is backed by the
+   working `mcp_client`; later swap to FastMCP (Idea-1 option #3) in one place,
+   wrappers untouched.
+4. **Migration path:** defer auth (#2) → prove skill → migrate seam to FastMCP when
+   justified. No flagship client.

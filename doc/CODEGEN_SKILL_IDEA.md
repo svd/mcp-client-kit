@@ -45,6 +45,24 @@ LLM tool-calls to Python, eliminating per-candidate JSON payloads
 (hundreds of KB per position, see `mcp-epam-radar-get_entity-*.txt` samples —
 100–500 KB each) from model context entirely.
 
+## Locked architecture: the client seam (2026-06-14)
+
+Generated wrappers depend on an **injected client Protocol**, never a concrete
+import. This keeps generated modules reusable for colleagues and lets the auth
+backend swap without regenerating:
+
+```python
+from typing import Any, Protocol
+
+class McpCaller(Protocol):
+    async def call(self, server: str, tool: str, arguments: dict) -> Any: ...
+```
+
+Each generated `async def` takes the caller as its first argument and forwards to
+`caller.call(SERVER, "<tool>", {...})`. Behind the seam today sits an adapter over
+`staffing_extract.mcp_client.call_tool`; tomorrow a FastMCP `Client`. Wrappers
+don't change. See VERDICT.md "Fixed decisions" #3.
+
 ## Risks specific to the skill
 
 - **Schema drift**: generated wrappers go stale when the server changes.
