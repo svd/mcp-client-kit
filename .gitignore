@@ -4,3 +4,4 @@ deep-research-wf_*.js
 __pycache__/
 .venv/
 .mcp.json
+eval_preflight.py

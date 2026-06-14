@@ -6,19 +6,38 @@ swaps. Auth uses the official `mcp` SDK OAuthClientProvider with a thin
 FileTokenStorage that stores an absolute `expires_at` per token.
 
 Pre-flight refresh: `get_tokens()` returns None for a near/expired access token
-(see below). To stop that None from reaching the SDK mid-flow — where, with the
-refresh_token still cached, it could trigger a full browser re-auth instead of a
-silent refresh — `_pre_flight_refresh()` renews the access token out-of-band
-(plain httpx, RFC 8414 discovery) before the session opens. This mirrors the
-proven internal-project mcp_client design.
+(see below). To stop that None from reaching the SDK — which would trigger a full
+browser re-auth (authorization_code flow) instead of a silent refresh —
+`_pre_flight_refresh()` renews the access token out-of-band (plain httpx, RFC 8414
+discovery) before the session opens.
 
-NB: whether pre-flight is strictly load-bearing or merely a latency optimization
-(avoiding a cold-start 401 that reactive refresh would also recover — see
-doc/OQ1_PREFLIGHT.md) is UNVERIFIED: eval #3 proved pre-flight works, not that
-the system recovers without it. Do not drop it without an eval that removes it
-and confirms no browser prompt on cold start. This targets the official `mcp`
-SDK's auth behavior; it is unrelated to FastMCP (not a dependency) and to FastMCP
-issue #3425, which was a separate project's bug, since fixed in fastmcp 3.2.0.
+VERIFIED (2026-06-14, eval_preflight.py + mcp 1.27.2 source read,
+doc/OQ1_PREFLIGHT.md §"Removal eval"): pre-flight IS load-bearing — but the precise
+reason is subtler than "the SDK can't refresh". The SDK's `async_auth_flow` DOES
+have a silent `refresh_token`-grant branch (`if not is_token_valid() and
+can_refresh_token(): _refresh_token()`). It is simply UNREACHABLE for a
+fresh-process CLI: `_initialize()` loads tokens from storage but never calls
+`update_token_expiry`, so `token_expiry_time` stays None and `is_token_valid()`
+(`not token_expiry_time or now <= token_expiry_time`) reports ANY disk-loaded
+access token as valid regardless of real expiry. The proactive branch never fires;
+the stale token is sent blind → 401. On 401 the SDK runs `authorization_code`
+(browser), NOT a refresh grant. Net: every fresh CLI invocation that finds an
+expired access token would re-auth in a browser without pre-flight. Conclusion:
+do NOT drop pre-flight. (the server supports refresh grants — the SDK just
+never reaches the code that issues them at cold start.)
+
+The `get_tokens` None-gate (line 125) is redundant but harmless: without pre-flight
+both gate-ON and gate-OFF lead to browser re-auth on expired tokens. It short-
+circuits one unnecessary 401 round-trip when pre-flight fails for other reasons.
+
+VERSION-SENSITIVE: this is mcp 1.27.2 behavior (dep is bounded `<2`). If a future
+SDK calls `update_token_expiry` inside `_initialize`, the cold-start gap closes and
+the SDK's own proactive refresh fires — re-run eval_preflight.py and re-evaluate
+whether pre-flight is still needed.
+
+Unrelated: FastMCP is not a dependency. FastMCP issue #3425 (stale expires_in on
+reload) is a FastMCP bug fixed in fastmcp 3.2.0; our FileTokenStorage stores
+absolute `expires_at` so that class of bug cannot occur regardless.
 """
 from __future__ import annotations
 
@@ -152,10 +171,11 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     """Refresh access token if near/past expiry via plain httpx (no MCP SDK).
 
     Renews the access token out-of-band before the session opens, so
-    get_tokens() returns a live credential instead of None (which, with a cached
-    refresh_token, risks the official `mcp` SDK falling back to full browser
-    re-auth). Mirrors the internal-project mcp_client pre-flight. See the
-    module docstring for the load-bearing-vs-optimization caveat (UNVERIFIED).
+    get_tokens() returns a live credential instead of None. Load-bearing: the
+    official `mcp` SDK's silent refresh branch is unreachable at cold start, so
+    without this the SDK sends the stale token blind → 401 → browser re-auth.
+    Mirrors the internal-project mcp_client pre-flight. See the module docstring
+    for the verified mechanism and version caveat.
     """
     data = storage._load()
     entry = data.get(server_name, {})
