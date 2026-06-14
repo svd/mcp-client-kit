@@ -59,9 +59,9 @@ class McpCaller(Protocol):
 ```
 
 Each generated `async def` takes the caller as its first argument and forwards to
-`caller.call(SERVER, "<tool>", {...})`. Behind the seam today sits an adapter over
-`staffing_extract.mcp_client.call_tool`; tomorrow a FastMCP `Client`. Wrappers
-don't change. See VERDICT.md "Fixed decisions" #3.
+`caller.call(SERVER, "<tool>", {...})`. Behind the seam today sits `mcp_client_kit/_bridge.py` over the official `mcp`
+SDK (`ClientSession` + `streamablehttp_client`). FastMCP was evaluated and
+rejected as the backend. Wrappers don't change. See VERDICT.md §Correction.
 
 ## Risks specific to the skill
 

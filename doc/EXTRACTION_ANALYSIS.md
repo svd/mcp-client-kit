@@ -1,7 +1,8 @@
 # Extraction analysis: what to pull out of `staffing-assistant`
 
-Source of truth: `~/src/staffing-assistant/scripts/staffing_extract/mcp_client.py`
-(reviewed 2026-06-12, branch `feat/structured-data-pipeline`).
+Origin: `~/src/staffing-assistant/scripts/staffing_extract/mcp_client.py`
+(reviewed 2026-06-12, branch `feat/structured-data-pipeline`). The generic layer
+has since been extracted to `mcp_client_kit/_bridge.py` (official `mcp` SDK backend).
 
 ## Layered view of the existing code
 
@@ -75,9 +76,10 @@ parsing, session mgmt). See VERDICT.md.
 
 ## Migration cost in staffing-assistant
 
-- `radar.py` / `staffing.py` import `call_tool`, `DEFAULT_CREDS_PATH` from
-  `staffing_extract.mcp_client` — a thin shim module keeps the old import path
-  working (per user preference: keep superseded code, don't delete).
+- `radar.py` / `staffing.py` in `staffing-assistant` imported from
+  `staffing_extract.mcp_client`. The extraction is done: the generic layer now
+  lives in `mcp_client_kit/_bridge.py` (official `mcp` SDK). A shim in
+  `staffing-assistant` keeps the old import path working for backward compat.
 - `__main__.py` `login` command delegates to the lib.
 - Tests: mcp_client has its own behaviors (early-refresh margin, redirect_uri
   mismatch re-registration, EADDRINUSE fallback) that need to move with it.

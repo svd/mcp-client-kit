@@ -2,7 +2,7 @@
 
 Generated wrapper modules depend ONLY on this Protocol — never on a concrete
 client. That keeps generated code reusable and lets the auth/transport backend
-swap (mcp_client today, FastMCP tomorrow) without regenerating wrappers.
+swap (official `mcp` SDK via `_bridge.py` today; another backend later) without regenerating wrappers.
 See doc/VERDICT.md "Fixed decisions" #3.
 """
 from __future__ import annotations

@@ -30,10 +30,9 @@ Two separate ideas. They have **very different** answers.
   **`PersistentOAuthStorage` + pre-flight-refresh helper** that plugs into *both*
   the official SDK (`TokenStorage`) and FastMCP (`token_storage` / AsyncKeyValue).
   Positioning: "the auth-persistence piece the SDK example omits", not "a client".
-- **First, answer Open Question #1**: does EPAM actually need pre-flight refresh, or
-  would FastMCP reactive-refresh + `token_storage` suffice? If FastMCP suffices →
-  the library shrinks to near-zero and you should just adopt FastMCP. **This is the
-  single most decision-relevant unknown — settle it before writing extraction code.**
+- ~~First, answer Open Question #1~~ **OQ#1 settled** — see §Fixed decisions #1 and
+  `doc/OQ1_PREFLIGHT.md §Removal eval`. `_pre_flight_refresh` is load-bearing for
+  the mcp SDK; the library stays as a thin auth-persistence helper in `_bridge.py`.
 - Fix the 4 design debts from EXTRACTION_ANALYSIS.md during extraction (plaintext
   tokens → keyring/chmod, SDK-internals reach → RFC 8414 discovery fallback, public
   storage API, session-reuse).
@@ -93,22 +92,22 @@ layer as a small focused dependency, not a flagship.
 
 ## Fixed decisions (2026-06-14 session) — do not re-litigate
 
-1. **OQ#1 settled empirically: EPAM does NOT require pre-flight refresh.** Refresh
-   tokens are long-lived (valid 44h+ past access expiry) and reuse-tolerant; RFC
-   8414 metadata exposes `token_endpoint`. Reactive on-401 refresh suffices. The
-   "extract the client" half collapses to a thin persistent `TokenStorage`. See
-   `OQ1_PREFLIGHT.md`.
-2. **Auth for now: defer.** Build the codegen skill/CLI against the *working*
-   `staffing-assistant/scripts/staffing_extract/mcp_client.py` as-is. Don't extract
-   or harden auth this phase — the skill is the goal and the unknown; prove it first.
-3. **Architectural seam (locked):** generated wrappers MUST NOT import
-   `staffing_extract.mcp_client` (would make output non-reusable for colleagues).
-   Generate against a thin injected client **Protocol** —
-   `async def call(server, tool, args) -> dict`. Today the seam is backed by the
-   working `mcp_client`; later swap to FastMCP (Idea-1 option #3) in one place,
-   wrappers untouched.
-4. **Migration path:** defer auth (#2) → prove skill → migrate seam off
-   `staffing_extract` when justified. No flagship client.
+1. **OQ#1 closed: EPAM's server supports reactive on-401 refresh** (long-lived
+   reuse-tolerant tokens; RFC 8414 `token_endpoint` confirmed). However, the
+   official `mcp` SDK never reaches its reactive-refresh path at cold start, so
+   `_pre_flight_refresh` is **load-bearing** for the SDK client. The seam collapsed
+   to a thin auth-persistence helper in `mcp_client_kit/_bridge.py`. See
+   `OQ1_PREFLIGHT.md §Removal eval` and §Correction below.
+2. **Auth for now: defer** *(historical — done; see §Correction).* Was: build
+   against `staffing_extract/mcp_client.py` as-is. The extraction and seam swap
+   are complete: auth now lives in `mcp_client_kit/_bridge.py`.
+3. **Architectural seam (locked):** generated wrappers MUST NOT import a concrete
+   client — only the `McpCaller` Protocol in `mcp_client_kit/seam.py`. Swap
+   the backend (`_bridge.py`) without regenerating wrappers. *(The original
+   decision named `staffing_extract.mcp_client`; see §Correction — swapped to
+   official mcp SDK, not FastMCP.)*
+4. **Migration path:** auth done → prove skill → `--check` drift mode next.
+   No flagship client.
 
 ---
 
@@ -128,9 +127,8 @@ not re-litigated:
   reload), closed as a duplicate, fixed upstream in **fastmcp 3.2.0** (PR #3572).
   Our `FileTokenStorage` already stores absolute `expires_at`, so that class of bug
   cannot occur regardless of backend.
-- **OPEN, do not assume:** is `_pre_flight_refresh` load-bearing or just a latency
-  optimization? OQ#1 says EPAM reactive on-401 refresh *suffices*, implying
-  optimization — but that is unproven against the official SDK's `get_tokens()→None`
-  path (which, with a cached refresh_token, might trigger full browser re-auth).
-  Eval #3 proved pre-flight *works*, not that the system recovers *without* it.
-  Next session: run the removal eval before calling it optional.
+- **SETTLED (removal eval):** `_pre_flight_refresh` is **load-bearing** — the mcp
+  SDK 1.27.2 never reaches its `refresh_token` grant path at cold start
+  (`_initialize` skips `update_token_expiry`; see `doc/OQ1_PREFLIGHT.md §Removal
+  eval`). Both `_pre_flight_refresh` and the `get_tokens` None-gate are kept
+  unchanged — verified correct and necessary.

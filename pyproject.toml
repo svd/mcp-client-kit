@@ -13,6 +13,9 @@ dependencies = [
 [project.scripts]
 mcp-kit = "mcp_client_kit.cli:main"
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
