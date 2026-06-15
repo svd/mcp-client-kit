@@ -363,3 +363,112 @@ def summarize_shape(obj: Any, max_keys: int = 40, max_depth: int = 6,
                 f"...x{len(obj)}"] if len(obj) > 1 else [
             summarize_shape(obj[0], max_keys, max_depth, _depth + 1)]
     return type(obj).__name__
+
+
+# ── Multi-probe shape merge ───────────────────────────────────────────────────
+
+def _merge_scalar(types: set[str]) -> str:
+    """Merge a set of observed type-name strings into one annotation.
+
+    Priority rules:
+    - Single type → identity.
+    - NoneType only → "Any | None" (null seen but no concrete type known).
+    - One concrete type + NoneType → "T | None" (nullable).
+    - int + float (numeric widening; JSON numbers may be either) → "float".
+    - Any other multi-concrete conflict → "Any" (honest; never wrong-guess).
+    """
+    if len(types) == 1:
+        t = next(iter(types))
+        return "Any | None" if t == "NoneType" else t
+    has_none = "NoneType" in types
+    concrete = types - {"NoneType"}
+    if not concrete:
+        return "Any | None"
+    if concrete == {"int", "float"}:
+        return "float | None" if has_none else "float"
+    if len(concrete) == 1:
+        t = next(iter(concrete))
+        return f"{t} | None" if has_none else t
+    # multi-concrete conflict
+    return "Any | None" if has_none else "Any"
+
+
+def merge_shapes(shapes: list[Any]) -> Any:
+    """Deep-merge N summarize_shape() results into one representative shape.
+
+    Used when probing a tool multiple times so the shape-spec reflects the
+    union of all observed responses rather than a single sample.
+
+    Merge rules:
+    - Single input → returned unchanged (identity; N=1 stays byte-stable).
+    - All dicts → key union; each key's values merged recursively across
+      the shapes that carry that key.
+    - All scalar strings (type names from summarize_shape) → _merge_scalar.
+    - All lists → merge element shapes; discard "...xN" / "<empty>" sentinels.
+    - Mixed kinds → "Any" (structural conflict; honest fallback).
+    """
+    if not shapes:
+        return "Any"
+    if len(shapes) == 1:
+        return shapes[0]
+
+    dicts = [s for s in shapes if isinstance(s, dict)]
+    lists = [s for s in shapes if isinstance(s, list)]
+    scalars = [s for s in shapes if isinstance(s, str)]
+
+    if len(dicts) == len(shapes):
+        # Union all keys; merge each key's values across the dicts that carry it.
+        all_keys: dict[str, list[Any]] = {}
+        for d in dicts:
+            for k, v in d.items():
+                all_keys.setdefault(k, []).append(v)
+        return {k: merge_shapes(vs) for k, vs in all_keys.items()}
+
+    if len(scalars) == len(shapes):
+        return _merge_scalar(set(scalars))
+
+    if len(lists) == len(shapes):
+        # Each list is [elem_shape], [elem_shape, "...xN"], or ["<empty>"].
+        # Collect actual element shapes, skip sentinels.
+        elem_shapes: list[Any] = []
+        for lst in lists:
+            for item in lst:
+                if isinstance(item, str) and (item.startswith("...x") or item == "<empty>"):
+                    continue
+                elem_shapes.append(item)
+        return [merge_shapes(elem_shapes)] if elem_shapes else ["<empty>"]
+
+    # Mixed kinds → structural conflict.
+    return "Any"
+
+
+def probe_skeleton(tool: str, args_list: list[dict], shapes: list[Any]) -> dict:
+    """Build a shape-spec skeleton from N probe calls.
+
+    args_list  — the N arg-dicts passed to the tool (one per probe).
+    shapes     — the N summarize_shape() results from those calls.
+
+    When args_list has a single entry, probed_args is that dict (byte-stable
+    with current single-probe output). With multiple entries, probed_args is
+    the full list — callers must scrub PII from each entry before committing.
+    """
+    merged = merge_shapes(shapes)
+    # Normalize raw type-name strings (e.g. "NoneType" → "Any | None") so
+    # fields values are valid Python annotation strings, not Python type names.
+    fields: dict[str, str] = (
+        {k: _merge_scalar({v}) for k, v in merged.items() if isinstance(v, str)}
+        if isinstance(merged, dict)
+        else {}
+    )
+    probed_args: Any = args_list[0] if len(args_list) == 1 else list(args_list)
+    return {
+        tool: {
+            "unwrap": [],
+            "return_model": None,
+            "input_overrides": {},
+            "fields": fields,
+            "source": "live",
+            "probed_args": probed_args,
+            "_observed_shape": merged,
+        }
+    }

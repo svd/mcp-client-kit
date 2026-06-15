@@ -27,19 +27,38 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
 
 3. **Probe each chosen tool → skeleton.**
    ```
+   # single probe (original behaviour)
    mcp-kit probe <server> <tool> --args '<sample json>' --emit-shape <server>.shapes.json
-   ```
-   This makes one live call and writes a skeleton: top-level scalars become `fields`,
-   `unwrap: []`, `source: "live"`, plus `_observed_shape` for your reference. Sample
-   args may need bootstrapping (e.g. call a no-arg `whoami` first to get a real id).
 
-   **Security: the skeleton records the live `probed_args` verbatim — real ids, names,
-   possibly PII.** Before the shape-spec becomes committable, replace those values with
-   placeholders (`"entityId": "<example-id>"`). A real identifier in a version-controlled
-   file is a leak that survives deletion (git history) and travels to anyone the repo
-   reaches. The shape-spec must record *that* `entityType` was probed as `int` and the
-   response *shape* — never the sample values. If you keep the raw response for reference,
-   write it to `<server>.probe-raw.json` (git-ignored), not into the shape-spec.
+   # multi-probe: repeat --args for each input; shapes are deep-merged
+   mcp-kit probe <server> <tool> \
+     --args '{"entityId":"<id1>","entityType":1}' \
+     --args '{"entityId":"<id2>","entityType":1}' \
+     --emit-shape <server>.shapes.json
+   ```
+   Each `--args` makes one live call. The observed shapes are **deep-merged**: keys are
+   unioned (a key absent from some probes is kept — `total=False` covers it), type
+   conflicts widen (`str`+`NoneType` → `str | None`; `int`+`float` → `float`; other
+   conflicts → `Any`). The skeleton's `_observed_shape` reflects the merged result, and
+   `fields` pulls out the merged top-level scalars. With multiple probes, `probed_args`
+   is a list of the arg-dicts; with a single probe it stays a plain dict.
+
+   Use multi-probe when: (a) some fields are nullable/optional, (b) the same tool is
+   called with different ids and you want to capture all visible field variants, (c) a
+   discriminated tool has multiple response shapes per variant that you want to union.
+   For discriminated tools (`get_entity`), probe **each variant separately** and place
+   the merged result under the right variant key manually in step 4.
+
+   Sample args may need bootstrapping (e.g. call a no-arg `whoami` first to get real ids).
+
+   **Security: the skeleton records live `probed_args` verbatim — real ids, names, possibly
+   PII.** With multi-probe this is a *list* of arg-dicts; scrub **every element** before
+   committing. Replace real values with placeholders (`"entityId": "<example-id>"`). A real
+   identifier in a version-controlled file is a leak that survives deletion (git history)
+   and travels to anyone the repo reaches. The shape-spec must record *that* `entityType`
+   was probed as `int` and the response *shape* — never the sample values. If you keep the
+   raw responses for reference, write them to `<server>.probe-raw.json` (git-ignored), not
+   into the shape-spec.
 
 4. **Edit the shape-spec — THIS is the judgment.** For each tool entry:
    - **`unwrap`**: set the key path to the *real record*, stripping vendor envelopes.

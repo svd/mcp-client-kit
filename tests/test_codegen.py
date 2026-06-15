@@ -388,3 +388,144 @@ def test_summarize_shape_collapses_lists_and_records_types():
     assert shape["data"]["n"] == "int"
     assert shape["data"]["items"][0] == {"id": "str"}
     assert shape["data"]["items"][1] == "...x2"
+
+
+# ── merge_shapes ─────────────────────────────────────────────────────────────
+
+def test_merge_shapes_identity_single():
+    s = {"a": "str", "b": "int"}
+    assert codegen.merge_shapes([s]) is s
+
+
+def test_merge_shapes_empty_list():
+    assert codegen.merge_shapes([]) == "Any"
+
+
+def test_merge_shapes_key_union():
+    """Keys from different probes are unioned (both present → both in result)."""
+    a = {"a": "str"}
+    b = {"b": "int"}
+    assert codegen.merge_shapes([a, b]) == {"a": "str", "b": "int"}
+
+
+def test_merge_shapes_same_key_same_type():
+    a = {"x": "str"}
+    b = {"x": "str"}
+    assert codegen.merge_shapes([a, b]) == {"x": "str"}
+
+
+def test_merge_shapes_null_widens_to_optional():
+    """str observed in one probe, NoneType in another → str | None."""
+    a = {"x": "str"}
+    b = {"x": "NoneType"}
+    assert codegen.merge_shapes([a, b]) == {"x": "str | None"}
+
+
+def test_merge_shapes_only_null():
+    """Only NoneType ever observed → Any | None (type unknown, nullable)."""
+    assert codegen.merge_shapes([{"x": "NoneType"}, {"x": "NoneType"}]) == {"x": "Any | None"}
+
+
+def test_merge_shapes_int_float_widening():
+    """int + float → float (numeric widening; JSON may deliver either)."""
+    a = {"n": "int"}
+    b = {"n": "float"}
+    assert codegen.merge_shapes([a, b]) == {"n": "float"}
+
+
+def test_merge_shapes_int_float_null_widening():
+    a = {"n": "int"}
+    b = {"n": "float"}
+    c = {"n": "NoneType"}
+    assert codegen.merge_shapes([a, b, c]) == {"n": "float | None"}
+
+
+def test_merge_shapes_conflict_becomes_any():
+    """str vs int (non-numeric) conflict → Any."""
+    a = {"x": "str"}
+    b = {"x": "int"}
+    assert codegen.merge_shapes([a, b]) == {"x": "Any"}
+
+
+def test_merge_shapes_conflict_with_null_becomes_any_or_none():
+    a = {"x": "str"}
+    b = {"x": "int"}
+    c = {"x": "NoneType"}
+    assert codegen.merge_shapes([a, b, c]) == {"x": "Any | None"}
+
+
+def test_merge_shapes_nested_dict():
+    """Nested dicts merge recursively."""
+    a = {"data": {"id": "str", "name": "str"}}
+    b = {"data": {"id": "str", "count": "int"}}
+    result = codegen.merge_shapes([a, b])
+    assert result == {"data": {"id": "str", "name": "str", "count": "int"}}
+
+
+def test_merge_shapes_list_element_shapes_merged():
+    """List shapes: element shapes are merged, sentinels discarded."""
+    a = [{"id": "str", "name": "str"}, "...x10"]
+    b = [{"id": "str", "score": "float"}]
+    result = codegen.merge_shapes([a, b])
+    assert result == [{"id": "str", "name": "str", "score": "float"}]
+
+
+def test_merge_shapes_list_empty_sentinel():
+    a = ["<empty>"]
+    b = [{"id": "str"}]
+    result = codegen.merge_shapes([a, b])
+    assert result == [{"id": "str"}]
+
+
+def test_merge_shapes_structural_conflict_is_any():
+    """dict vs scalar → Any."""
+    a = {"x": "str"}
+    b = "int"
+    assert codegen.merge_shapes([a, b]) == "Any"
+
+
+# ── probe_skeleton ───────────────────────────────────────────────────────────
+
+def test_probe_skeleton_single_probe_probed_args_is_dict():
+    """Single probe → probed_args is a dict (byte-stable with existing files)."""
+    args = {"entityId": "abc", "entityType": 1}
+    shape = {"data": {"id": "str"}}
+    skeleton = codegen.probe_skeleton("get_entity", [args], [shape])
+    entry = skeleton["get_entity"]
+    assert entry["probed_args"] == args
+    assert not isinstance(entry["probed_args"], list)
+
+
+def test_probe_skeleton_multi_probe_probed_args_is_list():
+    """Two probes → probed_args is a list of both arg dicts."""
+    a1 = {"entityId": "abc", "entityType": 1}
+    a2 = {"entityId": "def", "entityType": 1}
+    s1 = {"data": {"id": "str", "name": "str"}}
+    s2 = {"data": {"id": "str", "score": "float"}}
+    skeleton = codegen.probe_skeleton("get_entity", [a1, a2], [s1, s2])
+    entry = skeleton["get_entity"]
+    assert entry["probed_args"] == [a1, a2]
+
+
+def test_probe_skeleton_fields_reflect_merged_top_level_scalars():
+    """fields = top-level scalars from merged _observed_shape."""
+    s1 = {"id": "str", "name": "str", "nested": {"a": "int"}}
+    s2 = {"id": "str", "score": "float", "nullable": "NoneType"}
+    skeleton = codegen.probe_skeleton("tool", [{}], [s1, s2])
+    fields = skeleton["tool"]["fields"]
+    assert fields["id"] == "str"
+    assert fields["name"] == "str"
+    assert fields["score"] == "float"
+    assert fields["nullable"] == "Any | None"
+    assert "nested" not in fields  # nested dict excluded from fields
+
+
+def test_probe_skeleton_structure():
+    """Skeleton has all expected keys."""
+    skeleton = codegen.probe_skeleton("whoami", [{}], [{}])
+    entry = skeleton["whoami"]
+    for key in ("unwrap", "return_model", "input_overrides", "fields", "source",
+                "probed_args", "_observed_shape"):
+        assert key in entry
+    assert entry["unwrap"] == []
+    assert entry["source"] == "live"
