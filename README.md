@@ -49,6 +49,11 @@ small focused dependency, already done.**
 its silent-refresh path at cold start (`_initialize` skips `update_token_expiry`).
 Fresh-process CLI re-auths in browser without it. See `doc/OQ1_PREFLIGHT.md §Removal eval`.
 
+## Docs
+
+- [`doc/USAGE.md`](doc/USAGE.md) — end-user guide (published flow: PyPI + marketplace); two paths: plugin/skill and CLI only.
+- [`doc/RUNNING_LOCALLY.md`](doc/RUNNING_LOCALLY.md) — run from a local clone without installing.
+
 ## Next
 
 Still deferred: skill layer (judgment pass — unwrap helpers, tool curation),
