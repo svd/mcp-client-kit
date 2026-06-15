@@ -166,9 +166,10 @@ def test_cli_discover_codegraph(tmp_path):
         ("claude", "mcp", "get", "epam-staffing"): None,
     }
 
-    with patch("mcp_client_kit.discovery.shutil.which", return_value="/usr/bin/claude"):
-        provider = ClaudeCodeProvider(_run=_make_run(run_map), _home=tmp_path)
-        servers = provider.discover()
+    # Call _discover_via_cli() directly — discover() uses JSON path by default
+    # (claude mcp list hangs in subprocess due to live health-checks without a tty).
+    provider = ClaudeCodeProvider(_run=_make_run(run_map), _home=tmp_path)
+    servers = provider._discover_via_cli()
 
     by_name = {s.name: s for s in servers}
     assert "codegraph" in by_name
@@ -191,9 +192,9 @@ def test_cli_connector_not_probeable(tmp_path):
         ("claude", "mcp", "get", "epam-staffing"): None,
     }
 
-    with patch("mcp_client_kit.discovery.shutil.which", return_value="/usr/bin/claude"):
-        provider = ClaudeCodeProvider(_run=_make_run(run_map), _home=tmp_path)
-        servers = provider.discover()
+    # Call _discover_via_cli() directly — discover() uses JSON path by default.
+    provider = ClaudeCodeProvider(_run=_make_run(run_map), _home=tmp_path)
+    servers = provider._discover_via_cli()
 
     by_name = {s.name: s for s in servers}
     assert "claude.ai Context7" in by_name
@@ -211,10 +212,9 @@ def test_cli_connector_not_probeable(tmp_path):
 def test_cli_json_fallback(tmp_path):
     (tmp_path / ".claude.json").write_text(json.dumps(FIXTURE_CLAUDE_JSON))
 
-    # _run always returns None → CLI path yields nothing, falls back to JSON.
-    with patch("mcp_client_kit.discovery.shutil.which", return_value=None):
-        provider = ClaudeCodeProvider(_run=_make_run({}), _home=tmp_path)
-        servers = provider.discover()
+    # discover() always reads ~/.claude.json; _run is not called.
+    provider = ClaudeCodeProvider(_run=_make_run({}), _home=tmp_path)
+    servers = provider.discover()
 
     by_name = {s.name: s for s in servers}
 

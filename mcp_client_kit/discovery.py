@@ -273,14 +273,12 @@ class ClaudeCodeProvider:
     def discover(self) -> list[DiscoveredServer]:
         """Return all MCP servers found in the Claude Code environment.
 
-        Tries the CLI first; falls back to parsing ``~/.claude.json`` if the
-        CLI is unavailable or returns no results.
+        Reads ``~/.claude.json`` for user- and project-scoped servers.
+        The ``claude mcp list`` CLI is intentionally skipped here: it runs live
+        health-checks that block when called from a subprocess without a tty.
+        The CLI parsing helpers (``_parse_mcp_list``, ``_parse_mcp_get``) are
+        kept for potential future use and are covered by unit tests.
         """
-        if shutil.which("claude") is not None:
-            servers = self._discover_via_cli()
-            if servers is not None:
-                return servers
-        # CLI unavailable or failed — try JSON fallback.
         return self._discover_via_json()
 
     # ------------------------------------------------------------------
@@ -336,10 +334,10 @@ class ClaudeCodeProvider:
         merged: dict[str, tuple[dict, str]] = {}  # name -> (entry, scope_label)
         for name, entry in project_servers.items():
             if isinstance(entry, dict):
-                merged[name] = (entry, "Project .mcp.json")
+                merged[name] = (entry, "Project config (file)")
         for name, entry in user_servers.items():
             if isinstance(entry, dict):
-                merged[name] = (entry, "User/Project config (file)")
+                merged[name] = (entry, "User config (file)")
 
         servers: list[DiscoveredServer] = []
         for name, (entry, scope_label) in merged.items():
