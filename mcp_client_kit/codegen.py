@@ -85,7 +85,7 @@ def render_model(name: str, fields: dict[str, str]) -> str:
 
 
 # Emitted once per module when any tool unwraps a vendor envelope. Mirrors the
-# hand-built hand-built oracle `_unwrap_entity` semantics (return as-is on miss).
+# hand-built oracle wrapper's `_unwrap_entity` semantics (return as-is on miss).
 _DIG = '''def _dig(obj: Any, path: tuple[str, ...]) -> Any:
     """Dig into a nested dict by key path; return obj unchanged if the path is absent."""
     cur = obj
@@ -97,10 +97,10 @@ _DIG = '''def _dig(obj: Any, path: tuple[str, ...]) -> Any:
 
 
 # Emitted once per module when any tool unwraps a vendor envelope to a LIST.
-# Mirrors the hand-built hand-built oracle `_unwrap_results` (radar.py:119): an
-# already-unwrapped list passes through, a full envelope is dug, otherwise fall
-# back to the last path key at top level — defaulting to [] so the return is
-# always a list (never the raw envelope dict, unlike `_dig`).
+# Mirrors the hand-built oracle's `_unwrap_results`: an already-unwrapped list
+# passes through, a full envelope is dug, otherwise fall back to the last path
+# key at top level — defaulting to [] so the return is always a list (never
+# the raw envelope dict, unlike `_dig`).
 _DIG_LIST = '''def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
     """Unwrap to a list at the given key path, honouring the list contract.
 

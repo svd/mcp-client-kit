@@ -27,9 +27,11 @@ async def _list_tools(
     bearer: str | None = None,
     client_name: str | None = None,
     config_path: str | None = None,
+    cred_backend: str | None = None,
 ) -> list[dict]:
     async with _bridge.session(
-        server, cmd=cmd, url=url, bearer=bearer, client_name=client_name, config_path=config_path
+        server, cmd=cmd, url=url, bearer=bearer, client_name=client_name,
+        config_path=config_path, cred_backend=cred_backend,
     ) as s:
         result = await s.list_tools()
     tools = []
@@ -52,9 +54,11 @@ async def _probe(
     bearer: str | None = None,
     client_name: str | None = None,
     config_path: str | None = None,
+    cred_backend: str | None = None,
 ) -> Any:
     caller = _bridge.McpBridgeCaller(
-        cmd=cmd, url=url, bearer=bearer, client_name=client_name, config_path=config_path
+        cmd=cmd, url=url, bearer=bearer, client_name=client_name, config_path=config_path,
+        cred_backend=cred_backend,
     )
     raw = await caller.call(server, tool, args)
     return codegen.summarize_shape(raw)
@@ -90,7 +94,8 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
 
 def _cmd_codegen(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
-    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config)
+    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
+                cred_backend=ns.cred_backend)
     tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
     print(f"[codegen] {ns.server}: {len(tools)} tools", file=sys.stderr)
 
@@ -133,7 +138,8 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     n = len(args_list)
     print(f"[probe] {ns.server}.{ns.tool} ({n} probe(s)) …", file=sys.stderr)
 
-    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config)
+    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
+                cred_backend=ns.cred_backend)
     shapes = []
     for i, args in enumerate(args_list):
         print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
@@ -154,7 +160,8 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
 def _cmd_list(ns: argparse.Namespace) -> int:
     """Print the tool inventory as JSON [{name, description}] for a server."""
     cmd = getattr(ns, "stdio", None)
-    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config)
+    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
+                cred_backend=ns.cred_backend)
     tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
     out = [{"name": t["name"], "description": t.get("description") or ""} for t in tools]
     sys.stdout.write(json.dumps(out, indent=2) + "\n")
@@ -164,7 +171,8 @@ def _cmd_list(ns: argparse.Namespace) -> int:
 def _cmd_login(ns: argparse.Namespace) -> int:
     asyncio.run(
         _bridge.login(
-            ns.server, url=ns.url, client_name=ns.client_name, config_path=ns.config
+            ns.server, url=ns.url, client_name=ns.client_name, config_path=ns.config,
+            cred_backend=ns.cred_backend,
         )
     )
     return 0
@@ -181,6 +189,11 @@ def _add_conn_args(p: argparse.ArgumentParser) -> None:
                    help="OAuth client_name override (shown on the server consent screen)")
     p.add_argument("--config", dest="config",
                    help="servers config path; overrides $MCP_KIT_SERVERS and the default search")
+    p.add_argument("--cred-backend", dest="cred_backend", choices=["file", "keyring", "auto"],
+                   help="credential storage backend: file (default, hardened 0600), "
+                        "keyring (OS keychain; falls back to file if unavailable), "
+                        "or auto (keyring if detected, else file). "
+                        "Also: MCP_KIT_CRED_BACKEND env or ~/.mcp-client-kit/config.json 'cred_backend'.")
 
 
 def main(argv: list[str] | None = None) -> int:

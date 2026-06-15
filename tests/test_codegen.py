@@ -127,7 +127,7 @@ def test_render_module_no_shapes_unchanged():
 
 
 def test_generated_unwrap_matches_oracle():
-    """Diff machinery output vs the hand-built oracle (hand-built oracle:110 _unwrap_entity).
+    """Diff machinery output vs the hand-built oracle (`_unwrap_entity`).
 
     Oracle semantics: result['data']['entity'] when present, else result as-is.
     """
@@ -204,7 +204,7 @@ def test_render_module_list_envelope_emits_dig_list():
 
 
 def test_generated_unwrap_matches_unwrap_results_oracle():
-    """Diff machinery output vs the hand-built oracle (hand-built oracle:119 _unwrap_results).
+    """Diff machinery output vs the hand-built oracle (`_unwrap_results`).
 
     Oracle semantics: already-a-list passes through; result['data']['results'] when
     present; else result.get('results', []) — always a list.
@@ -220,7 +220,7 @@ def test_generated_unwrap_matches_unwrap_results_oracle():
         async def call(self, server, tool, arguments):
             return self.resp
 
-    def oracle(result):  # verbatim hand-built oracle:119 _unwrap_results
+    def oracle(result):  # verbatim hand-built _unwrap_results
         if isinstance(result, list):
             return result
         if isinstance(result, dict) and "data" in result:

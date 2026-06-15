@@ -3,16 +3,15 @@
 Exploring whether to extract a reusable MCP client + build a Claude Code skill
 that generates typed Python wrappers for any MCP server.
 
-**Origin:** spun out of `a prior internal project`, whose
-`the prior hand-built MCP client` (OAuth 2.1 PKCE, file token storage,
-pre-flight refresh) and per-server wrappers (`radar.py`, `internal.py`) are the
-working prototype this generalizes.
+**Origin:** generalized from a prior internal project's hand-built MCP client
+(OAuth 2.1 PKCE, file token storage, pre-flight refresh) and per-server wrappers —
+the working prototype this builds on.
 
 ## Status: deterministic CLI prototype works (2026-06-14)
 
 `mcp-kit codegen <server>` connects to a live MCP server, lists tools, and emits a
 typed `async def` per tool against the `McpCaller` seam. Validated end-to-end
-against corporate-internal MCP server (16 tools; generated wrappers run live). Optional `--probe`
+against a corporate-internal MCP server (radar, 16 tools; generated wrappers run live). Optional `--probe`
 records a tool's real response *shape* — the empirical pass that beats pure
 inputSchema codegen. See `doc/EVAL_RADAR.md`.
 

@@ -10,8 +10,14 @@ no pytest-asyncio dependency needed).
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import stat
+import warnings
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from mcp_client_kit import _bridge
 
@@ -102,7 +108,7 @@ def test_session_routes_bearer_not_oauth_when_bearer_provided():
         yield _make_mock_session()
 
     @asynccontextmanager
-    async def fake_oauth(name, url, *, client_name=None):
+    async def fake_oauth(name, url, *, client_name=None, cred_backend=None):
         oauth_calls.append(name)
         yield _make_mock_session()
 
@@ -149,7 +155,7 @@ def test_session_oauth_path_unchanged_without_bearer():
     oauth_calls: list = []
 
     @asynccontextmanager
-    async def fake_oauth(name, url, *, client_name=None):
+    async def fake_oauth(name, url, *, client_name=None, cred_backend=None):
         oauth_calls.append(name)
         yield _make_mock_session()
 
@@ -240,3 +246,160 @@ def test_session_raw_url_uses_open_http_with_no_auth():
     assert captured["url"] == "https://public.example.com/mcp"
     assert captured["headers"] is None, "unauthenticated path must not inject headers"
     assert captured["auth"] is None, "unauthenticated path must not inject auth"
+
+
+# ---------------------------------------------------------------------------
+# FileTokenStorage: file permissions and atomic write
+# ---------------------------------------------------------------------------
+
+def test_file_storage_sets_0600_file_and_0700_dir(tmp_path):
+    """_file_save must create credentials with 0600 and parent dir with 0700."""
+    from mcp.shared.auth import OAuthToken
+    creds = tmp_path / "subdir" / "credentials.json"
+    storage = _bridge.FileTokenStorage("s", credentials_path=creds, backend="file")
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="tok", token_type="bearer")))
+    assert creds.exists()
+    assert stat.S_IMODE(os.stat(creds).st_mode) == 0o600, "file must be 0600"
+    assert stat.S_IMODE(os.stat(creds.parent).st_mode) == 0o700, "dir must be 0700"
+
+
+def test_file_storage_round_trip(tmp_path):
+    """Tokens saved by file backend round-trip to a fresh storage instance."""
+    from mcp.shared.auth import OAuthToken
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("s", credentials_path=creds, backend="file")
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="mytoken", token_type="bearer")))
+    storage2 = _bridge.FileTokenStorage("s", credentials_path=creds, backend="file")
+    loaded = asyncio.run(storage2.get_tokens())
+    assert loaded is not None
+    assert loaded.access_token == "mytoken"
+
+
+def test_file_storage_self_heals_loose_permissions(tmp_path):
+    """_file_load must chmod a world-readable file to 0600 and emit a warning."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({}))
+    os.chmod(creds, 0o644)
+    storage = _bridge.FileTokenStorage("s", credentials_path=creds, backend="file")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        storage._file_load()
+    assert stat.S_IMODE(os.stat(creds).st_mode) == 0o600, "perms must be fixed to 0600"
+    assert any("0644" in str(w.message) or "fixed" in str(w.message) for w in caught), \
+        "must warn about loose permissions"
+
+
+# ---------------------------------------------------------------------------
+# resolve_cred_backend: precedence order
+# ---------------------------------------------------------------------------
+
+def test_resolve_cred_backend_default_is_file(monkeypatch):
+    """Without any input, resolve_cred_backend returns 'file'."""
+    monkeypatch.delenv(_bridge._CRED_BACKEND_ENV, raising=False)
+    with patch("mcp_client_kit._bridge._load_client_config", return_value={}):
+        assert _bridge.resolve_cred_backend(None) == "file"
+
+
+def test_resolve_cred_backend_cli_beats_env(monkeypatch):
+    """CLI arg beats env var."""
+    monkeypatch.setenv(_bridge._CRED_BACKEND_ENV, "keyring")
+    assert _bridge.resolve_cred_backend("file") == "file"
+
+
+def test_resolve_cred_backend_env_beats_config(monkeypatch):
+    """Env var beats config file."""
+    monkeypatch.setenv(_bridge._CRED_BACKEND_ENV, "keyring")
+    with patch("mcp_client_kit._bridge._load_client_config", return_value={"cred_backend": "auto"}):
+        assert _bridge.resolve_cred_backend(None) == "keyring"
+
+
+def test_resolve_cred_backend_config_file(monkeypatch, tmp_path):
+    """Config file cred_backend key is used when no CLI arg or env var."""
+    monkeypatch.delenv(_bridge._CRED_BACKEND_ENV, raising=False)
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"cred_backend": "auto"}))
+    with patch("mcp_client_kit._bridge.DEFAULT_CONFIG_PATH", cfg):
+        assert _bridge.resolve_cred_backend(None) == "auto"
+
+
+def test_resolve_cred_backend_unknown_raises():
+    """Unknown backend value must raise ValueError."""
+    with pytest.raises(ValueError, match="Unknown"):
+        _bridge.resolve_cred_backend("s3")
+
+
+# ---------------------------------------------------------------------------
+# _load_client_config
+# ---------------------------------------------------------------------------
+
+def test_load_client_config_absent_returns_empty(tmp_path):
+    """_load_client_config returns {} when the config file does not exist."""
+    assert _bridge._load_client_config(tmp_path / "no-config.json") == {}
+
+
+def test_load_client_config_reads_key(tmp_path):
+    """_load_client_config returns the parsed JSON dict."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"cred_backend": "keyring", "other": 1}))
+    data = _bridge._load_client_config(cfg)
+    assert data["cred_backend"] == "keyring"
+
+
+# ---------------------------------------------------------------------------
+# Keyring backend: fake in-memory store + no-backend fallback
+# ---------------------------------------------------------------------------
+
+class _FakeKeyring:
+    """In-memory keyring stub that mimics keyring module's interface."""
+    def __init__(self):
+        self._store: dict = {}
+        self.set_calls: list = []
+        self.get_calls: list = []
+
+    def get_password(self, service, username):
+        self.get_calls.append((service, username))
+        return self._store.get((service, username))
+
+    def set_password(self, service, username, password):
+        self.set_calls.append((service, username))
+        self._store[(service, username)] = password
+
+
+def test_keyring_backend_round_trip(tmp_path):
+    """keyring backend stores/loads tokens via the injected fake keyring."""
+    from mcp.shared.auth import OAuthToken
+    fake_kr = _FakeKeyring()
+    creds = tmp_path / "credentials.json"
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        storage = _bridge.FileTokenStorage("srv", credentials_path=creds, backend="keyring")
+        asyncio.run(storage.set_tokens(OAuthToken(access_token="kr_token", token_type="bearer")))
+        assert not creds.exists(), "keyring backend must not write to the file"
+        assert fake_kr.set_calls, "set_password must have been called on the fake keyring"
+        storage2 = _bridge.FileTokenStorage("srv", credentials_path=creds, backend="keyring")
+        loaded = asyncio.run(storage2.get_tokens())
+        assert fake_kr.get_calls, "get_password must have been called on the fake keyring"
+
+    assert loaded is not None
+    assert loaded.access_token == "kr_token"
+
+
+def test_keyring_backend_falls_back_to_file_when_unavailable(tmp_path):
+    """When keyring raises on set_password, falls back to hardened file + warns."""
+    from mcp.shared.auth import OAuthToken
+
+    class _BrokenKeyring:
+        def get_password(self, s, u): raise RuntimeError("no keyring")
+        def set_password(self, s, u, p): raise RuntimeError("no keyring")
+
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("srv", credentials_path=creds, backend="keyring")
+
+    with patch.dict("sys.modules", {"keyring": _BrokenKeyring()}), \
+         warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        asyncio.run(storage.set_tokens(OAuthToken(access_token="fb_token", token_type="bearer")))
+
+    assert creds.exists(), "fallback must write to file"
+    assert any("keyring" in str(w.message).lower() for w in caught), "must warn on fallback"
+    assert stat.S_IMODE(os.stat(creds).st_mode) == 0o600, "fallback file must be 0600"

@@ -8,6 +8,7 @@ dependencies = [
     # the official mcp SDK's OAuth/auth-flow behavior; a major bump may shift it.
     "mcp[cli]>=1.27,<2",
     "httpx>=0.28",
+    "keyring>=24",
 ]
 
 [project.scripts]

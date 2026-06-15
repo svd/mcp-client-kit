@@ -22,7 +22,7 @@ access token as valid regardless of real expiry. The proactive branch never fire
 the stale token is sent blind → 401. On 401 the SDK runs `authorization_code`
 (browser), NOT a refresh grant. Net: every fresh CLI invocation that finds an
 expired access token would re-auth in a browser without pre-flight. Conclusion:
-do NOT drop pre-flight. (the server supports refresh grants — the SDK just
+do NOT drop pre-flight. (The server supports refresh grants — the SDK just
 never reaches the code that issues them at cold start.)
 
 The `get_tokens` None-gate (line 125) is redundant but harmless: without pre-flight
@@ -43,7 +43,10 @@ from __future__ import annotations
 import asyncio
 import errno as _errno
 import json
+import os
+import stat
 import time
+import warnings
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -63,6 +66,71 @@ from mcp.shared.auth import (
 )
 
 DEFAULT_CREDS_PATH = Path.home() / ".mcp-client-kit" / "credentials.json"
+DEFAULT_CONFIG_PATH = Path.home() / ".mcp-client-kit" / "config.json"
+
+# Credential backend — selects where OAuth tokens are stored.
+# Resolution order (first wins):
+#   1. CLI --cred-backend flag (passed through to FileTokenStorage)
+#   2. MCP_KIT_CRED_BACKEND env var
+#   3. ~/.mcp-client-kit/config.json  "cred_backend" key
+#   4. default: "file"
+_CRED_BACKEND_ENV = "MCP_KIT_CRED_BACKEND"
+_VALID_BACKENDS: frozenset[str] = frozenset({"file", "keyring", "auto"})
+
+
+def _load_client_config(path: Path | None = None) -> dict:
+    """Load ~/.mcp-client-kit/config.json (or override path). Returns {} if absent/invalid."""
+    target = path or DEFAULT_CONFIG_PATH
+    if not target.exists():
+        return {}
+    try:
+        return json.loads(target.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def resolve_cred_backend(cli_value: str | None = None) -> str:
+    """Return the resolved credential backend name.
+
+    Resolution order: CLI arg → MCP_KIT_CRED_BACKEND env → config file → "file".
+    Raises ValueError for unknown values at any level.
+    """
+    if cli_value is not None:
+        if cli_value not in _VALID_BACKENDS:
+            raise ValueError(
+                f"Unknown cred backend {cli_value!r}. Valid choices: {sorted(_VALID_BACKENDS)}"
+            )
+        return cli_value
+    env = os.environ.get(_CRED_BACKEND_ENV)
+    if env:
+        if env not in _VALID_BACKENDS:
+            raise ValueError(
+                f"{_CRED_BACKEND_ENV}={env!r} unknown. Valid choices: {sorted(_VALID_BACKENDS)}"
+            )
+        return env
+    cfg = _load_client_config()
+    backend = cfg.get("cred_backend")
+    if backend:
+        if backend not in _VALID_BACKENDS:
+            raise ValueError(
+                f"config cred_backend={backend!r} unknown. Valid choices: {sorted(_VALID_BACKENDS)}"
+            )
+        return backend
+    return "file"
+
+
+def _detect_keyring() -> str:
+    """Return 'keyring' if a working OS keyring backend is available, else 'file'."""
+    try:
+        import keyring as _kr
+        ring = _kr.get_keyring()
+        module = getattr(type(ring), "__module__", "") or ""
+        if "fail" in module:
+            return "file"
+        return "keyring"
+    except Exception:
+        return "file"
+
 
 # Named HTTP+OAuth servers are loaded from a user config — never hardcoded, so no
 # org-specific endpoints land in this repo. Search order:
@@ -149,20 +217,114 @@ class ReauthenticationRequired(Exception):
 
 
 class FileTokenStorage(TokenStorage):
-    """File-backed OAuth token + client info store, keyed by server name."""
+    """OAuth token + client info store, keyed by server name.
 
-    def __init__(self, server_name: str, credentials_path: Path = DEFAULT_CREDS_PATH) -> None:
+    Backend selection via the ``backend`` argument (already resolved by
+    ``resolve_cred_backend()`` at construction site):
+
+    - ``"file"``    (default) — hardened plaintext JSON at *credentials_path*
+                    (``chmod 0600`` file, ``0700`` dir, atomic write via tmp file).
+    - ``"keyring"`` — OS keyring (macOS Keychain / Windows Credential Locker /
+                    Linux SecretService). Falls back to the hardened file if no
+                    working backend is available, with a warning.
+    - ``"auto"``    — keyring if ``_detect_keyring()`` finds a working backend,
+                    else file silently.
+
+    The public ``_load()`` / ``_save()`` seam routes to the active backend so
+    ``_pre_flight_refresh`` and ``login()`` need no changes.
+    """
+
+    def __init__(
+        self,
+        server_name: str,
+        credentials_path: Path = DEFAULT_CREDS_PATH,
+        backend: str = "file",
+    ) -> None:
         self._key = server_name
         self._path = credentials_path
+        self._backend = _detect_keyring() if backend == "auto" else backend
 
-    def _load(self) -> dict:
+    # ── File backend ──────────────────────────────────────────────────────────
+
+    def _file_load(self) -> dict:
         if not self._path.exists():
             return {}
+        mode = stat.S_IMODE(os.stat(self._path).st_mode)
+        if mode != 0o600:
+            os.chmod(self._path, 0o600)
+            warnings.warn(
+                f"[mcp-client-kit] {self._path} had permissions {oct(mode)}; "
+                "fixed to 0600.",
+                stacklevel=3,
+            )
         return json.loads(self._path.read_text())
 
+    def _file_save(self, data: dict) -> None:
+        parent = self._path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(parent, 0o700)
+        tmp = self._path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, json.dumps(data, indent=2).encode())
+        except BaseException:
+            # Close and remove the partial tmp so it doesn't accumulate or leak.
+            os.close(fd)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        os.close(fd)
+        os.replace(tmp, self._path)
+
+    # ── Keyring backend ───────────────────────────────────────────────────────
+
+    def _keyring_load(self) -> dict:
+        try:
+            import keyring as _kr  # lazy — tests can monkeypatch sys.modules["keyring"]
+            raw = _kr.get_password("mcp-client-kit", "credentials")
+            return json.loads(raw) if raw else {}
+        except Exception as exc:
+            self._warn_keyring_fallback(str(exc))
+            return self._file_load()
+
+    def _keyring_save(self, data: dict) -> None:
+        try:
+            import keyring as _kr
+            _kr.set_password("mcp-client-kit", "credentials", json.dumps(data, indent=2))
+        except Exception as exc:
+            self._warn_keyring_fallback(str(exc))
+            self._file_save(data)
+
+    def _warn_keyring_fallback(self, reason: str) -> None:
+        """Warn and permanently downgrade to the file backend for this instance.
+
+        Mutation is intentional: after one keyring failure all subsequent
+        _load/_save calls use the hardened file, avoiding repeated failures and
+        warnings within the same process lifetime.
+        """
+        warnings.warn(
+            f"[mcp-client-kit] keyring unavailable ({reason}); "
+            f"falling back to hardened file at {self._path}.",
+            stacklevel=3,
+        )
+        self._backend = "file"
+
+    # ── Dispatcher (public seam used by _pre_flight_refresh and login) ────────
+
+    def _load(self) -> dict:
+        if self._backend == "keyring":
+            return self._keyring_load()
+        return self._file_load()
+
     def _save(self, data: dict) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(data, indent=2))
+        if self._backend == "keyring":
+            self._keyring_save(data)
+        else:
+            self._file_save(data)
+
+    # ── TokenStorage protocol ─────────────────────────────────────────────────
 
     async def get_tokens(self) -> OAuthToken | None:
         data = self._load()
@@ -268,9 +430,15 @@ async def _open_http(url: str, *, headers: dict[str, str] | None = None, auth: h
 
 
 @asynccontextmanager
-async def _http_session(server_name: str, server_url: str, *, client_name: str | None = None):
+async def _http_session(
+    server_name: str,
+    server_url: str,
+    *,
+    client_name: str | None = None,
+    cred_backend: str | None = None,
+):
     """OAuth-authenticated HTTP MCP session. Pre-flight refresh before connecting."""
-    storage = FileTokenStorage(server_name)
+    storage = FileTokenStorage(server_name, backend=resolve_cred_backend(cred_backend))
     await _pre_flight_refresh(server_name, storage)
 
     data = storage._load()
@@ -340,6 +508,7 @@ async def session(
     bearer: str | None = None,
     client_name: str | None = None,
     config_path: str | Path | None = None,
+    cred_backend: str | None = None,
 ):
     """Yield an initialized MCP ClientSession.
 
@@ -362,7 +531,7 @@ async def session(
         async with _bearer_session(target, bearer) as s:
             yield s
     elif resolved_url is not None:
-        async with _http_session(server, resolved_url, client_name=client_name) as s:
+        async with _http_session(server, resolved_url, client_name=client_name, cred_backend=cred_backend) as s:
             yield s
     else:
         # Raw URL, no auth
@@ -383,12 +552,14 @@ class McpBridgeCaller:
         bearer: str | None = None,
         client_name: str | None = None,
         config_path: str | Path | None = None,
+        cred_backend: str | None = None,
     ) -> None:
         self._cmd = cmd
         self._url = url
         self._bearer = bearer
         self._client_name = client_name
         self._config_path = config_path
+        self._cred_backend = cred_backend
 
     async def call(self, server: str, tool: str, arguments: dict) -> Any:
         async with session(
@@ -398,6 +569,7 @@ class McpBridgeCaller:
             bearer=self._bearer,
             client_name=self._client_name,
             config_path=self._config_path,
+            cred_backend=self._cred_backend,
         ) as s:
             result = await s.call_tool(tool, arguments)
             content = [
@@ -479,6 +651,7 @@ async def login(
     url: str | None = None,
     client_name: str | None = None,
     config_path: str | Path | None = None,
+    cred_backend: str | None = None,
 ) -> None:
     """Full browser-based OAuth login for server_name. Caches tokens + token_endpoint.
 
@@ -493,7 +666,7 @@ async def login(
             f"Known: {list(_servers)}"
         )
 
-    storage = FileTokenStorage(server_name, creds_path)
+    storage = FileTokenStorage(server_name, creds_path, backend=resolve_cred_backend(cred_backend))
 
     # Clear existing credentials so we start fresh.
     data = storage._load()
