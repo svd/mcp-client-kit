@@ -160,7 +160,11 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
 def _cmd_discover(ns: argparse.Namespace) -> int:
     """List MCP servers from installed agent host environments."""
     host_filter: list[str] | None = ns.host  # None or list of ids
-    servers = discovery.discover_all(hosts=host_filter)
+    try:
+        servers = discovery.discover_all(hosts=host_filter)
+    except Exception as exc:
+        print(f"[discover] error: {exc}", file=sys.stderr)
+        return 1
 
     if ns.json:
         sys.stdout.write(json.dumps([s.as_dict() for s in servers], indent=2) + "\n")
@@ -178,13 +182,9 @@ def _cmd_discover(ns: argparse.Namespace) -> int:
     for s in servers:
         groups.setdefault(s.host, []).append(s)
 
-    # Determine which host ids to show (respecting filter, plus any unknown hosts)
+    # Determine which host ids to show (respecting filter)
     if host_filter is not None:
         host_ids = [h for h in host_filter if h in groups]
-        # Also include any discovered hosts not in filter list (edge case)
-        for hid in groups:
-            if hid not in host_ids:
-                host_ids.append(hid)
     else:
         host_ids = list(groups.keys())
 
@@ -216,17 +216,13 @@ def _cmd_discover(ns: argparse.Namespace) -> int:
             print(f"  {name_col}{transport_col}{scope_col}{status_label}")
 
             if s.probeable:
-                # Build hint line
-                hint: str | None = None
-                if s.transport == "stdio" and s.command is not None:
-                    cmd_str = s.command
-                    if s.args:
-                        cmd_str += " " + " ".join(s.args)
-                    hint = f'mcp-kit list {s.name} --stdio "{cmd_str}"'
-                elif s.transport in ("http", "sse") and s.url is not None:
-                    hint = f"mcp-kit list {s.name} --url {s.url}"
-                if hint is not None:
-                    print(f"    →  {hint}")
+                if s.transport == "stdio" and s.command:
+                    cmd_str = s.command + (" " + " ".join(s.args) if s.args else "")
+                    print(f'    → mcp-kit list {s.name} --stdio "{cmd_str}"')
+                elif s.transport in ("http", "sse") and s.url:
+                    print(f"    → mcp-kit list {s.name} --url {s.url}")
+                else:
+                    print(f"    (hint unavailable — transport: {s.transport})")
             else:
                 if s.note:
                     print(f"  ⚠  {s.note}")
