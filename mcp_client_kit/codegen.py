@@ -482,6 +482,20 @@ def detect_discriminators(tools: list[dict]) -> dict[str, list[str]]:
     }
 
 
+def merge_skeletons(skeletons: list[dict]) -> dict:
+    """Union per-tool skeleton dicts by tool name; later entries win.
+
+    Used by `mcp-kit merge` to consolidate per-tool part files into a single
+    shapes.json, and by `_load_shapes` as an in-memory fallback when no merged
+    file exists yet.  Distinct from merge_shapes(), which merges observed response
+    shapes within one tool's probe calls.
+    """
+    out: dict = {}
+    for sk in skeletons:
+        out.update(sk)
+    return out
+
+
 def probe_skeleton(tool: str, args_list: list[dict], shapes: list[Any]) -> dict:
     """Build a shape-spec skeleton from N probe calls.
 

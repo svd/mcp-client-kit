@@ -1,5 +1,6 @@
 deep-research-wf_*.js
 *.probe-raw.json
+*.shapes.json.parts/
 *.pyc
 __pycache__/
 .venv/

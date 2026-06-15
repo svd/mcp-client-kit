@@ -12,9 +12,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote as _url_quote
 
 from . import _bridge, codegen, discovery
 
@@ -64,6 +67,25 @@ async def _probe(
     return codegen.summarize_shape(raw)
 
 
+async def _call(
+    server: str,
+    tool: str,
+    args: dict,
+    *,
+    cmd: str | None = None,
+    url: str | None = None,
+    bearer: str | None = None,
+    client_name: str | None = None,
+    config_path: str | None = None,
+    cred_backend: str | None = None,
+) -> Any:
+    caller = _bridge.McpBridgeCaller(
+        cmd=cmd, url=url, bearer=bearer, client_name=client_name, config_path=config_path,
+        cred_backend=cred_backend,
+    )
+    return await caller.call(server, tool, args)
+
+
 def _server_stem(server: str) -> str:
     """Return a filesystem-safe stem for a server identifier (name or URL)."""
     if server.startswith(("http://", "https://")):
@@ -76,8 +98,43 @@ def _server_stem(server: str) -> str:
     return stem
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically via a pid-unique temp file + os.replace.
+
+    Safe on all OS (Windows, macOS, Linux) — os.replace is atomic when src and
+    dst are on the same filesystem, which is always true here.  Using the pid in
+    the temp name means concurrent probe processes for the *same* tool each get
+    their own staging file; the last os.replace wins (fine — same-tool last-writer
+    semantics are acceptable).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _parts_dir(target: Path) -> Path:
+    """Return the parts directory for a shapes target path.
+
+    e.g. radar.shapes.json  →  radar.shapes.json.parts/
+    """
+    return target.with_name(target.name + ".parts")
+
+
 def _load_shapes(ns: argparse.Namespace) -> dict | None:
-    """Load the shape-spec sidecar: explicit --shapes, else <server>.shapes.json beside --out."""
+    """Load the shape-spec sidecar: explicit --shapes, else <server>.shapes.json beside --out.
+
+    Fallback: if the shapes file is absent but its .parts/ directory exists (i.e.
+    probes ran but `mcp-kit merge` was not yet called), merge the parts in-memory
+    so `codegen` still works without requiring an explicit merge step.
+    """
     path = None
     if ns.shapes:
         path = Path(ns.shapes)
@@ -85,6 +142,20 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
         sibling = Path(ns.out).with_name(f"{_server_stem(ns.server)}.shapes.json")
         if sibling.is_file():
             path = sibling
+        else:
+            # In-memory fallback: merge any parts that exist.
+            parts_d = _parts_dir(sibling)
+            if parts_d.is_dir():
+                parts = sorted(parts_d.glob("*.json"))
+                if parts:
+                    skeletons = [json.loads(p.read_text()) for p in parts]
+                    shapes = codegen.merge_skeletons(skeletons)
+                    print(
+                        f"[codegen] shapes: {parts_d}/ ({len(shapes)} tool(s), "
+                        "in-memory merge — run `mcp-kit merge` to persist)",
+                        file=sys.stderr,
+                    )
+                    return shapes
     if path is None:
         return None
     shapes = json.loads(path.read_text())
@@ -150,8 +221,12 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     skeleton = codegen.probe_skeleton(ns.tool, args_list, shapes)
     out = json.dumps(skeleton, indent=2)
     if ns.emit_shape:
-        Path(ns.emit_shape).write_text(out + "\n")
-        print(f"[probe] wrote skeleton {ns.emit_shape}", file=sys.stderr)
+        target = Path(ns.emit_shape)
+        parts_d = _parts_dir(target)
+        part = parts_d / (_url_quote(ns.tool, safe="") + ".json")
+        _atomic_write_text(part, out + "\n")
+        print(f"[probe] wrote part {part}", file=sys.stderr)
+        print(f"[probe] run `mcp-kit merge {ns.server}` to consolidate into {target}", file=sys.stderr)
     else:
         sys.stdout.write(out + "\n")
 
@@ -163,6 +238,84 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
             val = next(iter(values))
             print(f"[probe] ⚠  {key} probed as {val!r} only — response shape is variant-specific.", file=sys.stderr)
             print(f"[probe]    Do NOT emit a single-variant model. Probe every value or use a base model (SKILL step 4).", file=sys.stderr)
+
+    return 0
+
+
+def _cmd_call(ns: argparse.Namespace) -> int:
+    """Make one live tool call and write the raw parsed payload to --out.
+
+    Unlike `probe`, this preserves the full response — values, ids, etc.
+    Use it for bootstrapping (e.g. call a no-arg whoami first to get real ids)
+    or inspecting a tool's actual output.  The --out file is required to avoid
+    flooding model context with large payloads; use a *.probe-raw.json name
+    so it stays git-ignored.
+    """
+    cmd = getattr(ns, "stdio", None)
+    try:
+        args: dict = json.loads(ns.args) if ns.args else {}
+    except json.JSONDecodeError as exc:
+        print(f"[call] error: --args must be valid JSON ({exc})", file=sys.stderr)
+        return 1
+    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
+                cred_backend=ns.cred_backend)
+
+    print(f"[call] {ns.server}.{ns.tool} (live) …", file=sys.stderr)
+    raw = asyncio.run(_call(ns.server, ns.tool, args, cmd=cmd, **conn))
+
+    text = raw if isinstance(raw, str) else json.dumps(raw, indent=2)
+    out = Path(ns.out)
+    _atomic_write_text(out, text + "\n")
+
+    kb = len(text.encode()) / 1024
+    print(f"[call] wrote raw payload ({kb:.1f} KB) to {out}", file=sys.stderr)
+    print(
+        "[call] ⚠  raw payload may contain real ids/PII — use a *.probe-raw.json name (git-ignored).",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _cmd_merge(ns: argparse.Namespace) -> int:
+    """Consolidate per-tool part files into a single <server>.shapes.json.
+
+    Probing in parallel writes one part file per tool under
+    <target>.parts/<tool>.json.  This command merges all parts into the
+    committed, hand-editable shapes sidecar, preserving any tool entries that
+    were NOT re-probed (i.e. already present in an existing shapes.json and
+    absent from the parts dir).
+    """
+    target = Path(ns.out) if ns.out else Path(f"{_server_stem(ns.server)}.shapes.json")
+    parts_d = _parts_dir(target)
+
+    if not parts_d.is_dir():
+        print(
+            f"[merge] no parts dir {parts_d} — nothing to merge"
+            + (" (probed into a subfolder? pass --out <dir>/<server>.shapes.json)" if not ns.out else ""),
+            file=sys.stderr,
+        )
+        return 0
+
+    parts = sorted(parts_d.glob("*.json"))
+    if not parts:
+        print(f"[merge] parts dir {parts_d} is empty — nothing to merge", file=sys.stderr)
+        return 0
+
+    # Load base (existing shapes.json) so hand-edited entries for un-probed
+    # tools are preserved.  Parts for re-probed tools override the base.
+    base: dict = {}
+    if target.is_file():
+        base = json.loads(target.read_text())
+        print(f"[merge] base: {target} ({len(base)} tool(s))", file=sys.stderr)
+
+    skeletons = [base] + [json.loads(p.read_text()) for p in parts]
+    merged = codegen.merge_skeletons(skeletons)
+    _atomic_write_text(target, json.dumps(merged, indent=2) + "\n")
+    print(f"[merge] wrote {target} ({len(merged)} tool(s))", file=sys.stderr)
+
+    if not ns.keep_parts:
+        shutil.rmtree(parts_d)
+        print(f"[merge] removed {parts_d}", file=sys.stderr)
 
     return 0
 
@@ -312,6 +465,31 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(pr)
     pr.set_defaults(func=_cmd_probe)
+
+    cl = sub.add_parser("call", help="live-call a tool and write the raw payload to --out")
+    cl.add_argument("server", help="server name (e.g. radar) or URL")
+    cl.add_argument("tool", help="tool to call live")
+    cl.add_argument("--args", metavar="JSON", default=None,
+                    help="JSON args for the tool call (default: {})")
+    cl.add_argument("--out", required=True, metavar="FILE",
+                    help="write raw payload here; use a *.probe-raw.json name — git-ignored")
+    cl.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    _add_conn_args(cl)
+    cl.set_defaults(func=_cmd_call)
+
+    mg = sub.add_parser("merge", help="consolidate per-tool probe parts into <server>.shapes.json")
+    mg.add_argument("server", help="server name (e.g. radar) or URL")
+    mg.add_argument(
+        "--out",
+        help=(
+            "target shapes file (default: <server>.shapes.json in CWD). "
+            "MUST match the path passed to probe --emit-shape when probing into a subfolder, "
+            "e.g. --out github/github.shapes.json"
+        ),
+    )
+    mg.add_argument("--keep-parts", action="store_true",
+                    help="keep the .parts/ directory after merging (default: remove)")
+    mg.set_defaults(func=_cmd_merge)
 
     ls = sub.add_parser("list", help="list tools for a server as JSON [{name, description}]")
     ls.add_argument("server", help="server name (e.g. radar) or URL")

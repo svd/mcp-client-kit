@@ -73,19 +73,33 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
       *polymorphic-suspect* and must be resolved in step 4 before the shape-spec is
       considered complete.
 
-3. **Probe each selected tool → skeleton.**
+3. **Probe each selected tool → skeleton (parallel-safe).**
+
+   First, establish `<shapes-path>` — the consolidated shapes sidecar.  It must sit
+   **beside the generated module** so `mcp-kit codegen` auto-detects it:
+   - CWD output (default): `<shapes-path>` = `<server>.shapes.json`
+   - Subfolder output (e.g. `github/github.py`): `<shapes-path>` = `github/github.shapes.json`
+
+   Use the **same `<shapes-path>` value** in every probe (step 3), the merge (step 3b),
+   and codegen `--shapes` if you pass it explicitly.
+
    ```
-   Probe each tool selected in step 2. See step 2 for which tools are in scope.
+   # Probing is now parallel-safe.  Each invocation writes a per-tool part file
+   # under <shapes-path>.parts/ — distinct tools never touch the same file,
+   # so concurrent probe processes cannot clobber each other.
 
-   # single probe (original behaviour)
-   mcp-kit probe <server> <tool> --args '<sample json>' --emit-shape <server>.shapes.json
+   # single probe
+   mcp-kit probe <server> <tool> --args '<sample json>' --emit-shape <shapes-path>
 
-   # multi-probe: repeat --args for each input; shapes are deep-merged
+   # multi-probe: repeat --args for each input; shapes are deep-merged within one probe
    mcp-kit probe <server> <tool> \
      --args '{"entityId":"<id1>","entityType":1}' \
      --args '{"entityId":"<id2>","entityType":1}' \
-     --emit-shape <server>.shapes.json
+     --emit-shape <shapes-path>
    ```
+   Part files land at `<shapes-path>.parts/<tool>.json` (git-ignored).
+   You may probe multiple tools in parallel; all parts will be preserved.
+   After probing is done, run step 3b to consolidate.
    Each `--args` makes one live call. The observed shapes are **deep-merged**: keys are
    unioned (a key absent from some probes is kept — `total=False` covers it), type
    conflicts widen (`str`+`NoneType` → `str | None`; `int`+`float` → `float`; other
@@ -109,7 +123,10 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
    `get_entity_fields` per `entityType`, `get_radar_glossary`); (c) `AskUserQuestion`
    if not discoverable from available tools.
 
-   Sample args may need bootstrapping (e.g. call a no-arg `whoami` first to get real ids).
+   Sample args may need bootstrapping (e.g. a real id before probing `get_entity`). Use
+   `mcp-kit call <server> whoami --out <server>.probe-raw.json` to make a live call and
+   capture the **raw** payload, then read the ids from that file. `mcp-kit probe` emits
+   only the response *shape* (no values) and cannot supply ids.
 
    **Security: the skeleton records live `probed_args` verbatim — real ids, names, possibly
    PII.** With multi-probe this is a *list* of arg-dicts; scrub **every element** before
@@ -119,6 +136,25 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
    was probed as `int` and the response *shape* — never the sample values. If you keep the
    raw responses for reference, write them to `<server>.probe-raw.json` (git-ignored), not
    into the shape-spec.
+
+3b. **Consolidate parts → shapes.json.**
+   ```
+   mcp-kit merge <server> --out <shapes-path>
+   ```
+   **`--out <shapes-path>` is required when `<shapes-path>` is not in CWD** (e.g. a
+   subfolder).  It must exactly match the `--emit-shape` value from step 3 — this is
+   how the tool locates the parts directory (`<shapes-path>.parts/`).
+
+   Merges all part files into `<shapes-path>`, then removes the parts directory.
+   Run once after all probes in step 3 finish.
+
+   - Existing entries in `<shapes-path>` for tools that were **not** re-probed are
+     preserved (hand edits survive across partial re-probes).
+   - Parts for re-probed tools overwrite the corresponding base entry.
+   - Use `--keep-parts` to retain the parts directory for inspection.
+   - `mcp-kit codegen` will also read parts directly (in-memory merge) if the merged file
+     is absent, so you can skip 3b during rapid iteration — but run it before committing
+     so the repo contains a single, hand-editable artifact.
 
 4. **Edit the shape-spec — THIS is the judgment.** For each tool entry:
    - **`unwrap`**: set the key path to the *real record*, stripping vendor envelopes.
@@ -164,6 +200,12 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
    hand-built wrapper exists, diff the generated unwrap against it as an oracle.
 
 ## Guards (do not violate)
+
+- **Only mcp-kit talks to the server.** Every live interaction — `list`, `probe`,
+  `call`, bootstrap, inspect — goes through `mcp-kit`. Never shell out to `curl`, `gh`,
+  `httpie`, or raw `python` HTTP. mcp-kit owns auth (browser OAuth + silent token
+  refresh); any other client is unauthenticated, leaks the bearer token, or both.
+  Need a raw payload? That's `mcp-kit call … --out *.probe-raw.json` (git-ignored).
 
 - **Probing is a live call — mutating tools mutate.** The default selects every
   tool, but probing a `create`/`update`/`delete`/`send` (etc.) tool executes it for
