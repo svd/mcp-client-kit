@@ -58,7 +58,7 @@ class DiscoveredServer:
     """URL for http/sse transport."""
 
     scope: str | None = None
-    """Source scope label (e.g. ``"User config"``, ``"Project .mcp.json"``)."""
+    """Source scope label (e.g. ``"User config (file)"``, ``"Project config (file)"``)."""
 
     status: str | None = None
     """Connection status string (e.g. ``"Connected"``, ``"Needs authentication"``)."""
@@ -286,7 +286,14 @@ class ClaudeCodeProvider:
     # ------------------------------------------------------------------
 
     def _discover_via_cli(self) -> list[DiscoveredServer] | None:
-        """Return servers from ``claude mcp list/get`` or None on failure."""
+        """Return servers from ``claude mcp list/get`` or None on failure.
+
+        WARNING: ``claude mcp list`` runs live health-checks and blocks
+        indefinitely when invoked from a subprocess without a tty. ``discover()``
+        deliberately does NOT call this — it uses the JSON path. Do not re-wire
+        ``discover()`` to call this without a tty guard or a hard subprocess
+        timeout, or non-interactive callers (CI, daemons) will hang.
+        """
         list_output = self._run(["claude", "mcp", "list"])
         if list_output is None:
             return None
@@ -322,13 +329,24 @@ class ClaudeCodeProvider:
         except (json.JSONDecodeError, OSError):
             return []
 
-        # Top-level mcpServers — user scope (higher precedence).
-        user_servers: dict[str, dict] = raw.get("mcpServers") or {}
+        if not isinstance(raw, dict):
+            return []
+
+        # Top-level mcpServers — user scope (higher precedence). Guard every
+        # level against non-dict values: a malformed config (e.g. an array or
+        # scalar where a mapping is expected) must not crash discovery.
+        raw_user = raw.get("mcpServers")
+        user_servers: dict[str, dict] = raw_user if isinstance(raw_user, dict) else {}
 
         # Project-scope: keyed by absolute cwd path.
         cwd_key = str(Path.cwd())
-        project_block = (raw.get("projects") or {}).get(cwd_key, {})
-        project_servers: dict[str, dict] = project_block.get("mcpServers") or {}
+        raw_projects = raw.get("projects")
+        projects = raw_projects if isinstance(raw_projects, dict) else {}
+        project_block = projects.get(cwd_key)
+        if not isinstance(project_block, dict):
+            project_block = {}
+        raw_project = project_block.get("mcpServers")
+        project_servers: dict[str, dict] = raw_project if isinstance(raw_project, dict) else {}
 
         # Merge: user scope wins on name conflicts.
         merged: dict[str, tuple[dict, str]] = {}  # name -> (entry, scope_label)

@@ -235,6 +235,26 @@ def test_cli_json_fallback(tmp_path):
     assert "local-tool" not in by_name
 
 
+def test_json_malformed_mcpservers_does_not_crash(tmp_path):
+    # Non-dict where a mapping is expected at every level must yield [] —
+    # truthy non-dict values previously slipped past `or {}` and crashed on
+    # .items().
+    bad = {
+        "mcpServers": ["not", "a", "dict"],
+        "projects": "also-not-a-dict",
+    }
+    (tmp_path / ".claude.json").write_text(json.dumps(bad))
+    provider = ClaudeCodeProvider(_run=_make_run({}), _home=tmp_path)
+    assert provider.discover() == []
+
+
+def test_json_non_object_root_does_not_crash(tmp_path):
+    # A JSON array at the root (valid JSON, wrong shape) must not crash.
+    (tmp_path / ".claude.json").write_text("[1, 2, 3]")
+    provider = ClaudeCodeProvider(_run=_make_run({}), _home=tmp_path)
+    assert provider.discover() == []
+
+
 # ---------------------------------------------------------------------------
 # Tests: available()
 # ---------------------------------------------------------------------------
