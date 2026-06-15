@@ -1,0 +1,5 @@
+{
+  "name": "mcp-client-kit",
+  "description": "Generate typed Python wrappers for MCP servers (codegen skill + CLI).",
+  "version": "0.0.1"
+}
