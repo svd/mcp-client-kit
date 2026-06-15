@@ -450,16 +450,10 @@ def detect_discriminators(tools: list[dict]) -> dict[str, list[str]]:
 
     Returns:
         Mapping of candidate param name to sorted list of tool names that carry
-        it. Only params appearing in ≥2 tools are returned. A param qualifies if
-        it is a scalar (integer/number/string) AND matches at least one of:
-        - name is in the heuristic set (case-insensitive), or
-        - carries a non-empty enum in its schema, or
-        - appears as a scalar param in ≥2 tools (shared-scalar heuristic).
+        it. Returns all scalar (integer/number/string) params that appear in ≥2
+        tools. Heuristic-name and enum-carrying params naturally satisfy this
+        criterion when shared across tools.
     """
-    _HEURISTIC = {
-        "entitytype", "type", "kind", "category",
-        "entity_type", "objecttype", "resourcetype",
-    }
     _SCALAR_TYPES = {"integer", "number", "string"}
 
     # candidates[param_name] = [tool_name, ...]

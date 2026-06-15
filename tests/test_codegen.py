@@ -593,8 +593,8 @@ def test_detect_discriminators_no_qualifying_params():
     assert codegen.detect_discriminators(tools) == {}
 
 
-def test_detect_discriminators_case_insensitive_name_match():
-    """Case-insensitive heuristic: EntityType (capital E) still matches."""
+def test_detect_discriminators_uppercase_param_name_shared_across_tools():
+    """Param with capital-letter name (EntityType) is returned when shared across ≥2 tools."""
     tools = [
         _make_tool("tool_a", {"EntityType": {"type": "integer"}}),
         _make_tool("tool_b", {"EntityType": {"type": "integer"}}),
