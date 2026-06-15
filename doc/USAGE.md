@@ -146,6 +146,67 @@ type conflicts widened). Use when fields are nullable or a tool has multiple res
 committing, scrub `probed_args` — replace real ids/names/PII with placeholders like
 `"<example-id>"`. Real values survive deletion via git history.
 
+Once generated, see [§ Using the generated wrappers](#using-the-generated-wrappers) to call them.
+
+---
+
+## Using the generated wrappers
+
+Generated functions are `async`, take `caller` as the first positional argument, and
+require all tool arguments as **keyword arguments**.
+
+```python
+async def get_me(caller: McpCaller) -> GitHubUser: ...
+async def list_issues(caller: McpCaller, *, owner: str, repo: str) -> list[IssueSummary]: ...
+```
+
+Construct a `McpBridgeCaller` — the concrete caller that handles auth and transport —
+and pass it when calling any generated function.
+
+**Bearer / PAT example** (e.g. GitHub MCP at `https://api.githubcopilot.com/mcp/`):
+
+```python
+import asyncio
+import os
+from mcp_client_kit import McpBridgeCaller
+import github  # generated: mcp-kit codegen github --out github.py --bearer "$GITHUB_TOKEN"
+
+async def main():
+    # caller carries auth/transport; the wrapper module stays backend-agnostic.
+    caller = McpBridgeCaller(
+        url="https://api.githubcopilot.com/mcp/",
+        bearer=os.environ["GITHUB_TOKEN"],  # GitHub PAT
+    )
+    me = await github.get_me(caller)
+    issues = await github.list_issues(caller, owner="octocat", repo="hello-world")
+    print(me, issues)
+
+asyncio.run(main())
+```
+
+**OAuth example** (server logged in via `mcp-kit login`):
+
+```python
+caller = McpBridgeCaller(url="https://mcp.example.com/mcp/v1")
+# stored token is picked up automatically from ~/.mcp-client-kit/credentials.json
+```
+
+`McpBridgeCaller` kwargs mirror the CLI connection flags — `url=`, `bearer=` (PAT),
+`cmd=` (stdio), `config_path=`, `client_name=`. One instance is reusable across
+multiple calls and multiple servers (the `SERVER` constant is baked into each
+generated module, not into the caller).
+
+For typing your own caller (e.g. in tests), implement `McpCaller`:
+
+```python
+from mcp_client_kit import McpCaller
+from typing import Any
+
+class FakeCaller:
+    async def call(self, server: str, tool: str, arguments: dict) -> Any:
+        return {"login": "octocat"}
+```
+
 ---
 
 ## Troubleshooting
