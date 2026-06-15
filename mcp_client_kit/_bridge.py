@@ -1,8 +1,7 @@
-"""Standalone MCP backend — no mcp_client dependency.
+"""Standalone MCP backend.
 
-Drop-in replacement for the temporary mcp_client bridge. Everything above
-this file (generated wrappers, codegen, seam) is unchanged — only this backend
-swaps. Auth uses the official `mcp` SDK OAuthClientProvider with a thin
+Everything above this file (generated wrappers, codegen, seam) is unchanged —
+only this backend swaps. Auth uses the official `mcp` SDK OAuthClientProvider with a thin
 FileTokenStorage that stores an absolute `expires_at` per token.
 
 Pre-flight refresh: `get_tokens()` returns None for a near/expired access token
@@ -203,7 +202,7 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     get_tokens() returns a live credential instead of None. Load-bearing: the
     official `mcp` SDK's silent refresh branch is unreachable at cold start, so
     without this the SDK sends the stale token blind → 401 → browser re-auth.
-    Mirrors the internal-project mcp_client pre-flight. See the module docstring
+    Mirrors the mcp_client pre-flight. See the module docstring
     for the verified mechanism and version caveat.
     """
     data = storage._load()

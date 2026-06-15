@@ -168,7 +168,7 @@ def test_session_oauth_path_unchanged_without_bearer():
 # McpBridgeCaller: bearer wired through to session()
 # ---------------------------------------------------------------------------
 
-def test_internal_caller_threads_bearer_to_session():
+def test_mcp_bridge_caller_threads_bearer_to_session():
     """McpBridgeCaller(bearer=…).call() must forward the bearer kwarg to session()."""
     session_kwargs: dict = {}
 
@@ -190,7 +190,7 @@ def test_internal_caller_threads_bearer_to_session():
     assert result == {"ok": True}
 
 
-def test_internal_caller_bearer_none_by_default():
+def test_mcp_bridge_caller_bearer_none_by_default():
     """McpBridgeCaller with no bearer= must pass bearer=None (not absent key) to session."""
     session_kwargs: dict = {}
 
