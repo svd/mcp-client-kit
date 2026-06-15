@@ -21,7 +21,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Protocol, runtime_checkable
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +78,7 @@ class DiscoveredServer:
 # HostProvider protocol
 # ---------------------------------------------------------------------------
 
+@runtime_checkable
 class HostProvider(Protocol):
     """Protocol for host-environment discovery adapters."""
 
@@ -369,7 +370,9 @@ class ClaudeCodeProvider:
             args = []
 
         raw_env = entry.get("env") or {}
-        env = {str(k): str(v) for k, v in raw_env.items() if isinstance(v, (str, int, float))}
+        if not isinstance(raw_env, dict):
+            raw_env = {}
+        env = {str(k): str(v) for k, v in raw_env.items() if isinstance(v, (str, int, float)) and not isinstance(v, bool)}
 
         is_connector = _is_claude_ai_connector(name, scope)
         return DiscoveredServer(
