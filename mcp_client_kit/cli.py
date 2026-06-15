@@ -154,6 +154,16 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         print(f"[probe] wrote skeleton {ns.emit_shape}", file=sys.stderr)
     else:
         sys.stdout.write(out + "\n")
+
+    _DISCRIMINATOR_KEYS = {"entitytype", "type", "kind", "category", "entity_type", "objecttype", "resourcetype"}
+    all_keys: set[str] = set().union(*(a.keys() for a in args_list))
+    for key in sorted(all_keys):
+        values = {args[key] for args in args_list if key in args}
+        if len(values) == 1 and key.lower() in _DISCRIMINATOR_KEYS:
+            val = next(iter(values))
+            print(f"[probe] ⚠  {key} probed as {val!r} only — response shape is variant-specific.", file=sys.stderr)
+            print(f"[probe]    Do NOT emit a single-variant model. Probe every value or use a base model (SKILL step 4).", file=sys.stderr)
+
     return 0
 
 
@@ -240,6 +250,14 @@ def _cmd_list(ns: argparse.Namespace) -> int:
     tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
     out = [{"name": t["name"], "description": t.get("description") or ""} for t in tools]
     sys.stdout.write(json.dumps(out, indent=2) + "\n")
+
+    candidates = codegen.detect_discriminators(tools)
+    if candidates:
+        print("[list] ⚠  discriminator candidates (response shape varies by these args):", file=sys.stderr)
+        for param, tool_names in candidates.items():
+            print(f"[list]   {param} → {', '.join(tool_names)}", file=sys.stderr)
+        print("[list]   Probe EACH value or use a base model — do NOT type from one probe. See SKILL step 4.", file=sys.stderr)
+
     return 0
 
 
