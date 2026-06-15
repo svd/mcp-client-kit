@@ -20,6 +20,32 @@ uv run mcp-kit codegen radar --out radar.py
 uv run mcp-kit codegen radar --probe get_entity --probe-args '{"entityId":"…","entityType":1}'
 ```
 
+`mcp-kit discover` lists MCP servers configured in installed agent hosts and prints a ready-to-run `mcp-kit list` command for each server it can connect to.
+
+```
+uv run mcp-kit discover
+uv run mcp-kit discover --json
+uv run mcp-kit discover --host claude-code
+```
+
+```
+=== Claude Code ===
+
+  codegraph              stdio      User config      Connected
+    → mcp-kit list codegraph --stdio "codegraph serve --mcp"
+
+  epam-radar             http       User config      Needs authentication
+    → mcp-kit list epam-radar --url https://mcp.epam.com/mcp/radar
+
+  claude.ai Context7     http       User config      Connected
+  ⚠  claude.ai connector — managed OAuth, not probeable by mcp-kit
+```
+
+Limitations:
+
+- **claude.ai connectors** (e.g. Context7, Microsoft 365) appear in output but are marked non-probeable — they use managed OAuth that mcp-kit cannot replicate.
+- **Fallback path** (when `claude` binary is absent): only reads `~/.claude.json`; plugin-provided servers and claude.ai connectors will be missing.
+
 Not yet built: the skill layer (judgment pass — unwrap helpers, applying probe
 findings, tool curation), `--check` drift mode. Auth is done:
 `mcp_client_kit/_bridge.py` on the official `mcp` SDK (see VERDICT.md §Correction).
