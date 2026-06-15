@@ -54,7 +54,8 @@ import httpx
 from mcp import ClientSession
 from mcp.client.auth import OAuthClientProvider, TokenStorage
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.shared.auth import (
     OAuthClientInformationFull,
     OAuthClientMetadata,
@@ -254,6 +255,19 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
 
 
 @asynccontextmanager
+async def _open_http(url: str, *, headers: dict[str, str] | None = None, auth: httpx.Auth | None = None):
+    """Open a StreamableHTTP transport, yielding (read, write, get_session_id).
+
+    Wraps ``streamable_http_client`` (the non-deprecated successor to the
+    removed ``streamablehttp_client``) with an MCP-default httpx client so
+    callers can still inject headers or an auth handler.
+    """
+    async with create_mcp_http_client(headers=headers, auth=auth) as client:
+        async with streamable_http_client(url, http_client=client) as streams:
+            yield streams
+
+
+@asynccontextmanager
 async def _http_session(server_name: str, server_url: str, *, client_name: str | None = None):
     """OAuth-authenticated HTTP MCP session. Pre-flight refresh before connecting."""
     storage = FileTokenStorage(server_name)
@@ -286,7 +300,7 @@ async def _http_session(server_name: str, server_url: str, *, client_name: str |
         callback_handler=_no_callback,
     )
 
-    async with streamablehttp_client(server_url, auth=provider) as (read, write, _):
+    async with _open_http(server_url, auth=provider) as (read, write, _):
         async with ClientSession(read, write) as s:
             await s.initialize()
             yield s
@@ -311,7 +325,7 @@ async def _bearer_session(url: str, bearer: str):
     The token is held only in memory and never written to disk.
     """
     headers = {"Authorization": f"Bearer {bearer}"}
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
+    async with _open_http(url, headers=headers) as (read, write, _):
         async with ClientSession(read, write) as s:
             await s.initialize()
             yield s
@@ -352,7 +366,7 @@ async def session(
             yield s
     else:
         # Raw URL, no auth
-        async with streamablehttp_client(server) as (read, write, _):
+        async with _open_http(server) as (read, write, _):
             async with ClientSession(read, write) as s:
                 await s.initialize()
                 yield s
@@ -511,7 +525,7 @@ async def login(
     )
 
     try:
-        async with streamablehttp_client(server_url, auth=provider) as (read, write, _):
+        async with _open_http(server_url, auth=provider) as (read, write, _):
             async with ClientSession(read, write) as s:
                 await s.initialize()
 

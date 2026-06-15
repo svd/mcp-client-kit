@@ -1,7 +1,7 @@
 """Unit tests for _bridge transport routing.
 
 Tests the bearer-token path in session() and McpBridgeCaller without making
-real network connections. We mock streamablehttp_client and patch the internal
+real network connections. We mock _open_http and patch the internal
 async context-manager helpers so routing logic is exercised in pure Python.
 
 Async helpers are invoked via asyncio.run() (matching the project convention —
@@ -38,7 +38,7 @@ def _make_mock_session(tool_response: dict | None = None):
 # ---------------------------------------------------------------------------
 
 def test_bearer_session_passes_authorization_header():
-    """_bearer_session must call streamablehttp_client with Authorization: Bearer <tok>."""
+    """_bearer_session must call _open_http with Authorization: Bearer <tok>."""
     captured: dict = {}
 
     @asynccontextmanager
@@ -51,7 +51,7 @@ def test_bearer_session_passes_authorization_header():
     mock_s = _make_mock_session()
 
     async def run():
-        with patch("mcp_client_kit._bridge.streamablehttp_client", fake_http), \
+        with patch("mcp_client_kit._bridge._open_http", fake_http), \
              patch("mcp_client_kit._bridge.ClientSession") as mock_cs:
             mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_s)
             mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -75,7 +75,7 @@ def test_bearer_session_does_not_touch_file_storage(tmp_path):
     mock_s = _make_mock_session()
 
     async def run():
-        with patch("mcp_client_kit._bridge.streamablehttp_client", fake_http), \
+        with patch("mcp_client_kit._bridge._open_http", fake_http), \
              patch("mcp_client_kit._bridge.ClientSession") as mock_cs, \
              patch("mcp_client_kit._bridge.DEFAULT_CREDS_PATH", creds):
             mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_s)
@@ -207,3 +207,36 @@ def test_mcp_bridge_caller_bearer_none_by_default():
     asyncio.run(run())
     assert "bearer" in session_kwargs
     assert session_kwargs["bearer"] is None
+
+
+# ---------------------------------------------------------------------------
+# session() raw URL path: no auth, no config entry
+# ---------------------------------------------------------------------------
+
+def test_session_raw_url_uses_open_http_with_no_auth():
+    """session(raw_url) with no bearer/OAuth must call _open_http with no headers or auth."""
+    captured: dict = {}
+
+    @asynccontextmanager
+    async def fake_open_http(url, *, headers=None, auth=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["auth"] = auth
+        read, write = MagicMock(), MagicMock()
+        yield read, write, None
+
+    mock_s = _make_mock_session()
+
+    async def run():
+        with patch("mcp_client_kit._bridge._open_http", fake_open_http), \
+             patch("mcp_client_kit._bridge.ClientSession") as mock_cs, \
+             patch("mcp_client_kit._bridge.servers", return_value={}):
+            mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_s)
+            mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
+            async with _bridge.session("https://public.example.com/mcp"):
+                pass
+
+    asyncio.run(run())
+    assert captured["url"] == "https://public.example.com/mcp"
+    assert captured["headers"] is None, "unauthenticated path must not inject headers"
+    assert captured["auth"] is None, "unauthenticated path must not inject auth"
