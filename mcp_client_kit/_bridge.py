@@ -305,17 +305,35 @@ async def _stdio_session(cmd: str):
 
 
 @asynccontextmanager
+async def _bearer_session(url: str, bearer: str):
+    """HTTP MCP session authenticated with a static Bearer token (e.g. a GitHub PAT).
+
+    Bypasses OAuth entirely — the caller is responsible for providing a valid token.
+    The token is held only in memory and never written to disk.
+    """
+    headers = {"Authorization": f"Bearer {bearer}"}
+    async with streamablehttp_client(url, headers=headers) as (read, write, _):
+        async with ClientSession(read, write) as s:
+            await s.initialize()
+            yield s
+
+
+@asynccontextmanager
 async def session(
     server: str,
     *,
     cmd: str | None = None,
     url: str | None = None,
+    bearer: str | None = None,
     client_name: str | None = None,
     config_path: str | Path | None = None,
 ):
     """Yield an initialized MCP ClientSession.
 
     cmd: if provided, use stdio transport (no auth).
+    bearer: static Bearer token — routes through HTTP with Authorization header,
+        bypassing OAuth. Intended for APIs that use PATs (e.g. GitHub). Takes
+        precedence over OAuth when both url and bearer are provided.
     url: inline server URL — routes through HTTP + OAuth keyed by `server` name,
         overriding config. client_name: inline OAuth client_name override.
     config_path: read the server registry from this file instead of the default search.
@@ -325,6 +343,10 @@ async def session(
     resolved_url = url or _servers.get(server)
     if cmd is not None:
         async with _stdio_session(cmd) as s:
+            yield s
+    elif bearer is not None:
+        target = resolved_url or server
+        async with _bearer_session(target, bearer) as s:
             yield s
     elif resolved_url is not None:
         async with _http_session(server, resolved_url, client_name=client_name) as s:
@@ -345,11 +367,13 @@ class McpBridgeCaller:
         *,
         cmd: str | None = None,
         url: str | None = None,
+        bearer: str | None = None,
         client_name: str | None = None,
         config_path: str | Path | None = None,
     ) -> None:
         self._cmd = cmd
         self._url = url
+        self._bearer = bearer
         self._client_name = client_name
         self._config_path = config_path
 
@@ -358,6 +382,7 @@ class McpBridgeCaller:
             server,
             cmd=self._cmd,
             url=self._url,
+            bearer=self._bearer,
             client_name=self._client_name,
             config_path=self._config_path,
         ) as s:

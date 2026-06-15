@@ -24,11 +24,12 @@ async def _list_tools(
     *,
     cmd: str | None = None,
     url: str | None = None,
+    bearer: str | None = None,
     client_name: str | None = None,
     config_path: str | None = None,
 ) -> list[dict]:
     async with _bridge.session(
-        server, cmd=cmd, url=url, client_name=client_name, config_path=config_path
+        server, cmd=cmd, url=url, bearer=bearer, client_name=client_name, config_path=config_path
     ) as s:
         result = await s.list_tools()
     tools = []
@@ -48,11 +49,12 @@ async def _probe(
     *,
     cmd: str | None = None,
     url: str | None = None,
+    bearer: str | None = None,
     client_name: str | None = None,
     config_path: str | None = None,
 ) -> Any:
     caller = _bridge.McpBridgeCaller(
-        cmd=cmd, url=url, client_name=client_name, config_path=config_path
+        cmd=cmd, url=url, bearer=bearer, client_name=client_name, config_path=config_path
     )
     raw = await caller.call(server, tool, args)
     return codegen.summarize_shape(raw)
@@ -88,7 +90,7 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
 
 def _cmd_codegen(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
-    conn = dict(url=ns.url, client_name=ns.client_name, config_path=ns.config)
+    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config)
     tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
     print(f"[codegen] {ns.server}: {len(tools)} tools", file=sys.stderr)
 
@@ -115,34 +117,31 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
 
 
 def _cmd_probe(ns: argparse.Namespace) -> int:
-    """Run one live call and emit a shape-spec SKELETON for the skill to edit.
+    """Run one or more live calls and emit a merged shape-spec SKELETON.
 
-    The deterministic part: dump the observed top-level shape as a `fields` map
-    with `unwrap: []`. The judgment part (set unwrap, fix types, drop deep nests)
-    is the skill's — see skills/generate-mcp-wrappers/SKILL.md.
+    Pass --args once for a single probe (original behaviour, byte-stable).
+    Pass --args multiple times for multi-probe mode: each call is made in
+    sequence and the observed shapes are deep-merged so the skeleton reflects
+    the union of all responses (nullable fields, key-presence variance, etc.).
+
+    The deterministic part: top-level scalars → fields; unwrap, types, and
+    deep-nest decisions are the skill's judgment (see SKILL.md step 4).
     """
     cmd = getattr(ns, "stdio", None)
-    args = json.loads(ns.args) if ns.args else {}
-    print(f"[probe] {ns.server}.{ns.tool}({args}) …", file=sys.stderr)
-    shape = asyncio.run(
-        _probe(ns.server, ns.tool, args, cmd=cmd,
-               url=ns.url, client_name=ns.client_name, config_path=ns.config)
-    )
+    raw_args_list: list[str] = ns.args or []
+    args_list: list[dict] = [json.loads(a) for a in raw_args_list] if raw_args_list else [{}]
+    n = len(args_list)
+    print(f"[probe] {ns.server}.{ns.tool} ({n} probe(s)) …", file=sys.stderr)
 
-    # Only top-level scalars become skeleton fields; nested dicts/lists are left
-    # out (skill decides whether to unwrap to them or keep them as Any).
-    fields = {k: v for k, v in shape.items() if isinstance(v, str)} if isinstance(shape, dict) else {}
-    skeleton = {
-        ns.tool: {
-            "unwrap": [],
-            "return_model": None,
-            "input_overrides": {},
-            "fields": fields,
-            "source": "live",
-            "probed_args": args,
-            "_observed_shape": shape,
-        }
-    }
+    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config)
+    shapes = []
+    for i, args in enumerate(args_list):
+        print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
+        # one session per probe (prototype); pooling is out of scope
+        shape = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
+        shapes.append(shape)
+
+    skeleton = codegen.probe_skeleton(ns.tool, args_list, shapes)
     out = json.dumps(skeleton, indent=2)
     if ns.emit_shape:
         Path(ns.emit_shape).write_text(out + "\n")
@@ -164,6 +163,10 @@ def _cmd_login(ns: argparse.Namespace) -> int:
 def _add_conn_args(p: argparse.ArgumentParser) -> None:
     """Inline server-connection args shared by all commands (override config)."""
     p.add_argument("--url", help="server URL inline; enables OAuth without a config entry")
+    p.add_argument("--bearer", metavar="TOKEN",
+                   help="static Bearer token for APIs that use PATs (e.g. GitHub); "
+                        "bypasses OAuth. Read from $GITHUB_PAT or similar — never "
+                        "pass a literal token on the command line.")
     p.add_argument("--client-name", dest="client_name",
                    help="OAuth client_name override (shown on the server consent screen)")
     p.add_argument("--config", dest="config",
@@ -187,7 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     pr = sub.add_parser("probe", help="live-call a tool and emit a shape-spec skeleton")
     pr.add_argument("server", help="server name (e.g. radar) or URL")
     pr.add_argument("tool", help="tool to call live")
-    pr.add_argument("--args", help="JSON args for the call (default: {})")
+    pr.add_argument("--args", action="append", metavar="JSON",
+                    help="JSON args for one probe call; repeat for multi-probe (default: {})")
     pr.add_argument("--emit-shape", help="write skeleton to this path (default: stdout)")
     pr.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(pr)
