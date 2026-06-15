@@ -166,7 +166,7 @@ def test_cli_discover_codegraph(tmp_path):
         ("claude", "mcp", "get", "epam-staffing"): None,
     }
 
-    with patch("shutil.which", return_value="/usr/bin/claude"):
+    with patch("mcp_client_kit.discovery.shutil.which", return_value="/usr/bin/claude"):
         provider = ClaudeCodeProvider(_run=_make_run(run_map), _home=tmp_path)
         servers = provider.discover()
 
@@ -191,7 +191,7 @@ def test_cli_connector_not_probeable(tmp_path):
         ("claude", "mcp", "get", "epam-staffing"): None,
     }
 
-    with patch("shutil.which", return_value="/usr/bin/claude"):
+    with patch("mcp_client_kit.discovery.shutil.which", return_value="/usr/bin/claude"):
         provider = ClaudeCodeProvider(_run=_make_run(run_map), _home=tmp_path)
         servers = provider.discover()
 
@@ -212,7 +212,7 @@ def test_cli_json_fallback(tmp_path):
     (tmp_path / ".claude.json").write_text(json.dumps(FIXTURE_CLAUDE_JSON))
 
     # _run always returns None → CLI path yields nothing, falls back to JSON.
-    with patch("shutil.which", return_value=None):
+    with patch("mcp_client_kit.discovery.shutil.which", return_value=None):
         provider = ClaudeCodeProvider(_run=_make_run({}), _home=tmp_path)
         servers = provider.discover()
 
@@ -242,14 +242,14 @@ def test_cli_json_fallback(tmp_path):
 
 def test_available_with_json_only(tmp_path):
     (tmp_path / ".claude.json").write_text("{}")
-    with patch("shutil.which", return_value=None):
+    with patch("mcp_client_kit.discovery.shutil.which", return_value=None):
         provider = ClaudeCodeProvider(_home=tmp_path)
         assert provider.available() is True
 
 
 def test_available_false_when_nothing(tmp_path):
     # No .claude.json in tmp_path, no claude on PATH.
-    with patch("shutil.which", return_value=None):
+    with patch("mcp_client_kit.discovery.shutil.which", return_value=None):
         provider = ClaudeCodeProvider(_home=tmp_path)
         assert provider.available() is False
 
@@ -270,7 +270,7 @@ def test_discover_all_skips_unavailable(tmp_path, monkeypatch):
     # Replace the singleton provider with one whose available() returns False.
     fake_provider = ClaudeCodeProvider(_home=tmp_path)
     monkeypatch.setattr(discovery, "PROVIDERS", [fake_provider])
-    with patch("shutil.which", return_value=None):
+    with patch("mcp_client_kit.discovery.shutil.which", return_value=None):
         # No .claude.json → available() returns False.
         result = discover_all()
     assert result == []
