@@ -721,3 +721,39 @@ async def login(
         await asyncio.sleep(0)
 
     print(f"Credentials saved to {creds_path}")
+
+
+async def ensure_login(
+    server_name: str,
+    creds_path: Path = DEFAULT_CREDS_PATH,
+    *,
+    url: str | None = None,
+    client_name: str | None = None,
+    config_path: str | Path | None = None,
+    cred_backend: str | None = None,
+) -> None:
+    """Ensure a usable token exists for server_name, refreshing or logging in.
+
+    Silent when a valid (or refreshable) token is cached — runs the same
+    pre-flight refresh as a normal call. Opens the browser via login() only when
+    there is no token, or the refresh token itself is gone/expired. Idempotent:
+    safe to call before every run.
+
+    Cases:
+    - Fresh token: no-op.
+    - Near/past expiry, refresh_token present: silent out-of-band renewal.
+    - Near/past expiry, no refresh_token (or renewal fails): browser login.
+    - No token at all: browser login.
+    """
+    storage = FileTokenStorage(
+        server_name, creds_path, backend=resolve_cred_backend(cred_backend)
+    )
+    try:
+        await _pre_flight_refresh(server_name, storage)
+    except ReauthenticationRequired:
+        await login(server_name, creds_path, url=url, client_name=client_name,
+                    config_path=config_path, cred_backend=cred_backend)
+        return
+    if await storage.get_tokens() is None:   # first-time: no token cached at all
+        await login(server_name, creds_path, url=url, client_name=client_name,
+                    config_path=config_path, cred_backend=cred_backend)

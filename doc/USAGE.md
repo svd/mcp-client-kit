@@ -184,12 +184,43 @@ async def main():
 asyncio.run(main())
 ```
 
-**OAuth example** (server logged in via `mcp-kit login`):
+**OAuth example** (automated login + automated token refresh):
 
 ```python
-caller = McpBridgeCaller(url="https://mcp.example.com/mcp/v1")
-# stored token is picked up automatically from ~/.mcp-client-kit/credentials.json
+import asyncio
+from mcp_client_kit import McpBridgeCaller, ensure_login
+import myserver  # generated: mcp-kit codegen myserver --out myserver.py
+
+SERVER = "myserver"
+URL = "https://mcp.example.com/mcp/v1"
+
+async def main():
+    # Refresh-or-login: silent when a valid/refreshable token is cached;
+    # opens the browser once only when login is actually required.
+    await ensure_login(SERVER, url=URL)
+
+    caller = McpBridgeCaller(url=URL)   # OAuth; no bearer token
+    user = await myserver.whoami(caller)
+    print(user)
+
+asyncio.run(main())
 ```
+
+How it works:
+
+- **Token refresh is automatic** — every `.call()` runs a pre-flight refresh, so a
+  near-expired access token is renewed silently from the stored refresh token with
+  no browser interaction. `ensure_login` runs that same refresh before your first
+  call and opens the browser only as a last resort.
+- **`ensure_login` is idempotent** — safe to call before every run. When already
+  authenticated it returns immediately. When the refresh token itself is expired (or
+  absent), it falls back to a full browser login — the in-code equivalent of
+  `mcp-kit login <server>`. Credentials are persisted at
+  `~/.mcp-client-kit/credentials.json`.
+- **Lower-level alternative** — skip `ensure_login` and catch
+  `ReauthenticationRequired` from the first failing `.call()`, then call
+  `login(SERVER, url=URL)` and retry. `ReauthenticationRequired` and `login` are
+  also exported from `mcp_client_kit`.
 
 `McpBridgeCaller` kwargs mirror the CLI connection flags — `url=`, `bearer=` (PAT),
 `cmd=` (stdio), `config_path=`, `client_name=`. One instance is reusable across
