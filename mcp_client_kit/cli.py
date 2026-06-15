@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import _bridge, codegen
+from . import _bridge, codegen, discovery
 
 
 async def _list_tools(
@@ -157,6 +157,85 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_discover(ns: argparse.Namespace) -> int:
+    """List MCP servers from installed agent host environments."""
+    host_filter: list[str] | None = ns.host  # None or list of ids
+    servers = discovery.discover_all(hosts=host_filter)
+
+    if ns.json:
+        sys.stdout.write(json.dumps([s.as_dict() for s in servers], indent=2) + "\n")
+        return 0
+
+    # ------------------------------------------------------------------ #
+    # Human table — grouped by host                                        #
+    # ------------------------------------------------------------------ #
+
+    # Build provider display_name lookup: id -> display_name
+    provider_names: dict[str, str] = {p.id: p.display_name for p in discovery.PROVIDERS}
+
+    # Group servers by host id, preserving insertion order
+    groups: dict[str, list[discovery.DiscoveredServer]] = {}
+    for s in servers:
+        groups.setdefault(s.host, []).append(s)
+
+    # Determine which host ids to show (respecting filter, plus any unknown hosts)
+    if host_filter is not None:
+        host_ids = [h for h in host_filter if h in groups]
+        # Also include any discovered hosts not in filter list (edge case)
+        for hid in groups:
+            if hid not in host_ids:
+                host_ids.append(hid)
+    else:
+        host_ids = list(groups.keys())
+
+    col_name = 25
+    col_transport = 10
+    col_scope = 18
+
+    for hid in host_ids:
+        display = provider_names.get(hid, hid)
+        print(f"=== {display} ===")
+        print()
+
+        group = groups.get(hid, [])
+        if not group:
+            print("  (no servers found)")
+            print()
+            continue
+
+        for s in group:
+            # Truncate scope label at first " ("
+            scope_label = s.scope or ""
+            if " (" in scope_label:
+                scope_label = scope_label.split(" (", 1)[0]
+
+            status_label = s.status or ""
+            name_col = s.name.ljust(col_name)
+            transport_col = s.transport.ljust(col_transport)
+            scope_col = scope_label.ljust(col_scope)
+            print(f"  {name_col}{transport_col}{scope_col}{status_label}")
+
+            if s.probeable:
+                # Build hint line
+                hint: str | None = None
+                if s.transport == "stdio" and s.command is not None:
+                    cmd_str = s.command
+                    if s.args:
+                        cmd_str += " " + " ".join(s.args)
+                    hint = f'mcp-kit list {s.name} --stdio "{cmd_str}"'
+                elif s.transport in ("http", "sse") and s.url is not None:
+                    hint = f"mcp-kit list {s.name} --url {s.url}"
+                if hint is not None:
+                    print(f"    →  {hint}")
+            else:
+                if s.note:
+                    print(f"  ⚠  {s.note}")
+
+        print()
+
+    return 0
+
+
 def _cmd_list(ns: argparse.Namespace) -> int:
     """Print the tool inventory as JSON [{name, description}] for a server."""
     cmd = getattr(ns, "stdio", None)
@@ -230,6 +309,13 @@ def main(argv: list[str] | None = None) -> int:
     lg.add_argument("server", help="server name (e.g. radar)")
     _add_conn_args(lg)
     lg.set_defaults(func=_cmd_login)
+
+    dc = sub.add_parser("discover", help="list MCP servers from installed agent hosts")
+    dc.add_argument("--host", action="append", dest="host", metavar="ID",
+                    help="filter to this host id (repeatable; default: all)")
+    dc.add_argument("--json", action="store_true",
+                    help="emit JSON array instead of human table")
+    dc.set_defaults(func=_cmd_discover)
 
     ns = parser.parse_args(argv)
     return ns.func(ns)
