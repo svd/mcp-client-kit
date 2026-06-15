@@ -1,0 +1,7 @@
+[[server]]
+name = "github"
+transport = "http"
+launch = "https://api.githubcopilot.com/mcp/"
+auth = "bearer:GITHUB_PAT"
+expected_modes = ["A", "B", "C"]
+notes = "GitHub Copilot MCP. 35 tools. Requires PAT with repo/issues scope."

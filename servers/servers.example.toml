@@ -1,0 +1,132 @@
+# servers.example.toml — Reference server configurations for mcp-client-kit-eval
+# Copy entries you want to evaluate into servers.toml
+# Each [[server]] block configures one MCP server for eval.
+
+# --- everything ---
+# Reference server with a wide variety of tool types. No auth.
+# Requires npx (Node.js). Install Node.js if not present.
+[[server]]
+name = "everything"
+transport = "stdio"
+launch = "npx -y @modelcontextprotocol/server-everything"
+auth = "none"
+notes = "MCP reference server covering all tool/resource/prompt types."
+
+# --- filesystem ---
+# Exposes local filesystem tools scoped to a directory. No auth.
+# Requires npx. The path argument (/private/tmp) can be changed.
+[[server]]
+name = "filesystem"
+transport = "stdio"
+launch = "npx -y @modelcontextprotocol/server-filesystem /private/tmp"
+auth = "none"
+notes = "Filesystem access scoped to /private/tmp."
+
+# --- deepwiki ---
+# DeepWiki public MCP endpoint. No auth or install required.
+# HTTP transport — no local process needed.
+[[server]]
+name = "deepwiki"
+transport = "http"
+launch = "https://mcp.deepwiki.com/mcp"
+auth = "none"
+notes = "DeepWiki public HTTP MCP endpoint. No auth required."
+
+# --- context7 ---
+# Upstash Context7 library documentation server. No auth.
+# Requires npx (Node.js).
+[[server]]
+name = "context7"
+transport = "stdio"
+launch = "npx -y @upstash/context7-mcp"
+auth = "none"
+notes = "Upstash Context7 — library documentation lookup."
+
+# --- codegraph ---
+# Local install required: install codegraph-mcp via its own instructions.
+# Must be on PATH. No auth.
+[[server]]
+name = "codegraph"
+transport = "stdio"
+launch = "codegraph-mcp"
+auth = "none"
+notes = "Local codegraph code-intelligence server. Must be installed on PATH."
+
+# --- sqlite ---
+# SQLite database server. No auth. Requires uvx (uv tool runner).
+# The --db-path argument points to the database file; adjust as needed.
+[[server]]
+name = "sqlite"
+transport = "stdio"
+launch = "uvx mcp-server-sqlite --db-path /tmp/eval.db"
+auth = "none"
+notes = "SQLite server backed by /tmp/eval.db. Requires uvx."
+
+# --- time ---
+# Simple time/timezone query server. No auth. Requires uvx.
+[[server]]
+name = "time"
+transport = "stdio"
+launch = "uvx mcp-server-time"
+auth = "none"
+notes = "Time and timezone tools. Requires uvx."
+
+# --- memory ---
+# In-memory knowledge graph / persistent memory server. No auth.
+# Requires npx (Node.js).
+[[server]]
+name = "memory"
+transport = "stdio"
+launch = "npx -y @modelcontextprotocol/server-memory"
+auth = "none"
+notes = "In-memory persistent knowledge graph. Requires npx."
+
+# --- huggingface ---
+# HuggingFace public MCP endpoint. No auth or install required.
+# HTTP transport — no local process needed.
+[[server]]
+name = "huggingface"
+transport = "http"
+launch = "https://huggingface.co/mcp"
+auth = "none"
+notes = "HuggingFace public HTTP MCP endpoint. No auth required."
+
+# --- github ---
+# GitHub Copilot MCP. Requires a GitHub PAT.
+# Set GITHUB_PAT env var to a token with repo/issues scope.
+[[server]]
+name = "github"
+transport = "http"
+launch = "https://api.githubcopilot.com/mcp/"
+auth = "bearer:GITHUB_PAT"
+expected_modes = ["A", "B", "C"]
+notes = "GitHub Copilot MCP. 35 tools. Requires PAT with repo/issues scope."
+
+# --- git ---
+# Local git repository tools. No auth. Requires uvx.
+# Operates on repos accessible from the working directory.
+[[server]]
+name = "git"
+transport = "stdio"
+launch = "uvx mcp-server-git"
+auth = "none"
+notes = "Git repository tools. Requires uvx."
+
+# --- sequential-thinking ---
+# Sequential/chain-of-thought reasoning server. No auth.
+# Requires npx (Node.js).
+[[server]]
+name = "sequential-thinking"
+transport = "stdio"
+launch = "npx -y @modelcontextprotocol/server-sequential-thinking"
+auth = "none"
+notes = "Sequential thinking / chain-of-thought reasoning server. Requires npx."
+
+# --- fetch ---
+# HTTP fetch/web content retrieval server. No auth. Requires uvx.
+[[server]]
+name = "fetch"
+transport = "stdio"
+launch = "uvx mcp-server-fetch"
+auth = "none"
+notes = "Web fetch / HTTP content retrieval. Requires uvx."

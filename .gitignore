@@ -1,0 +1,39 @@
+# MCP probe artifacts (may contain PII — never commit)
+*.probe-raw.json
+*.shapes.json.parts/
+
+# Agent draft files
+session-overview.draft.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+.env
+
+# Build / packaging
+*.egg-info/
+dist/
+.eggs/
+
+# Test cache
+.pytest_cache/
+
+# Python tooling
+.ruff_cache/
+.mypy_cache/
+
+# macOS
+*.DS_Store
+
+# Legacy backup folders
+github.bak/
+g.bak/
+
+# Project config
+.mcp.json
+.codegraph/
