@@ -442,6 +442,52 @@ def merge_shapes(shapes: list[Any]) -> Any:
     return "Any"
 
 
+def detect_discriminators(tools: list[dict]) -> dict[str, list[str]]:
+    """Cross-analyse tool dicts and return discriminator-candidate params.
+
+    Args:
+        tools: List of MCP tool dicts with keys name, description, inputSchema.
+
+    Returns:
+        Mapping of candidate param name to sorted list of tool names that carry
+        it. Only params appearing in ≥2 tools are returned. A param qualifies if
+        it is a scalar (integer/number/string) AND matches at least one of:
+        - name is in the heuristic set (case-insensitive), or
+        - carries a non-empty enum in its schema, or
+        - appears as a scalar param in ≥2 tools (shared-scalar heuristic).
+    """
+    _HEURISTIC = {
+        "entitytype", "type", "kind", "category",
+        "entity_type", "objecttype", "resourcetype",
+    }
+    _SCALAR_TYPES = {"integer", "number", "string"}
+
+    # candidates[param_name] = [tool_name, ...]
+    candidates: dict[str, list[str]] = {}
+
+    for tool in tools:
+        tool_name = tool.get("name", "")
+        schema = tool.get("inputSchema") or {}
+        props: dict = schema.get("properties") or {}
+        for pname, pschema in props.items():
+            if not isinstance(pschema, dict):
+                continue
+            ptype = pschema.get("type")
+            if ptype not in _SCALAR_TYPES:
+                continue
+            # Track all scalar params; the ≥2-tools filter in the return
+            # covers the shared-scalar heuristic. Heuristic-name and enum
+            # params are also scalar, so they're captured here too.
+            candidates.setdefault(pname, []).append(tool_name)
+
+    # Keep only params that appear in ≥2 tools
+    return {
+        pname: sorted(tool_names)
+        for pname, tool_names in sorted(candidates.items())
+        if len(tool_names) >= 2
+    }
+
+
 def probe_skeleton(tool: str, args_list: list[dict], shapes: list[Any]) -> dict:
     """Build a shape-spec skeleton from N probe calls.
 

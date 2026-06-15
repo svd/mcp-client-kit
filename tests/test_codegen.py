@@ -529,3 +529,114 @@ def test_probe_skeleton_structure():
         assert key in entry
     assert entry["unwrap"] == []
     assert entry["source"] == "live"
+
+
+# ── detect_discriminators ─────────────────────────────────────────────────────
+
+def _make_tool(name, props, required=None):
+    return {
+        "name": name,
+        "description": f"Tool {name}.",
+        "inputSchema": {
+            "type": "object",
+            "properties": props,
+            "required": required or [],
+        },
+    }
+
+
+def test_detect_discriminators_heuristic_name_shared():
+    """Shared scalar named entityType across ≥2 tools appears in result."""
+    tools = [
+        _make_tool("query_radar", {"entityType": {"type": "integer"}, "q": {"type": "string"}}),
+        _make_tool("get_entity", {"entityType": {"type": "integer"}, "entityId": {"type": "string"}}),
+    ]
+    result = codegen.detect_discriminators(tools)
+    assert "entityType" in result
+    assert "query_radar" in result["entityType"]
+    assert "get_entity" in result["entityType"]
+
+
+def test_detect_discriminators_enum_shared():
+    """Enum param in ≥2 tools appears in result even if not in heuristic name set."""
+    tools = [
+        _make_tool("create_item", {"status": {"type": "string", "enum": ["active", "inactive"]}}),
+        _make_tool("update_item", {"status": {"type": "string", "enum": ["active", "inactive"]}}),
+    ]
+    result = codegen.detect_discriminators(tools)
+    assert "status" in result
+    assert sorted(result["status"]) == ["create_item", "update_item"]
+
+
+def test_detect_discriminators_scalar_single_tool_not_returned():
+    """Scalar in only 1 tool is NOT in result."""
+    tools = [
+        _make_tool("only_tool", {"entityType": {"type": "integer"}}),
+        _make_tool("other_tool", {"unrelated": {"type": "string"}}),
+    ]
+    result = codegen.detect_discriminators(tools)
+    # entityType only in one tool, unrelated only in one tool → nothing shared
+    assert result == {}
+
+
+def test_detect_discriminators_empty_tools():
+    """Empty tools list returns {}."""
+    assert codegen.detect_discriminators([]) == {}
+
+
+def test_detect_discriminators_no_qualifying_params():
+    """No qualifying params returns {}."""
+    tools = [
+        _make_tool("tool_a", {"items": {"type": "array", "items": {"type": "string"}}}),
+        _make_tool("tool_b", {"config": {"type": "object"}}),
+    ]
+    assert codegen.detect_discriminators(tools) == {}
+
+
+def test_detect_discriminators_case_insensitive_name_match():
+    """Case-insensitive heuristic: EntityType (capital E) still matches."""
+    tools = [
+        _make_tool("tool_a", {"EntityType": {"type": "integer"}}),
+        _make_tool("tool_b", {"EntityType": {"type": "integer"}}),
+    ]
+    result = codegen.detect_discriminators(tools)
+    assert "EntityType" in result
+    assert sorted(result["EntityType"]) == ["tool_a", "tool_b"]
+
+
+def test_detect_discriminators_radar_fixture():
+    """Radar-like fixture: query_radar, get_entity, get_filters all with entityType."""
+    tools = [
+        _make_tool(
+            "query_radar",
+            {"entityType": {"type": "integer"}, "query": {"type": "object"}},
+            required=["entityType", "query"],
+        ),
+        _make_tool(
+            "get_entity",
+            {"entityType": {"type": "integer"}, "entityId": {"type": "string"}},
+            required=["entityType", "entityId"],
+        ),
+        _make_tool(
+            "get_filters",
+            {"entityType": {"type": "integer"}},
+            required=["entityType"],
+        ),
+    ]
+    result = codegen.detect_discriminators(tools)
+    assert "entityType" in result
+    assert "query_radar" in result["entityType"]
+    assert "get_entity" in result["entityType"]
+    assert result["entityType"] == sorted(result["entityType"])  # alphabetically sorted
+
+
+def test_detect_discriminators_result_sorted():
+    """Keys and tool lists are sorted alphabetically for determinism."""
+    tools = [
+        _make_tool("zoo_tool", {"type": {"type": "string"}, "kind": {"type": "string"}}),
+        _make_tool("alpha_tool", {"type": {"type": "string"}, "kind": {"type": "string"}}),
+    ]
+    result = codegen.detect_discriminators(tools)
+    assert list(result.keys()) == sorted(result.keys())
+    for tool_list in result.values():
+        assert tool_list == sorted(tool_list)
