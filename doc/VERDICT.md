@@ -20,10 +20,10 @@ Two separate ideas. They have **very different** answers.
 ### For (the genuine slice)
 - **Persistent file token storage + proactive pre-flight refresh** is a real gap in
   the official SDK's canonical example (in-memory only; reactive refresh on 401).
-- FastMCP's *built-in* persistent cache has **open token-cache/refresh bugs in 2026**
-  (esp. #3425 — expired-token-looks-fresh-after-reload, the exact failure your
-  pre-flight refresh prevents). So a small, **correct** persistent-auth layer has
-  value *today* — but it's a window that may close as FastMCP fixes those bugs.
+- FastMCP's *built-in* persistent cache has **at least one open token-cache bug
+  (#1764 — cached token not sent in subsequent multi-instance requests)**. The
+  originally-cited #3425 (expired-token-looks-fresh-after-reload) is **closed**;
+  the behavior was fixed in fastmcp 3.2.0 (PR #3572). See §Correction below.
 
 ### Recommendation
 - **Don't** publish "yet another MCP client". **Do** publish a focused
