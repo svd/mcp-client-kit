@@ -21,12 +21,50 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
    ```
    Parses; every tool typed from `inputSchema`; returns `Any`.
 
-2. **Curate.** Pick the tools that matter for the caller's pipeline — especially the
-   "big dump" tools whose payloads you want out of model context. Don't shape-spec all
-   16 tools; spec the few that carry real records.
+2. **Select tools to probe (interactive gate).**
 
-3. **Probe each chosen tool → skeleton.**
+   a. Run `mcp-kit list <server>` → get `[{name, description}]` for every tool.
+
+   b. Print a report of all tools in this format:
+      ```
+      Tools on <server>:
+        get_entity      — Fetch a single entity by id and type
+        query_radar     — Search entities matching criteria
+        whoami          — Return the calling user's profile
+        ⚠ create_entity — Create a new entity [MUTATING]
+        ...
+      ```
+      Flag likely-mutating tools with `⚠ ... [MUTATING]` using a name/description
+      heuristic: names or descriptions containing `create`, `update`, `delete`,
+      `remove`, `send`, `set`, `write`, `post`, `patch`, `put`, `cancel`,
+      `approve`, `submit`, `assign` — probing these makes a **real** live call.
+
+      Note for focus: the goal is to shape-spec tools that carry real records and
+      whose payloads you want out of model context ("big dump" tools). Mutations and
+      acks rarely need a `TypedDict`.
+
+   c. Ask the user how to proceed via `AskUserQuestion` (single-select, 3 options):
+      - **Probe all** *(recommended)* — probe every tool from `tools/list`.
+      - **Confirm in batches** — walk through 4-at-a-time multi-select questions.
+      - **I'll specify the tools** — user names them (free-text via "Other").
+
+   d. If **"Confirm in batches"**: emit `AskUserQuestion` multi-select questions,
+      **≤4 options per question**, each option `label = tool name` and
+      `description = tool description`. After 16 options (4 questions), ask whether
+      to continue with the next batch. The union of all checked options is the
+      selected set.
+
+   e. If **"Probe all"**: selected set = every tool from the list.
+
+   f. If **"I'll specify"**: parse the free-text response as tool names; confirm
+      any ambiguous names before probing.
+
+   The selected set (from any path) drives steps 3 and 4.
+
+3. **Probe each selected tool → skeleton.**
    ```
+   Probe each tool selected in step 2. See step 2 for which tools are in scope.
+
    # single probe (original behaviour)
    mcp-kit probe <server> <tool> --args '<sample json>' --emit-shape <server>.shapes.json
 
@@ -90,6 +128,13 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
    hand-built wrapper exists, diff the generated unwrap against it as an oracle.
 
 ## Guards (do not violate)
+
+- **Probing is a live call — mutating tools mutate.** The default selects every
+  tool, but probing a `create`/`update`/`delete`/`send` (etc.) tool executes it for
+  real against the server. Flag likely-mutating tools in the step 2 report and
+  recommend the user deselect them unless they explicitly want to probe them.
+  Never probe a destructive tool "to see its shape" without explicit user
+  confirmation.
 
 - **The type is a hint, not validation.** A `TypedDict` from one probe is partial
   knowledge stated honestly. Don't reach for Pydantic to "enforce" it — a model built

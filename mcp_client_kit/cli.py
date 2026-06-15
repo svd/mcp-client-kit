@@ -151,6 +151,16 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_list(ns: argparse.Namespace) -> int:
+    """Print the tool inventory as JSON [{name, description}] for a server."""
+    cmd = getattr(ns, "stdio", None)
+    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config)
+    tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
+    out = [{"name": t["name"], "description": t.get("description") or ""} for t in tools]
+    sys.stdout.write(json.dumps(out, indent=2) + "\n")
+    return 0
+
+
 def _cmd_login(ns: argparse.Namespace) -> int:
     asyncio.run(
         _bridge.login(
@@ -196,6 +206,12 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(pr)
     pr.set_defaults(func=_cmd_probe)
+
+    ls = sub.add_parser("list", help="list tools for a server as JSON [{name, description}]")
+    ls.add_argument("server", help="server name (e.g. radar) or URL")
+    ls.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    _add_conn_args(ls)
+    ls.set_defaults(func=_cmd_list)
 
     lg = sub.add_parser("login", help="browser OAuth login for a named server")
     lg.add_argument("server", help="server name (e.g. radar)")
