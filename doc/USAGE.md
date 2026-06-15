@@ -135,7 +135,7 @@ Six steps from invocation to typed wrappers:
 | 1. Mechanical stubs | `mcp-kit codegen <server> --out <server>.py` — all tools, returns `Any` |
 | 2. Curate | Pick tools whose payloads you want typed (not all of them) |
 | 3. Probe → skeleton | `mcp-kit probe <server> <tool> --args '...' --emit-shape <server>.shapes.json` |
-| 4. Edit shape-spec | Set `unwrap`, `return_model`, `fields`, `input_overrides` — the judgment pass |
+| 4. Edit shape-spec | Set `unwrap`, `return_model`, `fields`, `input_overrides` — the judgment pass. For tools that return different shapes per input value, use `discriminator` + `variants` instead of a flat `return_model` — see [§ Polymorphic tools](#polymorphic-tools-discriminated-shaping). |
 | 5. Regenerate | `mcp-kit codegen <server> --out <server>.py --shapes <server>.shapes.json` |
 | 6. Verify | `ast.parse` the module; confirm return types |
 
@@ -206,6 +206,58 @@ class FakeCaller:
     async def call(self, server: str, tool: str, arguments: dict) -> Any:
         return {"login": "octocat"}
 ```
+
+---
+
+## Polymorphic tools (discriminated shaping)
+
+Some tools return **different payload shapes** depending on an input argument
+(e.g. `entityType=1` → `Person`, `entityType=2` → `Position`). A single flat
+`return_model` would mistype every call but one. Use `discriminator` + `variants`
+in the shape-spec instead:
+
+```jsonc
+{
+  "get_entity": {
+    "unwrap": ["data", "entity"],
+    "discriminator": "entityType",          // input arg that selects the variant
+    "input_overrides": { "entityType": "int" },
+    "variants": {
+      "1": { "return_model": "Person",   "fields": { "fullName": "str" } },
+      "2": { "return_model": "Position", "fields": { "headline": "str" } }
+    }
+  }
+}
+```
+
+Rules:
+- Replace the flat `return_model`/`fields` with `discriminator` + `variants`.
+- Variant keys are the discriminator **values as strings** (`"1"`, `"2"`, …).
+- `unwrap` and `input_overrides` stay **top-level** — shared across all variants.
+
+Codegen emits one `@overload` per variant (discriminator typed `Literal[<val>]`)
+plus a union impl for all other cases:
+
+```python
+@overload
+async def get_entity(caller: McpCaller, *, entityId: str, entityType: Literal[1]) -> Person: ...
+@overload
+async def get_entity(caller: McpCaller, *, entityId: str, entityType: Literal[2]) -> Position: ...
+async def get_entity(caller: McpCaller, *, entityId: str, entityType: int) -> Person | Position:
+    ...
+```
+
+**Call-site payoff** — a literal value lets the type checker narrow the return to
+the exact variant; a runtime `int` widens to the union:
+
+```python
+me  = await mod.get_entity(caller, entityId="x", entityType=1)  # typed Person
+pos = await mod.get_entity(caller, entityId="y", entityType=2)  # typed Position
+```
+
+Caveats: the discriminator is **always required** (even if the tool schema marks
+it optional). An unmodeled discriminator value hits the `int` impl and returns the
+union — it never raises.
 
 ---
 
