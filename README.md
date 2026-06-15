@@ -27,12 +27,12 @@ findings, tool curation), `--check` drift mode. Auth is done:
 
 Read in this order:
 
-1. **`doc/VERDICT.md`** — should you build it? (TL;DR: skill yes, client mostly no) + Fixed decisions.
-2. **`doc/OQ1_PREFLIGHT.md`** — OQ#1 closed: mcp SDK needs pre-flight at cold start (§Removal eval); the server accepts reactive refresh but the SDK never reaches that path.
-3. **`doc/EVAL_RADAR.md`** — the prototype's first eval against radar.
-4. **`doc/LANDSCAPE.md`** — verified competitor landscape (mid-2026, 19 sources).
-5. **`doc/EXTRACTION_ANALYSIS.md`** — what's generic in `mcp_client.py`, API sketch, design debts.
-6. **`doc/CODEGEN_SKILL_IDEA.md`** — design for the wrapper-generator skill + CLI split.
+1. **[`doc/VERDICT.md`](doc/VERDICT.md)** — should you build it? (TL;DR: skill yes, client mostly no) + Fixed decisions.
+2. **[`doc/OQ1_PREFLIGHT.md`](doc/OQ1_PREFLIGHT.md)** — OQ#1 closed: mcp SDK needs pre-flight at cold start (§Removal eval); the server accepts reactive refresh but the SDK never reaches that path.
+3. **[`doc/EVAL_RADAR.md`](doc/EVAL_RADAR.md)** — the prototype's first eval against radar.
+4. **[`doc/LANDSCAPE.md`](doc/LANDSCAPE.md)** — verified competitor landscape (mid-2026, 19 sources).
+5. **[`doc/EXTRACTION_ANALYSIS.md`](doc/EXTRACTION_ANALYSIS.md)** — what's generic in `mcp_client.py`, API sketch, design debts.
+6. **[`doc/CODEGEN_SKILL_IDEA.md`](doc/CODEGEN_SKILL_IDEA.md)** — design for the wrapper-generator skill + CLI split.
 
 ## One-line answer
 
