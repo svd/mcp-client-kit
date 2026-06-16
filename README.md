@@ -1,104 +1,168 @@
-# mcp-client-kit (research / incubation)
+# mcp-client-kit
 
-Exploring whether to extract a reusable MCP client + build a Claude Code skill
-that generates typed Python wrappers for any MCP server.
+**Write your MCP server wrappers once — from the live server. Keep them as real Python source you can diff, review, and pin.**
 
-**Origin:** generalized from a prior internal project's hand-built MCP client
-(OAuth 2.1 PKCE, file token storage, pre-flight refresh) and per-server wrappers —
-the working prototype this builds on.
+`mcp-client-kit` turns any MCP server into a typed Python module: one `async def` per tool, real return types, no live server needed to read it. Call your tools from code instead of pumping their schemas through the model's context — the pattern Anthropic measured at up to **98% token reduction**.
 
-## Status: CLI + skill layer work (2026-06-16)
+> Two artifacts, one repo: a **CLI** (`mcp-kit`) you run anywhere, and a **Claude Code plugin** (`generate-mcp-wrappers` skill) that drives it for the parts that need judgment.
 
-`mcp-kit codegen <server>` connects to a live MCP server, lists tools, and emits a
-typed `async def` per tool against the `McpCaller` seam. Optional `--probe`
-records a tool's real response *shape* — the empirical pass that beats pure
-inputSchema codegen.
+---
 
-The judgment pass now ships as a Claude Code skill,
-[`generate-mcp-wrappers`](skills/generate-mcp-wrappers/SKILL.md) — it drives the
-CLI through stubs → probe → merge → shape-edit → regenerate → verify. A second
-skill, [`generate-mcp-runner`](skills/generate-mcp-runner/SKILL.md), authors a
-static smoke-test `run.py` for the generated wrappers. See
-[`doc/USAGE.md`](doc/USAGE.md).
+## The problem
 
-```
-uv run mcp-kit codegen acme --out acme.py
-uv run mcp-kit codegen acme --probe get_entity --probe-args '{"entityId":"…","entityType":1}'
-```
+MCP tool schemas eat your context window before the agent does any work.
 
-`mcp-kit discover` lists MCP servers configured in installed agent hosts and prints a ready-to-run `mcp-kit list` command for each server it can connect to.
+Every tool definition costs **300–600 tokens** for its name, description, and JSON schema. That adds up fast:
 
-```
-uv run mcp-kit discover
-uv run mcp-kit discover --json
-uv run mcp-kit discover --host claude-code
-```
+- The **GitHub MCP server alone** burns ~55,000 tokens across its 93 tools.
+- One developer measured **66,000 tokens consumed at conversation start** — a third of a 200k window, gone before the first query.
+- A SaaS server with 50+ endpoints can spend **30,000+ tokens just describing what it *could* do.**
 
-```
-=== Claude Code ===
+Anthropic's validated fix ("Code execution with MCP," Nov 2025): stop routing schemas through the model. Generate wrapper code and call the tools from code instead — an approach Anthropic measured shrinking one workflow from ~150,000 tokens to ~2,000 (**98.7%**), with independent benchmarks landing around **78–85%** on less extreme workloads.
 
-  codegraph              stdio      User config      Connected
-    → mcp-kit list codegraph --stdio "codegraph serve --mcp"
+The catch for Python teams: no good tool generated **standalone, importable, reviewable `.py` wrappers** from a live MCP server. So everyone hand-writes `jira.py`, `github.py`, `slack.py` — slowly, inconsistently, and they silently rot when the server changes.
 
-  my-api                 http       User config      Needs authentication
-    → mcp-kit list my-api --url https://example.com/mcp
+That's the gap mcp-client-kit fills.
 
-  claude.ai Context7     http       User config      Connected
-  ⚠  claude.ai connector — managed OAuth, not probeable by mcp-kit
+---
+
+## What you get
+
+```bash
+uv tool install mcp-client-kit          # puts `mcp-kit` on your PATH
+mcp-kit login github                    # browser OAuth, tokens persisted
+mcp-kit codegen github --out github.py  # typed wrappers for every tool
 ```
 
-## Commands
+```python
+import asyncio
+from mcp_client_kit import McpBridgeCaller
+import github  # the file you just generated
+
+async def main():
+    caller = McpBridgeCaller(url="https://api.githubcopilot.com/mcp/")
+    me = await github.get_me(caller)                                  # -> GitHubUser
+    issues = await github.list_issues(caller, owner="octocat", repo="hello-world")
+    print(me, issues)
+
+asyncio.run(main())
+```
+
+`github.py` is just Python. Open it in your IDE, review it in a PR, pin it to a commit, ship it. No runtime proxy, no framework lock-in, no live server required to read what your tools return.
+
+---
+
+## Why developers pick it
+
+**Real source you own.** Importable `.py` modules — not `.pyi` stubs (mcp2py), not a runtime proxy, not tied to one execution framework (ipybox). You can diff it, review it, pin it, and read it in your IDE without a server running.
+
+**Types that match reality.** A tool's `inputSchema` describes its *inputs* — it tells you nothing about the *output* shape. mcp-client-kit's `--probe` makes one live call and records the actual response, so your return types reflect what the server really sends. No other generator does this.
+
+**OAuth that survives restarts.** Pre-flight token refresh means a fresh process renews a near-expired token silently from the refresh token — no surprise browser pop-up at cold start. (The official SDK's canonical example is in-memory only; every restart re-authenticates.)
+
+**Swap auth without regenerating.** Every wrapper takes an `McpCaller` as its first argument. Change transports or auth backends — bearer, OAuth, stdio, a fake for tests — without touching the generated code.
+
+**Built for production teams.** Works with any MCP server (HTTP URL, stdio, or bearer/PAT). Generated code lives in git like any other module, so it survives code review, audits, and pinning.
+
+---
+
+## How it works
+
+| Step | Command | What happens |
+|------|---------|--------------|
+| 1. Generate | `mcp-kit codegen <server> --out <server>.py` | One typed `async def` per tool. |
+| 2. Probe (optional) | `mcp-kit probe <server> <tool> --args '{}' --emit-shape <server>.shapes.json` | Records the *real* response shape from a live call. |
+| 3. Regenerate | `mcp-kit codegen <server> --out <server>.py --shapes <server>.shapes.json` | Wrappers now return precise types (`TypedDict`s, unions, lists). |
+
+Polymorphic tools — ones that return different shapes depending on an input (`entityType=1` → `Person`, `=2` → `Position`) — get typed `@overload`s, so your type checker narrows the return at every call site.
+
+The full reference, including the shape-spec format and credential backends, is in [`doc/USAGE.md`](doc/USAGE.md).
+
+---
+
+## Install
+
+**CLI on your PATH:**
+
+```bash
+uv tool install mcp-client-kit
+```
+
+**One-off, no install** (note: package is `mcp-client-kit`, the script is `mcp-kit`):
+
+```bash
+uvx --from "mcp-client-kit" mcp-kit codegen <server> --out <server>.py
+```
+
+**As a project dependency:**
+
+```bash
+uv add mcp-client-kit      # or: pip install mcp-client-kit
+```
+
+Requires Python 3.11+.
+
+---
+
+## Claude Code plugin
+
+The plugin bundles the `generate-mcp-wrappers` skill, which drives the CLI through the 20% that needs judgment — curating which tools matter, probing live responses, and editing the shape-spec — then regenerates and verifies the module.
+
+```
+/plugin marketplace add svd/mcp-client-kit
+/mcp-client-kit:generate-mcp-wrappers
+```
+
+A companion skill, `generate-mcp-runner`, writes a standalone smoke-test `run.py` that exercises the generated wrappers end-to-end.
+
+---
+
+## Command reference
 
 | Command | What it does |
-|---------|-------------|
-| `mcp-kit codegen <server>` | Emit a typed `async def` per tool; `--shapes` applies the shape-spec, `--probe` records one response shape inline. |
-| `mcp-kit list <server>` | Print tools as JSON; warns on stderr about discriminator candidates. |
-| `mcp-kit probe <server> <tool>` | Live call(s) → shape-spec skeleton; `--emit-shape` writes parallel-safe parts under `.parts/`. |
-| `mcp-kit call <server> <tool> --out <p>` | One live call, raw payload to disk — bootstrap ids / inspect output. |
-| `mcp-kit merge <server>` | Consolidate `.parts/` into `<server>.shapes.json`; emits a gitignored `verify.json` sidecar. |
-| `mcp-kit login <server>` | Browser OAuth login; tokens at `~/.mcp-client-kit/credentials.json`. |
-| `mcp-kit migrate-creds` | Move stored OAuth tokens between `file`/`keyring` backends; `--set-default` switches the permanent default. |
-| `mcp-kit discover` | List servers from installed agent hosts. |
+|---------|--------------|
+| `codegen <server>` | Emit typed wrappers; `--shapes` applies the shape-spec, `--probe` records a response shape inline. |
+| `list <server>` | Print a server's tools as JSON. |
+| `probe <server> <tool>` | Live call(s) → response-shape skeleton. |
+| `call <server> <tool> --out <p>` | One live call, raw payload to disk — bootstrap ids or inspect output. |
+| `merge <server>` | Consolidate probe parts into `<server>.shapes.json`. |
+| `login <server>` | Browser OAuth login; tokens stored at `~/.mcp-client-kit/credentials.json`. |
+| `migrate-creds` | Move stored OAuth tokens between `file` / `keyring` backends. |
+| `discover` | List MCP servers configured in your installed agent hosts. |
 
 Full workflow and flags: [`doc/USAGE.md`](doc/USAGE.md).
 
-Limitations:
+---
 
-- **claude.ai connectors** (e.g. Context7, Microsoft 365) appear in output but are marked non-probeable — they use managed OAuth that mcp-kit cannot replicate.
-- **Fallback path** (when `claude` binary is absent): only reads `~/.claude.json`; plugin-provided servers and claude.ai connectors will be missing.
+## Authentication
 
-Not yet built: `--check` drift mode. Auth is done:
-`mcp_client_kit/_bridge.py` on the official `mcp` SDK (see VERDICT.md §Correction).
-The skill layer (judgment pass — unwrap helpers, applying probe findings, tool
-curation) now ships — see [`skills/`](skills/).
+```bash
+mcp-kit login <server>                              # OAuth (most servers)
+mcp-kit codegen <server> --bearer "$TOKEN" --out s.py  # PAT / bearer
+mcp-kit codegen <server> --stdio "python server.py" --out s.py  # local stdio, no auth
+```
 
-Read in this order:
+Tokens persist in `~/.mcp-client-kit/credentials.json` (chmod 0600) or your OS keystore via `--cred-backend keyring`. In code, `ensure_login(server, url=...)` refreshes silently and only opens a browser when a real login is required.
 
-1. **[`doc/VERDICT.md`](doc/VERDICT.md)** — should you build it? (TL;DR: skill yes, client mostly no) + Fixed decisions.
-2. **[`doc/LANDSCAPE.md`](doc/LANDSCAPE.md)** — verified competitor landscape (mid-2026, 19 sources).
-3. **[`doc/EXTRACTION_ANALYSIS.md`](doc/EXTRACTION_ANALYSIS.md)** — what's generic in `mcp_client.py`, API sketch, design debts.
-4. **[`doc/CODEGEN_SKILL_IDEA.md`](doc/CODEGEN_SKILL_IDEA.md)** — design for the wrapper-generator skill + CLI split.
+---
 
-## One-line answer
+## Who it's for
 
-The reusable *MCP client* overlaps heavily with the official `mcp` SDK — don't
-reinvent it (and we haven't: `mcp_client_kit/_bridge.py` wraps it directly, plus
-adds a load-bearing `_pre_flight_refresh`). The *typed-Python-wrapper generator*
-(skill + deterministic CLI) is the genuine gap (Anthropic's pattern is TS-only;
-mcp2py only runtime-proxies + emits `.pyi` stubs). **Build the skill; auth is a
-small focused dependency, already done.**
+Python developers building AI agent pipelines on MCP servers — especially Claude Code users who've already hand-written at least one `<server>.py` wrapper and felt the pain. And platform teams running multi-server MCP environments where token cost and auth reliability are production concerns.
 
-## Auth: settled
+If you write your agent logic in Python and want generated tool wrappers you can actually own — review, pin, and keep in git — this is built for you.
 
-`_pre_flight_refresh` is load-bearing — the official mcp SDK 1.27.2 never reaches
-its silent-refresh path at cold start (`_initialize` skips `update_token_expiry`).
-Fresh-process CLI re-auths in browser without it.
+---
 
 ## Docs
 
-- [`doc/USAGE.md`](doc/USAGE.md) — end-user guide (published flow: PyPI + marketplace); two paths: plugin/skill and CLI only.
+- [`doc/USAGE.md`](doc/USAGE.md) — full end-user guide: install paths, server config, auth, the shape-spec, and calling generated wrappers.
 - [`doc/RUNNING_LOCALLY.md`](doc/RUNNING_LOCALLY.md) — run from a local clone without installing.
 
-## Next
+## Status
 
-Still deferred: `--check` drift mode. Distribution: see `doc/DISTRIBUTION.md`.
+Early access (`v0.x`). The codegen engine, OAuth persistence, live-probe shaping, and both Claude Code skills are working today. On the roadmap: `--check` drift mode, so CI can flag when a server's tools change out from under your wrappers.
+
+## License
+
+MIT.
