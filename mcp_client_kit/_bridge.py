@@ -77,6 +77,8 @@ DEFAULT_CONFIG_PATH = Path.home() / ".mcp-client-kit" / "config.json"
 #   4. default: "file"
 _CRED_BACKEND_ENV = "MCP_KIT_CRED_BACKEND"
 _VALID_BACKENDS: frozenset[str] = frozenset({"file", "keyring", "auto"})
+_KEYRING_SERVICE: str = "mcp-client-kit"
+_KEYRING_USER: str = "credentials"
 
 
 def _load_client_config(path: Path | None = None) -> dict:
@@ -88,6 +90,31 @@ def _load_client_config(path: Path | None = None) -> dict:
         return json.loads(target.read_text())
     except (json.JSONDecodeError, OSError):
         return {}
+
+
+def _save_client_config(updates: dict, path: Path | None = None) -> None:
+    """Merge *updates* into the client config file, creating it if absent.
+
+    Reads the existing config (if any), overlays *updates*, then writes back
+    atomically with 0600 permissions. Other keys in the config are preserved.
+    """
+    target = path or DEFAULT_CONFIG_PATH
+    data = _load_client_config(target)
+    data.update(updates)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps(data, indent=2).encode())
+    except BaseException:
+        os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.close(fd)
+    os.replace(tmp, target)
 
 
 def resolve_cred_backend(cli_value: str | None = None) -> str:
@@ -131,6 +158,30 @@ def _detect_keyring() -> str:
         return "keyring"
     except Exception:
         return "file"
+
+
+# ── Raw keyring helpers (raise on error — no silent fallback) ────────────────
+
+def _keyring_read_raw() -> dict:
+    """Read all credentials from the OS keyring. Raises on any failure."""
+    import keyring as _kr  # lazy — tests can monkeypatch sys.modules["keyring"]
+    raw = _kr.get_password(_KEYRING_SERVICE, _KEYRING_USER)
+    return json.loads(raw) if raw else {}
+
+
+def _keyring_write_raw(data: dict) -> None:
+    """Write all credentials to the OS keyring. Raises on any failure."""
+    import keyring as _kr
+    _kr.set_password(_KEYRING_SERVICE, _KEYRING_USER, json.dumps(data, indent=2))
+
+
+def _keyring_clear_raw() -> None:
+    """Delete the credentials entry from the OS keyring (no-op if absent)."""
+    import keyring as _kr
+    try:
+        _kr.delete_password(_KEYRING_SERVICE, _KEYRING_USER)
+    except Exception:
+        pass  # already absent or no delete support
 
 
 # Named HTTP+OAuth servers are loaded from a user config — never hardcoded, so no
@@ -283,17 +334,14 @@ class FileTokenStorage(TokenStorage):
 
     def _keyring_load(self) -> dict:
         try:
-            import keyring as _kr  # lazy — tests can monkeypatch sys.modules["keyring"]
-            raw = _kr.get_password("mcp-client-kit", "credentials")
-            return json.loads(raw) if raw else {}
+            return _keyring_read_raw()
         except Exception as exc:
             self._warn_keyring_fallback(str(exc))
             return self._file_load()
 
     def _keyring_save(self, data: dict) -> None:
         try:
-            import keyring as _kr
-            _kr.set_password("mcp-client-kit", "credentials", json.dumps(data, indent=2))
+            _keyring_write_raw(data)
         except Exception as exc:
             self._warn_keyring_fallback(str(exc))
             self._file_save(data)
@@ -357,6 +405,149 @@ class FileTokenStorage(TokenStorage):
         data = self._load()
         data.setdefault(self._key, {})["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
         self._save(data)
+
+
+# ── Backend-agnostic migration helpers ──────────────────────────────────────
+
+def _read_backend(backend: str, credentials_path: Path) -> dict:
+    """Read the full credentials dict from *backend* (raises on keyring failure)."""
+    if backend == "keyring":
+        return _keyring_read_raw()
+    return FileTokenStorage("_migrate", credentials_path, backend="file")._file_load()
+
+
+def _write_backend(backend: str, credentials_path: Path, data: dict) -> None:
+    """Write the full credentials dict to *backend* (raises on keyring failure)."""
+    if backend == "keyring":
+        _keyring_write_raw(data)
+    else:
+        FileTokenStorage("_migrate", credentials_path, backend="file")._file_save(data)
+
+
+def _clear_backend(backend: str, credentials_path: Path) -> None:
+    """Remove all credentials from *backend*."""
+    if backend == "keyring":
+        _keyring_clear_raw()
+    else:
+        credentials_path.unlink(missing_ok=True)
+
+
+def migrate_creds(
+    from_backend: str,
+    to_backend: str,
+    *,
+    servers: list[str] | None = None,
+    credentials_path: Path = DEFAULT_CREDS_PATH,
+    purge: bool = False,
+    set_default: bool = False,
+    config_path: Path | None = None,
+) -> dict:
+    """Copy stored credentials from one backend to another.
+
+    Parameters
+    ----------
+    from_backend:
+        Source backend — ``"file"`` or ``"keyring"``.
+    to_backend:
+        Target backend — ``"file"`` or ``"keyring"``.
+    servers:
+        Optional list of server names to migrate. ``None`` migrates all.
+        Raises ``ValueError`` if a requested name is absent in the source.
+    credentials_path:
+        Path to the file backend's credentials JSON (default:
+        ``~/.mcp-client-kit/credentials.json``).
+    purge:
+        When ``True``, remove only the migrated entries from the source backend
+        after a verified write. When ``False`` (default), the source is kept.
+    set_default:
+        When ``True``, write ``cred_backend=<to_backend>`` into the client
+        config file so future commands default to the new backend.
+    config_path:
+        Override path for the client config (default:
+        ``~/.mcp-client-kit/config.json``).
+
+    Returns
+    -------
+    dict
+        ``{"from": str, "to": str, "migrated": int, "overwritten": int,
+           "purged": bool, "set_default": bool}``
+    """
+    # Validate
+    concrete = {"file", "keyring"}
+    for label, val in [("from_backend", from_backend), ("to_backend", to_backend)]:
+        resolved = _detect_keyring() if val == "auto" else val
+        if resolved not in concrete:
+            raise ValueError(
+                f"{label}={val!r} is not a concrete backend. Valid choices: {sorted(concrete)}"
+            )
+    from_backend = _detect_keyring() if from_backend == "auto" else from_backend
+    to_backend   = _detect_keyring() if to_backend   == "auto" else to_backend
+
+    if from_backend == to_backend:
+        raise ValueError(
+            f"from_backend and to_backend are both {from_backend!r}; nothing to migrate."
+        )
+
+    # Read source
+    source_all = _read_backend(from_backend, credentials_path)
+
+    # Filter to requested servers
+    if servers is not None:
+        missing = [s for s in servers if s not in source_all]
+        if missing:
+            raise ValueError(
+                f"Requested server(s) not found in {from_backend!r} backend: "
+                + ", ".join(repr(s) for s in missing)
+            )
+        source_subset = {k: source_all[k] for k in servers}
+    else:
+        source_subset = source_all
+
+    if not source_subset:
+        return {"from": from_backend, "to": to_backend, "migrated": 0,
+                "overwritten": 0, "purged": False, "set_default": False}
+
+    # Merge into target (source wins on collision)
+    target = _read_backend(to_backend, credentials_path)
+    overwritten = sum(1 for k in source_subset if k in target)
+    merged = {**target, **source_subset}
+    _write_backend(to_backend, credentials_path, merged)
+
+    # Verify write
+    verified = _read_backend(to_backend, credentials_path)
+    missing_after = [k for k in source_subset if k not in verified]
+    if missing_after:
+        raise RuntimeError(
+            f"Migration verification failed: the following server(s) are absent from "
+            f"the {to_backend!r} backend after write: {', '.join(missing_after)}"
+        )
+
+    # Optional purge (remove only the migrated keys from source)
+    did_purge = False
+    if purge:
+        source_remaining = _read_backend(from_backend, credentials_path)
+        for k in source_subset:
+            source_remaining.pop(k, None)
+        if source_remaining:
+            _write_backend(from_backend, credentials_path, source_remaining)
+        else:
+            _clear_backend(from_backend, credentials_path)
+        did_purge = True
+
+    # Optional config default
+    did_set_default = False
+    if set_default:
+        _save_client_config({"cred_backend": to_backend}, config_path)
+        did_set_default = True
+
+    return {
+        "from": from_backend,
+        "to": to_backend,
+        "migrated": len(source_subset),
+        "overwritten": overwritten,
+        "purged": did_purge,
+        "set_default": did_set_default,
+    }
 
 
 async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> None:

@@ -79,6 +79,7 @@ uv add mcp-client-kit            # or: pip install mcp-client-kit
 | `call <server> <tool>` | One live call, raw payload to disk — bootstrap ids / inspect output | `--out <path>` (required) |
 | `merge <server>` | Consolidate `.parts/` → `<server>.shapes.json`; emit gitignored `verify.json` | `--out <path>` |
 | `login <server>` | Browser OAuth login | connection flags below |
+| `migrate-creds` | Copy stored OAuth tokens between `file`/`keyring` backends | `--from`, `--to`, `--servers`, `--purge`, `--set-default` |
 | `discover` | List servers from agent hosts | `--host <id>` (repeatable), `--json` |
 
 Connection flags shared by `codegen`/`list`/`probe`/`call`/`login`: `--url`,
@@ -113,7 +114,15 @@ Both formats are accepted:
 { "myserver": "https://mcp.example.com/mcp/v1" }
 
 // Claude Code format
-{ "mcpServers": { "myserver": { "url": "https://mcp.example.com/mcp/v1", "clientName": "my-app" } } }
+{
+  "mcpServers": {
+    "myserver": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp/v1",
+      "clientName": "my-app" 
+    } 
+  } 
+}
 ```
 
 ---
@@ -186,6 +195,28 @@ export MCP_KIT_CRED_BACKEND=keyring
 
 Priority order (highest first): `--cred-backend` flag → `$MCP_KIT_CRED_BACKEND` →
 `~/.mcp-client-kit/config.json` → default (`auto`).
+
+**Migrate credentials between backends** — use `migrate-creds` to move stored OAuth tokens
+from one backend to the other. Both `--from` and `--to` are required and must differ.
+
+```bash
+# Move all tokens from file → keyring and set keyring as the new default
+mcp-kit migrate-creds --from file --to keyring --set-default
+
+# Migrate only selected servers (comma-separated)
+mcp-kit migrate-creds --from file --to keyring --servers myserver,otherserver
+
+# Move and remove from source after a verified copy
+mcp-kit migrate-creds --from keyring --to file --purge
+```
+
+Behaviour:
+- Reads the source backend, writes into the target backend, then **re-reads the target to verify** every migrated key landed (raises `RuntimeError` if any are missing).
+- On collision (server already exists in target), **source wins** — the target entry is overwritten.
+- `--servers A,B,C` filters to those names; any name not found in the source raises an error immediately (before writing).
+- `--purge` deletes only the migrated keys from the source after a successful verified write; non-migrated keys are untouched.
+- `--set-default` writes `{"cred_backend": "<to>"}` into `~/.mcp-client-kit/config.json`, so every subsequent `mcp-kit` invocation uses the new backend without a flag or env var (equivalent to the manual config edit above, but in one step).
+- Empty source (no tokens stored) is a no-op; exits cleanly with `migrated: 0`.
 
 ---
 

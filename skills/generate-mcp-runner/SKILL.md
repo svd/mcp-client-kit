@@ -52,6 +52,10 @@ caller = McpBridgeCaller(config_path=CONFIG_PATH)
 No `ensure_login` call is needed — `McpBridgeCaller` resolves auth from `servers.json` and
 the credentials cache. Use this pattern when you can confirm the server appears in that file.
 
+The credentials cache backend (`file` or `keyring`) is selected by `$MCP_KIT_CRED_BACKEND`
+or `~/.mcp-client-kit/config.json` (`{"cred_backend": "..."}`) — both the runner and the
+`ensure_login` path read from whichever backend the environment/config selects.
+
 The `(transport, auth_kind)` mapping (mirrors `runner_gen.py:_TEMPLATE_KEYS`):
 
 ```python

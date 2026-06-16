@@ -502,6 +502,35 @@ def _cmd_login(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_migrate_creds(ns: argparse.Namespace) -> int:
+    parsed_servers: list[str] | None = None
+    if ns.servers:
+        parsed_servers = [s.strip() for s in ns.servers.split(",") if s.strip()]
+        if not parsed_servers:
+            parsed_servers = None
+
+    result = _bridge.migrate_creds(
+        ns.from_backend,
+        ns.to_backend,
+        servers=parsed_servers,
+        purge=ns.purge,
+        set_default=ns.set_default,
+    )
+
+    n = result["migrated"]
+    ow = result["overwritten"]
+    src = result["from"]
+    dst = result["to"]
+    purged_note = "source purged" if result["purged"] else "source kept"
+    default_note = f"; default set to {dst!r}" if result["set_default"] else ""
+    print(
+        f"[migrate-creds] copied {n} server(s) {src} → {dst} "
+        f"({ow} overwritten); {purged_note}{default_note}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def _add_conn_args(p: argparse.ArgumentParser) -> None:
     """Inline server-connection args shared by all commands (override config)."""
     p.add_argument("--url", help="server URL inline; enables OAuth without a config entry")
@@ -589,6 +618,33 @@ def main(argv: list[str] | None = None) -> int:
     lg.add_argument("server", help="server name (e.g. acme)")
     _add_conn_args(lg)
     lg.set_defaults(func=_cmd_login)
+
+    mc = sub.add_parser(
+        "migrate-creds",
+        help="copy stored credentials between file and keyring backends",
+    )
+    mc.add_argument(
+        "--from", dest="from_backend", required=True, choices=["file", "keyring"],
+        help="source backend",
+    )
+    mc.add_argument(
+        "--to", dest="to_backend", required=True, choices=["file", "keyring"],
+        help="target backend",
+    )
+    mc.add_argument(
+        "--servers", metavar="A,B,C",
+        help="comma-separated server names to migrate (default: all stored servers)",
+    )
+    mc.add_argument(
+        "--purge", action="store_true",
+        help="remove migrated entries from the source after a verified copy (default: keep)",
+    )
+    mc.add_argument(
+        "--set-default", dest="set_default", action="store_true",
+        help="write cred_backend=<to> into ~/.mcp-client-kit/config.json so future "
+             "commands default to the target backend (default: leave config untouched)",
+    )
+    mc.set_defaults(func=_cmd_migrate_creds)
 
     dc = sub.add_parser("discover", help="list MCP servers from installed agent hosts")
     dc.add_argument("--host", action="append", dest="host", metavar="ID",

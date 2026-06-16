@@ -57,6 +57,7 @@ uv run mcp-kit discover --host claude-code
 | `mcp-kit call <server> <tool> --out <p>` | One live call, raw payload to disk — bootstrap ids / inspect output. |
 | `mcp-kit merge <server>` | Consolidate `.parts/` into `<server>.shapes.json`; emits a gitignored `verify.json` sidecar. |
 | `mcp-kit login <server>` | Browser OAuth login; tokens at `~/.mcp-client-kit/credentials.json`. |
+| `mcp-kit migrate-creds` | Move stored OAuth tokens between `file`/`keyring` backends; `--set-default` switches the permanent default. |
 | `mcp-kit discover` | List servers from installed agent hosts. |
 
 Full workflow and flags: [`doc/USAGE.md`](doc/USAGE.md).

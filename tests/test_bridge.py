@@ -406,6 +406,231 @@ def test_keyring_backend_falls_back_to_file_when_unavailable(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# migrate_creds — backend-to-backend credential migration
+# ---------------------------------------------------------------------------
+
+class _FakeKeyringMig(_FakeKeyring):
+    """Extends _FakeKeyring with delete_password support for migration tests."""
+    def __init__(self):
+        super().__init__()
+        self.delete_calls: list = []
+
+    def delete_password(self, service, username):
+        self.delete_calls.append((service, username))
+        self._store.pop((service, username), None)
+
+
+def _creds_data(*server_names: str) -> dict:
+    """Build a minimal credentials dict for the given server names."""
+    return {
+        name: {"tokens": {"access_token": f"tok_{name}", "token_type": "bearer"}}
+        for name in server_names
+    }
+
+
+def test_migrate_file_to_keyring_basic(tmp_path):
+    """file → keyring: all entries copied; source file preserved (no --purge)."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("acme", "beta")))
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        result = _bridge.migrate_creds("file", "keyring", credentials_path=creds)
+
+    assert result["migrated"] == 2
+    assert result["overwritten"] == 0
+    assert result["purged"] is False
+    assert result["set_default"] is False
+    assert creds.exists(), "source file must be kept (no --purge)"
+    assert fake_kr.set_calls, "keyring set_password must have been called"
+
+
+def test_migrate_file_to_keyring_purge(tmp_path):
+    """file → keyring --purge: source file removed after verified write."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("acme")))
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        result = _bridge.migrate_creds("file", "keyring", credentials_path=creds, purge=True)
+
+    assert result["purged"] is True
+    assert not creds.exists(), "source file must be removed after purge"
+
+
+def test_migrate_keyring_to_file(tmp_path):
+    """keyring → file: round-trip produces correct JSON file."""
+    creds = tmp_path / "credentials.json"
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        # Seed keyring
+        _bridge._keyring_write_raw(_creds_data("svc"))
+        result = _bridge.migrate_creds("keyring", "file", credentials_path=creds)
+
+    assert result["migrated"] == 1
+    assert creds.exists()
+    data = json.loads(creds.read_text())
+    assert "svc" in data
+
+
+def test_migrate_collision_source_wins(tmp_path):
+    """Collision: source entry overwrites target; target-only entries survive."""
+    creds = tmp_path / "credentials.json"
+    source_data = {"alpha": {"tokens": {"access_token": "src_tok", "token_type": "bearer"}}}
+    target_data = {
+        "alpha": {"tokens": {"access_token": "old_tok", "token_type": "bearer"}},
+        "beta":  {"tokens": {"access_token": "beta_tok", "token_type": "bearer"}},
+    }
+    creds.write_text(json.dumps(source_data))
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        # Pre-seed target keyring
+        _bridge._keyring_write_raw(target_data)
+        result = _bridge.migrate_creds("file", "keyring", credentials_path=creds)
+        merged = _bridge._keyring_read_raw()
+
+    assert result["overwritten"] == 1
+    assert merged["alpha"]["tokens"]["access_token"] == "src_tok", "source must win"
+    assert "beta" in merged, "target-only entry must survive"
+
+
+def test_migrate_empty_source_noop(tmp_path):
+    """Empty source: no write, no purge, migrated == 0."""
+    creds = tmp_path / "credentials.json"
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        result = _bridge.migrate_creds("keyring", "file", credentials_path=creds)
+
+    assert result["migrated"] == 0
+    assert not creds.exists(), "no target write for empty source"
+
+
+def test_migrate_servers_subset(tmp_path):
+    """--servers: only named entries migrate; other source entries untouched in target."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("acme", "beta", "gamma")))
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        result = _bridge.migrate_creds(
+            "file", "keyring", servers=["acme", "beta"], credentials_path=creds
+        )
+        migrated_data = _bridge._keyring_read_raw()
+
+    assert result["migrated"] == 2
+    assert "acme" in migrated_data
+    assert "beta" in migrated_data
+    assert "gamma" not in migrated_data
+
+
+def test_migrate_servers_subset_purge_partial(tmp_path):
+    """--servers + --purge: only migrated keys removed from source; un-named entries remain."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("acme", "beta")))
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        _bridge.migrate_creds(
+            "file", "keyring", servers=["acme"], credentials_path=creds, purge=True
+        )
+
+    remaining = json.loads(creds.read_text())
+    assert "acme" not in remaining, "migrated key must be purged from source"
+    assert "beta" in remaining, "un-named key must remain in source"
+
+
+def test_migrate_servers_absent_name_raises(tmp_path):
+    """--servers with absent name → ValueError before any write."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("acme")))
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        with pytest.raises(ValueError, match="nosuchserver"):
+            _bridge.migrate_creds(
+                "file", "keyring", servers=["acme", "nosuchserver"], credentials_path=creds
+            )
+        # Nothing written to keyring
+        assert not fake_kr.set_calls
+
+
+def test_migrate_same_backend_raises(tmp_path):
+    """from == to → ValueError."""
+    with pytest.raises(ValueError, match="nothing to migrate"):
+        _bridge.migrate_creds("file", "file")
+
+
+def test_migrate_set_default_creates_config(tmp_path):
+    """--set-default: creates config.json with cred_backend when file is absent."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("svc")))
+    cfg = tmp_path / "config.json"
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        result = _bridge.migrate_creds(
+            "file", "keyring", credentials_path=creds, set_default=True, config_path=cfg
+        )
+
+    assert result["set_default"] is True
+    assert cfg.exists()
+    assert json.loads(cfg.read_text())["cred_backend"] == "keyring"
+
+
+def test_migrate_set_default_preserves_other_keys(tmp_path):
+    """--set-default: existing config keys other than cred_backend are preserved."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("svc")))
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"other_key": "other_val", "cred_backend": "file"}))
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        _bridge.migrate_creds(
+            "file", "keyring", credentials_path=creds, set_default=True, config_path=cfg
+        )
+
+    data = json.loads(cfg.read_text())
+    assert data["cred_backend"] == "keyring"
+    assert data["other_key"] == "other_val", "other_key must be preserved"
+
+
+def test_migrate_no_set_default_leaves_config_untouched(tmp_path):
+    """Without --set-default, config.json is not touched."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("svc")))
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"cred_backend": "file"}))
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        _bridge.migrate_creds("file", "keyring", credentials_path=creds)
+
+    assert json.loads(cfg.read_text())["cred_backend"] == "file", "config must be unchanged"
+
+
+def test_migrate_keyring_read_failure_propagates(tmp_path):
+    """Keyring read failure raises (strict — not silent fallback), source not purged."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("svc")))
+
+    class _BrokenKeyring:
+        def get_password(self, s, u): raise RuntimeError("no keyring")
+        def set_password(self, s, u, p): raise RuntimeError("no keyring")
+        def delete_password(self, s, u): raise RuntimeError("no keyring")
+
+    with patch.dict("sys.modules", {"keyring": _BrokenKeyring()}):
+        with pytest.raises(RuntimeError, match="no keyring"):
+            _bridge.migrate_creds("keyring", "file", credentials_path=creds, purge=True)
+
+    # Source (keyring) not purged — but verify source file was not inadvertently created
+    # by checking that the purge path never ran (exception was raised before verify)
+
+
+# ---------------------------------------------------------------------------
 # parse() — JSON, repr, and plain-text payloads  (#4)
 # ---------------------------------------------------------------------------
 

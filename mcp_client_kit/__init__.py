@@ -5,6 +5,7 @@ from mcp_client_kit._bridge import (
     ReauthenticationRequired,
     ensure_login,
     login,
+    migrate_creds,
 )
 from mcp_client_kit.seam import McpCaller
 
@@ -14,4 +15,5 @@ __all__ = [
     "ReauthenticationRequired",
     "ensure_login",
     "login",
+    "migrate_creds",
 ]
