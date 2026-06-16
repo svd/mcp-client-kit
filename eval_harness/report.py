@@ -124,6 +124,22 @@ def _check_cell(status: str, detail: str) -> str:
     return cell
 
 
+def _load_narrative(base_dir: Path, server: str) -> str | None:
+    """Return content of <base_dir>/<server>/narrative.md, or None if absent."""
+    path = base_dir / server / "narrative.md"
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return None
+
+
+def _load_synthesis(base_dir: Path) -> str | None:
+    """Return content of <base_dir>/_synthesis.md, or None if absent."""
+    path = base_dir / "_synthesis.md"
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return None
+
+
 def render_detail(result: dict) -> str:
     """Render per-server detail section with 5-check table."""
     server = result.get("server", "?")
@@ -164,6 +180,7 @@ def render_detail(result: dict) -> str:
 def generate_report(
     base_dir: Path = Path("eval"),
     out_path: Path = Path("doc/EVAL_REPORT.md"),
+    with_narrative: bool = False,
 ) -> str:
     """Find all results, render report, write to out_path, return content."""
     timestamp = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -202,10 +219,25 @@ def generate_report(
         header_lines.append("")
         for r in results:
             header_lines.append(render_detail(r))
+            if with_narrative:
+                narrative = _load_narrative(base_dir, r.get("server", ""))
+                if narrative:
+                    header_lines.append("")
+                    header_lines.append("**Summary:**")
+                    header_lines.append("")
+                    header_lines.append(narrative.strip())
             header_lines.append("")
     else:
         header_lines.append("No completed evals yet.")
         header_lines.append("")
+
+    if with_narrative:
+        synthesis = _load_synthesis(base_dir)
+        if synthesis:
+            header_lines.append("## Cross-server synthesis")
+            header_lines.append("")
+            header_lines.append(synthesis.strip())
+            header_lines.append("")
 
     content = "\n".join(header_lines)
 
@@ -239,7 +271,13 @@ if __name__ == "__main__":
         default=Path("doc/EVAL_REPORT.md"),
         help="Output path for the report (default: doc/EVAL_REPORT.md)",
     )
+    parser.add_argument(
+        "--with-narrative",
+        action="store_true",
+        default=False,
+        help="Splice per-server narrative.md and _synthesis.md fragments into the report.",
+    )
     args = parser.parse_args()
 
-    content = generate_report(base_dir=args.base_dir, out_path=args.out)
+    content = generate_report(base_dir=args.base_dir, out_path=args.out, with_narrative=args.with_narrative)
     print(f"Report written to {args.out}")

@@ -64,7 +64,7 @@ Use skeletons in `report-templates.md` (this directory).
 |---|---|
 | `mcp-kit codegen / list / probe / merge` CLI | **mcp-client-kit** |
 | `generate-mcp-wrappers` SKILL.md guidance | **mcp-client-kit** |
-| `eval-kit runner / verify / merge-session / report` | **eval-kit** |
+| `eval-kit runner / verify / report` | **eval-kit** |
 | `workflows/run-eval.workflow.js` | **eval-kit** |
 | `agents/server-eval-agent.md` | **eval-kit** |
 | `servers/servers.toml` | **eval-kit** |

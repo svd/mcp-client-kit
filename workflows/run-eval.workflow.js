@@ -4,8 +4,8 @@ export const meta = {
   phases: [
     { title: 'Generate', detail: 'Run generate-mcp-wrappers skill per server' },
     { title: 'Analyze', detail: 'Run session-analyzer on agent transcript' },
-    { title: 'Merge', detail: 'Merge narrative + analyzer into session-overview.md' },
     { title: 'Verify', detail: 'Run 5-check contract, write result.json' },
+    { title: 'Synthesize', detail: 'Write per-server narrative + cross-server synthesis fragments' },
     { title: 'Report', detail: 'Aggregate all result.json → EVAL_REPORT.md' },
   ],
 }
@@ -23,6 +23,12 @@ let resolvedArgs = args
 if (typeof resolvedArgs === 'string' && resolvedArgs !== 'all') {
   try { resolvedArgs = JSON.parse(resolvedArgs) } catch(e) {}
 }
+
+log('Generating .mcp.eval.json from servers.toml…')
+await agent(
+  'Run this command in the project root: uv run eval-kit gen-config\nReturn "DONE" when it succeeds, or the full error output if it fails.',
+  { label: 'gen-config' }
+)
 
 log('Loading servers manifest…')
 const manifestAgent = await agent(
@@ -83,7 +89,7 @@ const promptTemplate = await agent(
 
 log('Template loaded. Starting pipeline…')
 
-// ── Phase 2: pipeline — Generate → Analyze → Merge+Verify per server ────────
+// ── Phase 2: pipeline — Generate → Analyze → Verify per server ──────────────
 
 const results = await pipeline(
   servers,
@@ -147,21 +153,18 @@ When done, return "DONE: eval/${server.name}/session-analyzer.md written"`
     return { server, summary }
   },
 
-  // Stage 3: Merge + Verify + Runner (via eval-kit commands)
+  // Stage 3: Verify + Runner (via eval-kit commands)
   async ({ server, summary }) => {
-    log(`[${server.name}] Starting merge/verify/runner stage…`)
+    log(`[${server.name}] Starting verify/runner stage…`)
 
-    const mergeVerify = await agent(
+    const verifyRunner = await agent(
       `Run these commands in sequence in the project root (your current working directory):
 
-1. Check whether eval/${server.name}/session-analyzer.md exists. If it does not exist, log a warning and skip step 2 (merge-session) — set merged=false.
-2. uv run eval-kit merge-session ${server.name}
-3. uv run eval-kit verify ${server.name}
-4. uv run eval-kit runner ${server.name}
+1. uv run eval-kit verify ${server.name}
+2. uv run eval-kit runner ${server.name}
 
 Report what each command printed to stdout and whether it succeeded (exit code 0).
 Return a JSON object with these fields:
-- merged: true if merge-session exited 0, false otherwise
 - verified: true if verify exited 0, false otherwise
 - runner_generated: true if runner exited 0, false otherwise
 - verify_output: the stdout from the verify command (first 500 chars)`,
@@ -171,34 +174,74 @@ Return a JSON object with these fields:
         schema: {
           type: 'object',
           properties: {
-            merged:           { type: 'boolean' },
             verified:         { type: 'boolean' },
             runner_generated: { type: 'boolean' },
             verify_output:    { type: 'string' },
           },
-          required: ['merged', 'verified', 'runner_generated'],
+          required: ['verified', 'runner_generated'],
         },
       }
     )
 
-    log(`[${server.name}] Verify done — merged=${mergeVerify.merged}, verified=${mergeVerify.verified}, runner=${mergeVerify.runner_generated}`)
-    return { server, summary, mergeVerify }
+    log(`[${server.name}] Verify done — verified=${verifyRunner.verified}, runner=${verifyRunner.runner_generated}`)
+    return { server, summary, verifyRunner }
   }
 )
 
-// ── Phase 3: Report ──────────────────────────────────────────────────────────
+// ── Phase 3: Synthesize — per-server narrative + cross-server synthesis ──────
 
-phase('Report')
+phase('Synthesize')
 
 const successCount = results.filter(Boolean).length
 log(`Pipeline complete — ${successCount}/${servers.length} servers succeeded`)
+log('Generating per-server narrative fragments…')
+
+await pipeline(
+  results.filter(Boolean),
+  async ({ server }) => {
+    await agent(
+      `Read these two files:
+- eval/${server.name}/session-overview.md
+- eval/${server.name}/result.json
+
+Write a concise 4–8 sentence narrative fragment to eval/${server.name}/narrative.md covering:
+- How many tools the server exposes and how many were probed
+- Which modes were hit and the key reason (e.g. "all tools returned unstructured text → Mode A only")
+- Any notable errors or recovery (one sentence max)
+- Any Path-E/F guard decisions made
+- Overall assessment
+
+Do not copy large blocks from session-overview.md — synthesize.
+Return "DONE: eval/${server.name}/narrative.md written" when complete.`,
+      { label: `narrative:${server.name}`, phase: 'Synthesize' }
+    )
+  }
+)
+
+log('Generating cross-server synthesis…')
+await agent(
+  `Read doc/EVAL_REPORT.md (the mechanical matrix) and all eval/*/narrative.md files that exist.
+
+Write a cross-server synthesis to eval/_synthesis.md covering:
+1. **Overall verdict** (1–2 sentences): how well the generate-mcp-wrappers skill performed across all servers
+2. **Mode coverage gaps**: which servers hit only Mode A when richer probing could have yielded B/C; explain why
+3. **Known issues**: recurring errors or patterns across servers
+4. **Next steps**: the 2–3 highest-value improvements to pursue
+
+Keep it under 400 words. Return "DONE: eval/_synthesis.md written" when complete.`,
+  { label: 'synthesize', phase: 'Synthesize' }
+)
+
+// ── Phase 4: Report ──────────────────────────────────────────────────────────
+
+phase('Report')
 
 const reportResult = await agent(
   `Run this command in the project root (your current working directory):
 
-  uv run eval-kit report
+  uv run eval-kit report --with-narrative
 
-This generates doc/EVAL_REPORT.md from all result.json files.
+This generates doc/EVAL_REPORT.md from all result.json files with narrative fragments spliced in.
 Return the first 30 lines of the generated report file at doc/EVAL_REPORT.md.`,
   { label: 'report', phase: 'Report' }
 )
@@ -210,8 +253,8 @@ return {
   servers_evaluated: successCount,
   results: results.filter(Boolean).map(r => ({
     server:       r.server.name,
-    modes_hit:    r.summary?.modes_hit   || [],
+    modes_hit:    r.summary?.modes_hit    || [],
     verdict_hint: r.summary?.verdict_hint || 'unknown',
-    verified:     r.mergeVerify?.verified || false,
+    verified:     r.verifyRunner?.verified || false,
   })),
 }

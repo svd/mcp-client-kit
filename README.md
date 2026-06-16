@@ -43,17 +43,16 @@ the full 15-server example set with comments explaining each field.
 
 The framework is driven by a Workflow script (`workflows/run-eval.workflow.js`) that you launch from **Claude Code** (not a standalone script).
 
-Open the workflow in Claude Code and follow the prompts. The workflow runs four stages for each
-server: generate, analyze, merge, and verify.
+Open the workflow in Claude Code and follow the prompts. The workflow runs per-server stages
+(generate, analyze, verify), then synthesizes narratives and generates the aggregate report.
 
 ## CLI reference
 
 ```bash
 eval-kit verify github            # Run 5-check contract on eval/github/
 eval-kit report                   # Regenerate doc/EVAL_REPORT.md from all result.json files
+eval-kit report --with-narrative  # Same, with per-server narrative + synthesis spliced in
 eval-kit runner github            # Regenerate run.py for eval/github/
-eval-kit merge-session github     # Merge session-overview.draft.md + session-analyzer.md
-                                  #   → eval/github/session-overview.md
 ```
 
 ## Existing eval: github
@@ -70,13 +69,13 @@ servers/servers.toml
 workflows/run-eval.workflow.js  (one pipeline per server)
         │
   ┌─────┴──────────────────────────────────────────────┐
-  │ 1 Generate  agent runs generate-mcp-wrappers        │
-  │ 2 Analyze   session-analyzer on transcript          │
-  │ 3 Merge     session-overview.md                     │
-  │ 4 Verify    eval-kit verify → result.json           │
+  │ 1 Generate   agent runs generate-mcp-wrappers       │
+  │ 2 Analyze    session-analyzer on transcript         │
+  │ 3 Verify     eval-kit verify → result.json          │
   └─────┬──────────────────────────────────────────────┘
         │ (after all servers)
-   eval-kit report → doc/EVAL_REPORT.md
+   Synthesize  → narrative.md per server + _synthesis.md
+   eval-kit report --with-narrative → doc/EVAL_REPORT.md
 ```
 
 ## Repo layout
@@ -115,7 +114,6 @@ The following are intentionally excluded from version control:
 
 - `*.probe-raw.json` — raw MCP payload dumps (may contain PII)
 - `*.shapes.json.parts/` — intermediate per-tool probe part files
-- `session-overview.draft.md` — agent self-narrative draft before merging
 - `github.bak/` — legacy backup folder
 
 ## Requirements
