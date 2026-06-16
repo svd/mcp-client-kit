@@ -326,6 +326,22 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    > generated-module read from main context. The agent reads the output `.py`, confirms
    > signatures, and returns a pass/fail summary. Benefit is modest for small files.
 
+7. **(Optional) Generate a smoke-test runner.**
+
+   Once the wrappers are shaped and verified, ask the user whether to also generate a runner:
+
+   > Use `AskUserQuestion` (single-select, 2 options):
+   > - **Yes** — invoke `generate-mcp-runner` now
+   > - **No / I'll do it later** — stop here
+   >
+   > **Subagent fallback (when `AskUserQuestion` is unavailable):** skip this step entirely
+   > — do not invoke `generate-mcp-runner` automatically.
+
+   If the user says yes, invoke `generate-mcp-runner`. That skill reads the module,
+   `shapes.json`, and `verify.json` you just produced and authors a workflow-ordered,
+   shape-aware smoke test in one step. See `skills/generate-mcp-runner/SKILL.md` for the
+   full procedure. This step is a pointer only — do not duplicate the runner procedure here.
+
 ## Guards (do not violate)
 
 - **Only mcp-kit talks to the server.** Every live interaction — `list`, `probe`,
