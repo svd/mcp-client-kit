@@ -128,6 +128,38 @@ def _parts_dir(target: Path) -> Path:
     return target.with_name(target.name + ".parts")
 
 
+def _normalize_shapes(shapes: dict) -> list[str]:
+    """Normalize type-annotation strings in *shapes* in-place.
+
+    Rewrites JSON/TS-cased tokens (``any``→``Any``, ``null``→``None``, etc.)
+    found in ``fields``, ``input_overrides``, and ``return_model`` values.
+    Returns a list of change descriptions suitable for a stderr report.
+    """
+    changes: list[str] = []
+    for spec in shapes.values():
+        if not isinstance(spec, dict):
+            continue
+        for fname, ftype in list((spec.get("fields") or {}).items()):
+            if isinstance(ftype, str):
+                new = codegen.normalize_annotation(ftype)
+                if new != ftype:
+                    spec["fields"][fname] = new
+                    changes.append(f"'{ftype}'→'{new}'")
+        for pname, ptype in list((spec.get("input_overrides") or {}).items()):
+            if isinstance(ptype, str):
+                new = codegen.normalize_annotation(ptype)
+                if new != ptype:
+                    spec["input_overrides"][pname] = new
+                    changes.append(f"'{ptype}'→'{new}'")
+        rm = spec.get("return_model")
+        if isinstance(rm, str):
+            new = codegen.normalize_annotation(rm)
+            if new != rm:
+                spec["return_model"] = new
+                changes.append(f"'{rm}'→'{new}'")
+    return changes
+
+
 def _load_shapes(ns: argparse.Namespace) -> dict | None:
     """Load the shape-spec sidecar: explicit --shapes, else <server>.shapes.json beside --out.
 
@@ -150,16 +182,30 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
                 if parts:
                     skeletons = [json.loads(p.read_text()) for p in parts]
                     shapes = codegen.merge_skeletons(skeletons)
+                    changes = _normalize_shapes(shapes)
                     print(
                         f"[codegen] shapes: {parts_d}/ ({len(shapes)} tool(s), "
                         "in-memory merge — run `mcp-kit merge` to persist)",
                         file=sys.stderr,
                     )
+                    if changes:
+                        print(
+                            f"[codegen] shapes: normalized {len(changes)} type string(s): "
+                            + ", ".join(changes),
+                            file=sys.stderr,
+                        )
                     return shapes
     if path is None:
         return None
     shapes = json.loads(path.read_text())
+    changes = _normalize_shapes(shapes)
     print(f"[codegen] shapes: {path} ({len(shapes)} tool(s))", file=sys.stderr)
+    if changes:
+        print(
+            f"[codegen] shapes: normalized {len(changes)} type string(s): "
+            + ", ".join(changes),
+            file=sys.stderr,
+        )
     return shapes
 
 
@@ -528,6 +574,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     mg.add_argument("--keep-parts", action="store_true",
                     help="keep the .parts/ directory after merging (default: remove)")
+    mg.add_argument("--config", dest="config",
+                    help="accepted for flag-surface consistency with other subcommands; "
+                         "has no effect on merge (merge is pure filesystem consolidation)")
     mg.set_defaults(func=_cmd_merge)
 
     ls = sub.add_parser("list", help="list tools for a server as JSON [{name, description}]")

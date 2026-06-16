@@ -44,6 +44,39 @@ def py_type(schema: dict | None) -> str:
     return _SCALARS.get(t, "Any")
 
 
+# ── Shape-spec annotation normalization ──────────────────────────────────────
+
+# JSON/TS-cased tokens that need to be replaced with their Python equivalents
+# when they appear in hand-edited shapes.json values.
+_ANNOTATION_REWRITE: dict[str, str] = {
+    "any": "Any",
+    "null": "None",
+    "none": "None",
+    **{k: v for k, v in _SCALARS.items() if k != "null"},  # string→str, integer→int, etc.
+}
+_ANNOTATION_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in _ANNOTATION_REWRITE) + r")\b"
+)
+
+
+def normalize_annotation(s: str) -> str:
+    """Rewrite JSON/TS-cased type tokens to their Python equivalents.
+
+    Uses word-boundary matching so custom identifiers such as ``AnyThing`` or
+    ``NullableModel`` are left untouched.  Already-correct strings (``Any``,
+    ``None``, ``str`` …) pass through unchanged.
+
+    Examples::
+
+        normalize_annotation("any")           == "Any"
+        normalize_annotation("null")          == "None"
+        normalize_annotation("list[any]")     == "list[Any]"
+        normalize_annotation("str | null")    == "str | None"
+        normalize_annotation("AnyThing")      == "AnyThing"   # unchanged
+    """
+    return _ANNOTATION_RE.sub(lambda m: _ANNOTATION_REWRITE[m.group()], s)
+
+
 # ── Identifier sanitization ──────────────────────────────────────────────────
 
 def sanitize(name: str) -> str:

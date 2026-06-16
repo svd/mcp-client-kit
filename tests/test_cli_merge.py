@@ -20,6 +20,8 @@ from mcp_client_kit import codegen
 from mcp_client_kit.cli import (
     _atomic_write_text,
     _cmd_merge,
+    _load_shapes,
+    _normalize_shapes,
     _parts_dir,
 )
 
@@ -413,3 +415,85 @@ def test_merge_no_parts_dir_hints_subfolder(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 0
     assert "subfolder" in captured.err, "hint about subfolder should appear in stderr"
+
+
+# ── Fix 1: shapes type-string normalization ───────────────────────────────────
+
+def test_normalize_shapes_rewrites_lowercase_types():
+    shapes = {
+        "get_entity": {
+            "fields": {"id": "str", "score": "any", "tags": "list[any]"},
+            "input_overrides": {"limit": "integer", "active": "boolean"},
+            "return_model": "null",
+        },
+        "list_items": {
+            "fields": {"result": "str | null"},
+            "input_overrides": {},
+            "return_model": None,  # JSON null — not a string, must not be touched
+        },
+    }
+    changes = _normalize_shapes(shapes)
+
+    assert shapes["get_entity"]["fields"]["score"] == "Any"
+    assert shapes["get_entity"]["fields"]["tags"] == "list[Any]"
+    assert shapes["get_entity"]["fields"]["id"] == "str"           # unchanged
+    assert shapes["get_entity"]["input_overrides"]["limit"] == "int"
+    assert shapes["get_entity"]["input_overrides"]["active"] == "bool"
+    assert shapes["get_entity"]["return_model"] == "None"
+    assert shapes["list_items"]["fields"]["result"] == "str | None"
+    assert shapes["list_items"]["return_model"] is None            # None unchanged
+
+    assert len(changes) == 6  # score, tags, limit, active, return_model, result
+
+
+def test_normalize_shapes_clean_shapes_no_changes():
+    shapes = {
+        "t": {
+            "fields": {"x": "str", "y": "Any", "z": "list[str]"},
+            "input_overrides": {"n": "int"},
+            "return_model": "MyModel",
+        }
+    }
+    changes = _normalize_shapes(shapes)
+    assert changes == []
+
+
+def test_load_shapes_normalizes_type_strings(tmp_path, capsys):
+    shapes_file = tmp_path / "acme.shapes.json"
+    shapes_file.write_text(json.dumps({
+        "get_entity": {
+            "fields": {"score": "any", "name": "str"},
+            "input_overrides": {"limit": "integer"},
+            "return_model": "null",
+        }
+    }))
+
+    ns = SimpleNamespace(shapes=str(shapes_file), out=None, server="acme")
+    shapes = _load_shapes(ns)
+
+    assert shapes is not None
+    assert shapes["get_entity"]["fields"]["score"] == "Any"
+    assert shapes["get_entity"]["fields"]["name"] == "str"          # unchanged
+    assert shapes["get_entity"]["input_overrides"]["limit"] == "int"
+    assert shapes["get_entity"]["return_model"] == "None"
+
+    captured = capsys.readouterr()
+    assert "normalized" in captured.err
+    assert "3 type string(s)" in captured.err
+
+
+# ── Fix 2: merge accepts --config for flag-surface consistency ────────────────
+
+def test_merge_accepts_config_flag(tmp_path):
+    """merge --config is silently accepted and ignored (no exit code 2)."""
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(target, {"tool_a": {"source": "live", "fields": {"x": "int"}}})
+
+    ns = SimpleNamespace(
+        server="acme", out=str(target), keep_parts=False, config="/some/servers.json"
+    )
+    rc = _cmd_merge(ns)
+
+    assert rc == 0
+    result = json.loads(target.read_text())
+    assert "tool_a" in result

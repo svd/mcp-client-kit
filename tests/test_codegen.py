@@ -39,6 +39,32 @@ def test_py_type_scalars_and_containers():
     assert codegen.py_type({"type": ["string", "null"]}) == "str | None"
 
 
+def test_normalize_annotation_rewrites_json_ts_tokens():
+    assert codegen.normalize_annotation("any") == "Any"
+    assert codegen.normalize_annotation("null") == "None"
+    assert codegen.normalize_annotation("none") == "None"
+    assert codegen.normalize_annotation("list[any]") == "list[Any]"
+    assert codegen.normalize_annotation("str | null") == "str | None"
+    assert codegen.normalize_annotation("string") == "str"
+    assert codegen.normalize_annotation("integer") == "int"
+    assert codegen.normalize_annotation("number") == "float"
+    assert codegen.normalize_annotation("boolean") == "bool"
+
+
+def test_normalize_annotation_passthrough():
+    # Already-correct Python annotations must not be changed.
+    for s in ("Any", "None", "str", "int", "float", "bool",
+              "list[str]", "dict", "MyModel", "str | None", "list[Any]"):
+        assert codegen.normalize_annotation(s) == s
+
+
+def test_normalize_annotation_word_boundary():
+    # Tokens embedded in identifiers must not be touched.
+    assert codegen.normalize_annotation("AnyThing") == "AnyThing"
+    assert codegen.normalize_annotation("NullableModel") == "NullableModel"
+    assert codegen.normalize_annotation("boolean_flag") == "boolean_flag"
+
+
 def test_sanitize_identifiers():
     assert codegen.sanitize("get-current-user") == "get_current_user"
     assert codegen.sanitize("class") == "class_"
