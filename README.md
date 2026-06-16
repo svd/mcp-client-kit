@@ -7,12 +7,19 @@ that generates typed Python wrappers for any MCP server.
 (OAuth 2.1 PKCE, file token storage, pre-flight refresh) and per-server wrappers —
 the working prototype this builds on.
 
-## Status: deterministic CLI prototype works (2026-06-14)
+## Status: CLI + skill layer work (2026-06-16)
 
 `mcp-kit codegen <server>` connects to a live MCP server, lists tools, and emits a
 typed `async def` per tool against the `McpCaller` seam. Optional `--probe`
 records a tool's real response *shape* — the empirical pass that beats pure
 inputSchema codegen.
+
+The judgment pass now ships as a Claude Code skill,
+[`generate-mcp-wrappers`](skills/generate-mcp-wrappers/SKILL.md) — it drives the
+CLI through stubs → probe → merge → shape-edit → regenerate → verify. A second
+skill, [`generate-mcp-runner`](skills/generate-mcp-runner/SKILL.md), authors a
+static smoke-test `run.py` for the generated wrappers. See
+[`doc/USAGE.md`](doc/USAGE.md).
 
 ```
 uv run mcp-kit codegen acme --out acme.py
@@ -40,14 +47,29 @@ uv run mcp-kit discover --host claude-code
   ⚠  claude.ai connector — managed OAuth, not probeable by mcp-kit
 ```
 
+## Commands
+
+| Command | What it does |
+|---------|-------------|
+| `mcp-kit codegen <server>` | Emit a typed `async def` per tool; `--shapes` applies the shape-spec, `--probe` records one response shape inline. |
+| `mcp-kit list <server>` | Print tools as JSON; warns on stderr about discriminator candidates. |
+| `mcp-kit probe <server> <tool>` | Live call(s) → shape-spec skeleton; `--emit-shape` writes parallel-safe parts under `.parts/`. |
+| `mcp-kit call <server> <tool> --out <p>` | One live call, raw payload to disk — bootstrap ids / inspect output. |
+| `mcp-kit merge <server>` | Consolidate `.parts/` into `<server>.shapes.json`; emits a gitignored `verify.json` sidecar. |
+| `mcp-kit login <server>` | Browser OAuth login; tokens at `~/.mcp-client-kit/credentials.json`. |
+| `mcp-kit discover` | List servers from installed agent hosts. |
+
+Full workflow and flags: [`doc/USAGE.md`](doc/USAGE.md).
+
 Limitations:
 
 - **claude.ai connectors** (e.g. Context7, Microsoft 365) appear in output but are marked non-probeable — they use managed OAuth that mcp-kit cannot replicate.
 - **Fallback path** (when `claude` binary is absent): only reads `~/.claude.json`; plugin-provided servers and claude.ai connectors will be missing.
 
-Not yet built: the skill layer (judgment pass — unwrap helpers, applying probe
-findings, tool curation), `--check` drift mode. Auth is done:
+Not yet built: `--check` drift mode. Auth is done:
 `mcp_client_kit/_bridge.py` on the official `mcp` SDK (see VERDICT.md §Correction).
+The skill layer (judgment pass — unwrap helpers, applying probe findings, tool
+curation) now ships — see [`skills/`](skills/).
 
 Read in this order:
 
@@ -78,5 +100,4 @@ Fresh-process CLI re-auths in browser without it.
 
 ## Next
 
-Still deferred: skill layer (judgment pass — unwrap helpers, tool curation),
-`--check` drift mode. Distribution: see `doc/DISTRIBUTION.md`.
+Still deferred: `--check` drift mode. Distribution: see `doc/DISTRIBUTION.md`.

@@ -69,6 +69,25 @@ mcp-kit codegen <server> --out <server>.py
 uv add mcp-client-kit            # or: pip install mcp-client-kit
 ```
 
+### Command reference
+
+| Command | Purpose | Key flags |
+|---------|---------|-----------|
+| `codegen <server>` | Emit typed wrappers | `--out`, `--shapes <path>`, `--probe <tool>` / `--probe-args` |
+| `list <server>` | Tools as JSON `[{name, description}]`; discriminator advisory on stderr | — |
+| `probe <server> <tool>` | Live call(s) → shape skeleton | `--args` (repeatable), `--emit-shape <path>` (writes `.parts/`) |
+| `call <server> <tool>` | One live call, raw payload to disk — bootstrap ids / inspect output | `--out <path>` (required) |
+| `merge <server>` | Consolidate `.parts/` → `<server>.shapes.json`; emit gitignored `verify.json` | `--out <path>` |
+| `login <server>` | Browser OAuth login | connection flags below |
+| `discover` | List servers from agent hosts | `--host <id>` (repeatable), `--json` |
+
+Connection flags shared by `codegen`/`list`/`probe`/`call`/`login`: `--url`,
+`--bearer`, `--stdio`, `--config`, `--client-name`, `--cred-backend`
+(see [§ Authenticate](#authenticate)).
+
+> **PII:** `call` writes the raw, unscrubbed payload. Name the file `*.probe-raw.json`
+> (gitignored) and never commit it.
+
 ---
 
 ## Configure a server
@@ -124,27 +143,82 @@ Never pass a literal token on the command line; always read from an env var.
 mcp-kit codegen myserver --stdio "python path/to/server.py" --out myserver.py
 ```
 
+**Credential storage backend:**
+
+OAuth tokens are stored via one of three backends, selected (highest priority first)
+by `--cred-backend`, then `$MCP_KIT_CRED_BACKEND`, then `~/.mcp-client-kit/config.json`
+(`{"cred_backend": "..."}`), defaulting to `auto`.
+
+| Backend | Storage |
+|---------|---------|
+| `file` | `~/.mcp-client-kit/credentials.json` (chmod 0600) — works everywhere |
+| `keyring` | OS native keystore (Keychain / Credential Locker / Secret Service); falls back to `file` with a warning if the keystore is unavailable |
+| `auto` | Try `keyring`; if keystore is unavailable fall back to `file` silently — no warning (default) |
+
+```bash
+mcp-kit login myserver --cred-backend keyring
+```
+
+**Validate keyring storage** — confirm the token landed in the OS keystore, not the
+fallback file (service `mcp-client-kit`, username `credentials`):
+
+```bash
+python3 -c "import keyring; print(keyring.get_password('mcp-client-kit', 'credentials'))"
+```
+
+If this prints JSON, the keyring backend succeeded.
+If it prints `None` (or errors), the fallback file was used instead — check for a
+`[mcp-client-kit] keyring unavailable` warning in the `mcp-kit login` output.
+
+> **macOS note:** `security find-generic-password -w` prints raw binary, not JSON —
+> use the Python command above instead.
+
+**Set keyring as the permanent default** — so every `mcp-kit` invocation uses it
+without `--cred-backend`:
+
+```bash
+# Option A: config file (persists across shells)
+echo '{"cred_backend": "keyring"}' > ~/.mcp-client-kit/config.json
+
+# Option B: env var (add to your shell profile, e.g. ~/.zshrc)
+export MCP_KIT_CRED_BACKEND=keyring
+```
+
+Priority order (highest first): `--cred-backend` flag → `$MCP_KIT_CRED_BACKEND` →
+`~/.mcp-client-kit/config.json` → default (`auto`).
+
 ---
 
 ## The skill procedure
 
-Six steps from invocation to typed wrappers:
+Seven steps from invocation to typed wrappers:
 
 | Step | What it does |
 |------|-------------|
 | 1. Mechanical stubs | `mcp-kit codegen <server> --out <server>.py` — all tools, returns `Any` |
 | 2. Curate | Pick tools whose payloads you want typed (not all of them) |
-| 3. Probe → skeleton | `mcp-kit probe <server> <tool> --args '...' --emit-shape <server>.shapes.json` |
-| 4. Edit shape-spec | Set `unwrap`, `return_model`, `fields`, `input_overrides` — the judgment pass. For tools that return different shapes per input value, use `discriminator` + `variants` instead of a flat `return_model` — see [§ Polymorphic tools](#polymorphic-tools-discriminated-shaping). |
-| 5. Regenerate | `mcp-kit codegen <server> --out <server>.py --shapes <server>.shapes.json` |
-| 6. Verify | `ast.parse` the module; confirm return types |
+| 3. Probe → skeleton | `mcp-kit probe <server> <tool> --args '...' --emit-shape <server>.shapes.json` — writes a per-tool part under `<server>.shapes.json.parts/` (parallel-safe; many probes can run at once) |
+| 4. Merge | `mcp-kit merge <server> --out <server>.shapes.json` — consolidate the `.parts/` into the committed shape-spec, preserving hand-edits for un-probed tools. Also emits a gitignored `<server>.verify.json` sidecar holding pre-scrub `probed_args` for roundtrip verification. Re-run after partial re-probes. |
+| 5. Edit shape-spec | Set `unwrap`, `return_model`, `fields`, `input_overrides` — the judgment pass. For tools that return different shapes per input value, use `discriminator` + `variants` instead of a flat `return_model` — see [§ Polymorphic tools](#polymorphic-tools-discriminated-shaping). |
+| 6. Regenerate | `mcp-kit codegen <server> --out <server>.py --shapes <server>.shapes.json` |
+| 7. Verify | `ast.parse` the module; confirm return types |
+
+Optional step 8: generate a runnable smoke-test — see [§ Smoke-test runner](#smoke-test-runner).
+
+Shape-spec keys (per tool): `unwrap` (envelope key path), `return_model` (TypedDict
+name, or `null` for `Any`), `fields` (top-level scalar fields), `return_container`
+(e.g. `"list"` when the unwrapped value is a list), `input_overrides` (fix schema-lie
+types), `discriminator` + `variants` (polymorphic tools), and `source` (`"live"` vs
+`"fixture"`). JSON/TS type tokens (`any`, `null`, `integer`) are normalized to Python
+(`Any`, `None`, `int`) at load.
 
 Multi-probe: repeat `--args` for each sample input; shapes are deep-merged (keys unioned,
 type conflicts widened). Use when fields are nullable or a tool has multiple response shapes.
 
-**Security:** `probe` records live call arguments verbatim in `<server>.shapes.json`. Before
-committing, scrub `probed_args` — replace real ids/names/PII with placeholders like
-`"<example-id>"`. Real values survive deletion via git history.
+**Security:** `probe` records live call arguments verbatim in the shape parts. Before
+committing, scrub `probed_args` in `<server>.shapes.json` — replace real ids/names/PII with
+placeholders like `"<example-id>"`. Real values survive deletion via git history. The
+`verify.json` sidecar keeps the unscrubbed args but is gitignored — never commit it.
 
 Once generated, see [§ Using the generated wrappers](#using-the-generated-wrappers) to call them.
 
@@ -237,6 +311,30 @@ class FakeCaller:
     async def call(self, server: str, tool: str, arguments: dict) -> Any:
         return {"login": "octocat"}
 ```
+
+---
+
+## Smoke-test runner
+
+A second skill, `generate-mcp-runner`, authors a standalone `<server>/run.py` that
+imports the generated wrappers and exercises them — a quick way to confirm the
+wrappers actually work end-to-end.
+
+Invoke it after the wrapper skill (optional step 8) with a phrase like
+`generate runner for <server>`. It consumes the wrapper module (`<server>.py`),
+`<server>.shapes.json`, and the `verify.json` sidecar (for real pre-scrub args), then:
+
+- calls each **read-only** tool once (one call per discriminator variant), in a
+  sensible workflow order (identity → metadata → discovery → detail → search);
+- **skips mutating tools** by default (opt in via an explicit instruction);
+- picks args from `verify.json` → scrubbed `probed_args` → schema-minimal synthetic;
+- selects a connection skeleton matching the transport + auth (stdio / http public /
+  bearer / oauth);
+- **never auto-runs** — it only emits and statically validates (`ast.parse` +
+  `py_compile`); run it yourself when ready:
+  ```bash
+  uv run <server>/run.py
+  ```
 
 ---
 
