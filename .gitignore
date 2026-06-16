@@ -35,6 +35,9 @@ g.bak/
 eval/
 eval.*/
 
+# Docs scratch / fix notes
+doc/FIXES*
+
 # Project config
 .mcp.json
 .mcp.eval.json
