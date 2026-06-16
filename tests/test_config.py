@@ -11,30 +11,71 @@ def _write(tmp_path, raw: dict):
 
 
 def test_parse_servers_client_name_canonical():
-    urls, names = _bridge._parse_servers(
+    urls, names, cmds = _bridge._parse_servers(
         {"mcpServers": {"s": {"url": "https://x/mcp", "clientName": "My App"}}}
     )
     assert urls == {"s": "https://x/mcp"}
     assert names == {"s": "My App"}
+    assert cmds == {}
 
 
 def test_parse_servers_client_name_snake_alias():
-    _, names = _bridge._parse_servers(
+    _, names, _ = _bridge._parse_servers(
         {"mcpServers": {"s": {"url": "https://x/mcp", "client_name": "Snake App"}}}
     )
     assert names == {"s": "Snake App"}
 
 
 def test_parse_servers_no_override_absent():
-    urls, names = _bridge._parse_servers({"mcpServers": {"s": {"url": "https://x/mcp"}}})
+    urls, names, cmds = _bridge._parse_servers({"mcpServers": {"s": {"url": "https://x/mcp"}}})
     assert urls == {"s": "https://x/mcp"}
     assert names == {}
+    assert cmds == {}
 
 
 def test_parse_servers_flat_string_form():
-    urls, names = _bridge._parse_servers({"s": "https://x/mcp"})
+    urls, names, cmds = _bridge._parse_servers({"s": "https://x/mcp"})
     assert urls == {"s": "https://x/mcp"}
     assert names == {}
+    assert cmds == {}
+
+
+def test_parse_servers_stdio_entry():
+    """Stdio entry (command/args, no url) lands in cmds, not urls."""
+    urls, names, cmds = _bridge._parse_servers(
+        {"mcpServers": {"context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]}}}
+    )
+    assert "context7" not in urls
+    assert cmds["context7"] == {
+        "command": "npx",
+        "args": ["-y", "@upstash/context7-mcp"],
+        "env": None,
+    }
+
+
+def test_parse_servers_stdio_env_expansion(monkeypatch):
+    """env values with ${VAR} references are expanded against the host environment."""
+    monkeypatch.setenv("TEST_ACCESS_TOK", "secret-abc")
+    _, _, cmds = _bridge._parse_servers(
+        {"mcpServers": {"srv": {
+            "command": "uvx",
+            "args": ["my-mcp"],
+            "env": {"ACCESS_TOKEN": "${TEST_ACCESS_TOK}"},
+        }}}
+    )
+    assert cmds["srv"]["env"] == {"ACCESS_TOKEN": "secret-abc"}
+
+
+def test_parse_servers_mixed_http_and_stdio():
+    """Config with both http and stdio entries — each lands in the right dict."""
+    urls, _, cmds = _bridge._parse_servers({"mcpServers": {
+        "deepwiki": {"url": "https://mcp.deepwiki.com/mcp"},
+        "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]},
+    }})
+    assert urls == {"deepwiki": "https://mcp.deepwiki.com/mcp"}
+    assert "deepwiki" not in cmds
+    assert cmds["context7"]["command"] == "npx"
+    assert "context7" not in urls
 
 
 def test_servers_config_path_loads_file(tmp_path):

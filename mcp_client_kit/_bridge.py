@@ -45,6 +45,7 @@ import asyncio
 import errno as _errno
 import json
 import os
+import shlex
 import stat
 import time
 import warnings
@@ -205,18 +206,31 @@ _servers_cache: dict[str, str] | None = None
 # _servers_cache by servers(). A server with no override in config is absent here and
 # falls back to the default template (see _resolve_client_name()).
 _client_names_cache: dict[str, str] = {}
+# Stdio server specs keyed by server name. Each value is a dict with keys "command"
+# (str), "args" (list[str]), and "env" (dict[str, str] | None). Populated alongside
+# _servers_cache by servers() from config entries that have "command" but no "url".
+_stdio_cache: dict[str, dict] = {}
 
 
-def _parse_servers(raw: dict) -> tuple[dict[str, str], dict[str, str]]:
-    """Parse config into ({name: url}, {name: client_name}).
+def _parse_servers(
+    raw: dict,
+) -> tuple[dict[str, str], dict[str, str], dict[str, dict]]:
+    """Parse config into ({name: url}, {name: client_name}, {name: stdio_spec}).
 
     Accept {"name": "url"} or Claude Code {"mcpServers": {"name": {"url": ...}}}.
     The dict form may carry an optional "clientName" (or "client_name" alias) that
     overrides the OAuth client_name sent at Dynamic Client Registration.
+
+    Stdio entries (those with "command" but no "url") are collected in the third
+    return dict.  Each stdio_spec has keys "command" (str), "args" (list[str]), and
+    "env" (dict[str, str] | None).  Values in "env" have ``${VAR}`` references
+    expanded against the host environment so secrets stored as env-var references
+    resolve at parse time.
     """
     block = raw.get("mcpServers", raw)
     urls: dict[str, str] = {}
     names: dict[str, str] = {}
+    cmds: dict[str, dict] = {}
     for name, val in block.items():
         if isinstance(val, str):
             urls[name] = val
@@ -225,7 +239,21 @@ def _parse_servers(raw: dict) -> tuple[dict[str, str], dict[str, str]]:
             override = val.get("clientName") or val.get("client_name")
             if override:
                 names[name] = override
-    return urls, names
+        elif isinstance(val, dict) and val.get("command"):
+            raw_args = val.get("args") or []
+            args = [str(a) for a in raw_args] if isinstance(raw_args, list) else []
+            raw_env = val.get("env") or {}
+            env: dict[str, str] | None = None
+            if isinstance(raw_env, dict):
+                filtered = {
+                    str(k): str(v)
+                    for k, v in raw_env.items()
+                    if isinstance(v, (str, int, float)) and not isinstance(v, bool)
+                }
+                if filtered:
+                    env = {k: os.path.expandvars(v) for k, v in filtered.items()}
+            cmds[name] = {"command": str(val["command"]), "args": args, "env": env}
+    return urls, names, cmds
 
 
 def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> dict[str, str]:
@@ -234,10 +262,9 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
     config_path: if given, read that file exclusively (authoritative — no env or
     search-order fallback) and always fresh, bypassing the cache.
     """
-    global _servers_cache, _client_names_cache
+    global _servers_cache, _client_names_cache, _stdio_cache
     if config_path is None and _servers_cache is not None and not refresh:
         return _servers_cache
-    import os
     candidates: list[Path] = []
     if config_path is not None:
         candidates.append(Path(config_path))
@@ -248,13 +275,13 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
     for path in candidates:
         if path.exists():
             try:
-                _servers_cache, _client_names_cache = _parse_servers(
+                _servers_cache, _client_names_cache, _stdio_cache = _parse_servers(
                     json.loads(path.read_text())
                 )
                 return _servers_cache
             except (json.JSONDecodeError, OSError, AttributeError):
                 continue
-    _servers_cache, _client_names_cache = {}, {}
+    _servers_cache, _client_names_cache, _stdio_cache = {}, {}, {}
     return _servers_cache
 
 
@@ -754,10 +781,14 @@ async def _http_session(
 
 
 @asynccontextmanager
-async def _stdio_session(cmd: str):
-    """Stdio MCP session — no auth. cmd is a shell-split command string."""
-    parts = cmd.split()
-    params = StdioServerParameters(command=parts[0], args=parts[1:])
+async def _stdio_session(command: str, args: list[str], env: dict[str, str] | None = None):
+    """Stdio MCP session — no auth.
+
+    env, when provided, is merged on top of the safe inherited environment by
+    ``stdio_client``: ``{**get_default_environment(), **env}``.  PATH and other
+    standard vars are preserved; any extra keys (e.g. an access token) are added.
+    """
+    params = StdioServerParameters(command=command, args=args, env=env)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as s:
             await s.initialize()
@@ -802,8 +833,15 @@ async def session(
     """
     _servers = servers(config_path=config_path)
     resolved_url = url or _servers.get(server)
+    # Resolve a stdio spec: explicit --stdio flag takes precedence over config.
+    stdio_spec: dict | None = None
     if cmd is not None:
-        async with _stdio_session(cmd) as s:
+        parts = shlex.split(cmd)
+        stdio_spec = {"command": parts[0], "args": parts[1:], "env": None}
+    elif server in _stdio_cache and url is None and bearer is None:
+        stdio_spec = _stdio_cache[server]
+    if stdio_spec is not None:
+        async with _stdio_session(**stdio_spec) as s:
             yield s
     elif bearer is not None:
         target = resolved_url or server
