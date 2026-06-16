@@ -315,10 +315,35 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
         base = json.loads(target.read_text())
         print(f"[merge] base: {target} ({len(base)} tool(s))", file=sys.stderr)
 
-    skeletons = [base] + [json.loads(p.read_text()) for p in parts]
-    merged = codegen.merge_skeletons(skeletons)
+    part_skeletons = [json.loads(p.read_text()) for p in parts]
+    merged = codegen.merge_skeletons([base] + part_skeletons)
     _atomic_write_text(target, json.dumps(merged, indent=2) + "\n")
     print(f"[merge] wrote {target} ({len(merged)} tool(s))", file=sys.stderr)
+
+    # Emit verify sidecar: raw probed_args from parts only (pre-scrub),
+    # keyed by tool name.  Omit no-arg tools (probed_args == {}).
+    # Overlay existing sidecar so partial re-probes preserve prior entries.
+    stem = target.name[: -len(".shapes.json")] if target.name.endswith(".shapes.json") else target.stem
+    verify_target = target.with_name(stem + ".verify.json")
+    verify_map: dict = {}
+    if verify_target.is_file():
+        try:
+            verify_map = json.loads(verify_target.read_text())
+        except (OSError, json.JSONDecodeError):
+            verify_map = {}
+    for sk in part_skeletons:
+        for tool_name, entry in sk.items():
+            if isinstance(entry, dict):
+                pa = entry.get("probed_args")
+                if pa:  # non-empty dict or non-empty list
+                    verify_map[tool_name] = pa
+    if verify_map:
+        _atomic_write_text(verify_target, json.dumps(verify_map, indent=2) + "\n")
+        print(
+            f"[merge] wrote {verify_target} ({len(verify_map)} tool(s))"
+            " — ⚠  raw args/PII, git-ignored (verify sidecar)",
+            file=sys.stderr,
+        )
 
     if not ns.keep_parts:
         shutil.rmtree(parts_d)

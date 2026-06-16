@@ -1,5 +1,6 @@
 deep-research-wf_*.js
 *.probe-raw.json
+*.verify.json
 *.shapes.json.parts/
 *.pyc
 __pycache__/

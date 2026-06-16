@@ -313,6 +313,85 @@ def test_merge_subfolder_out(tmp_path):
     assert not _parts_dir(target).exists()
 
 
+# ── verify sidecar ────────────────────────────────────────────────────────────
+
+def test_merge_writes_verify_sidecar(tmp_path):
+    """merge emits <server>.verify.json with raw probed_args keyed by tool."""
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(target, {
+        "get_entity": {"source": "live", "probed_args": {"id": "abc123", "type": 1}},
+        "whoami": {"source": "live", "probed_args": {}},  # no-arg — must be omitted
+    })
+
+    rc = _cmd_merge(_merge_ns("acme", target))
+
+    assert rc == 0
+    verify = tmp_path / "acme.verify.json"
+    assert verify.exists(), "verify sidecar must be written"
+    data = json.loads(verify.read_text())
+    assert data == {"get_entity": {"id": "abc123", "type": 1}}, (
+        "verify.json must be keyed by tool, no-arg tools omitted"
+    )
+
+
+def test_merge_verify_sidecar_omits_no_arg_tools(tmp_path):
+    """Tools with probed_args == {} are excluded from the sidecar."""
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(target, {
+        "noop": {"source": "live", "probed_args": {}},
+        "noop2": {"source": "live"},  # missing key entirely
+    })
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    verify = tmp_path / "acme.verify.json"
+    # No non-empty probed_args → sidecar must not be created.
+    assert not verify.exists(), "verify sidecar must not be created when all args are empty"
+
+
+def test_merge_verify_sidecar_overlays_existing(tmp_path):
+    """Partial re-probe: existing sidecar entries for un-probed tools are preserved."""
+    target = tmp_path / "acme.shapes.json"
+    verify = tmp_path / "acme.verify.json"
+
+    # Simulate a prior run that produced a sidecar with tool_a.
+    verify.write_text(json.dumps({"tool_a": {"owner": "prior"}}))
+
+    # New run only re-probes tool_b.
+    _seed_parts(target, {
+        "tool_b": {"source": "live", "probed_args": {"repo": "kit"}},
+    })
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    data = json.loads(verify.read_text())
+    assert data["tool_a"] == {"owner": "prior"}, "prior sidecar entry must be preserved"
+    assert data["tool_b"] == {"repo": "kit"}, "new part must overlay sidecar"
+
+
+def test_merge_verify_sidecar_from_parts_not_scrubbed_base(tmp_path):
+    """Sidecar derives probed_args from parts only, not from a scrubbed base shapes.json."""
+    target = tmp_path / "acme.shapes.json"
+
+    # Base has scrubbed probed_args (post-commit state).
+    base = {"get_entity": {"source": "live", "probed_args": {"id": "<example-id>"}}}
+    target.write_text(json.dumps(base))
+
+    # Part for the same tool carries the raw (pre-scrub) args.
+    _seed_parts(target, {
+        "get_entity": {"source": "live", "probed_args": {"id": "real-uuid-9999"}},
+    })
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    verify = tmp_path / "acme.verify.json"
+    data = json.loads(verify.read_text())
+    # Must be the raw part value, not the scrubbed base value.
+    assert data["get_entity"] == {"id": "real-uuid-9999"}, (
+        "verify sidecar must use raw part args, not the scrubbed base"
+    )
+
+
 def test_merge_no_parts_dir_hints_subfolder(tmp_path, capsys):
     """When no parts dir exists and --out was not passed, hint about subfolder."""
     # Simulate: user forgot --out; default target is CWD, but parts are in a subfolder.

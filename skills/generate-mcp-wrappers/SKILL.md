@@ -49,7 +49,8 @@ non-mutating tools; the agent prompt must forbid touching anything off its assig
 **Rich agent contract:** each batch agent (a) probes its tools with ids from the recon
 catalog, (b) reads raw payloads in its own context, (c) drafts the step-4 shape entry
 (`unwrap`/`return_model`/`return_container`/`fields`/`input_overrides`, plus
-`discriminator`+`variants` for its sibling group), (d) scrubs its own `probed_args`,
+`discriminator`+`variants` for its sibling group), (d) writes the part with **raw**
+`probed_args` (parts are gitignored; scrub runs post-merge at step 4),
 (e) returns a compact per-tool summary (decision + unwrap path) — never the payload.
 
 For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
@@ -212,9 +213,13 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    the recon agent instead — see Execution model above.)
 
    **Security: the skeleton records live `probed_args` verbatim — real ids, names, possibly
-   PII.** With multi-probe this is a *list* of arg-dicts; scrub **every element** before
-   committing. A real identifier in a version-controlled file is a leak that survives
-   deletion (git history) and travels to anyone the repo reaches.
+   PII.** With multi-probe this is a *list* of arg-dicts. Batch agents write parts with
+   **raw** `probed_args` — the `.parts/` directory is gitignored, so raw args never enter
+   version control at this stage. The single scrub pass runs post-merge on the main thread
+   (step 4): open `shapes.json` and replace PII after `mcp-kit merge` has written both the
+   shapes file and its gitignored `<server>.verify.json` sidecar. A real identifier in a
+   version-controlled file is a leak that survives deletion (git history) and travels to
+   anyone the repo reaches.
 
    **Only replace values that match a PII pattern** — email addresses, UUIDs
    (`xxxxxxxx-xxxx-…`), long numeric IDs (8+ digits), auth tokens, personal names, or
@@ -223,10 +228,13 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    **Do NOT replace functional values** — timezone names (`"UTC"`, `"America/New_York"`),
    generic table names (`"users"`, `"products"`), public repo owners/names, ISO timestamps,
    standard SQL queries, or any value that is not personally identifiable. Replacing these
-   breaks the roundtrip verifier, which passes `probed_args` to the live server.
+   breaks the roundtrip verifier, which passes `probed_args` to the live server. The
+   gitignored `<server>.verify.json` sidecar preserves the pre-scrub args so the verifier
+   can still make a real live call even after `shapes.json` is scrubbed.
 
    When a value *must* be redacted, add `"probe_args_scrubbed": true` to the shape-spec
-   entry so downstream tooling can skip the roundtrip check rather than fail it.
+   entry. The roundtrip verifier checks the sidecar first; `probe_args_scrubbed` is only
+   needed when the sidecar is absent or does not cover that tool.
 
    The shape-spec must record *that* `entityType` was probed as `int` and the response
    *shape* — never the sample values. If you keep raw responses for reference, write them
@@ -250,8 +258,20 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    - `mcp-kit codegen` will also read parts directly (in-memory merge) if the merged file
      is absent, so you can skip 3b during rapid iteration — but run it before committing
      so the repo contains a single, hand-editable artifact.
+   - Also emits a gitignored `<server>.verify.json` beside `<shapes-path>` — a flat
+     `{tool: probed_args}` map sourced from raw parts (pre-scrub), for use by the
+     roundtrip verifier. Partial re-probes overlay existing sidecar entries.
 
-4. **Edit the shape-spec — THIS is the judgment.** For each tool entry:
+4. **Edit the shape-spec — THIS is the judgment.**
+
+   **First: scrub `probed_args`.** This is the single scrub point — batch agents do NOT
+   scrub their parts. Open `shapes.json` and replace all real ids, emails, names, UUIDs,
+   and other PII in every `probed_args` entry with `<example-*>` placeholders (follow the
+   PII vs functional-value guidance in step 3). The gitignored `<server>.verify.json`
+   sidecar already holds the original args for the roundtrip verifier, so scrubbing
+   `shapes.json` does not break verification.
+
+   Then, for each tool entry:
    - **`unwrap`**: set the key path to the *real record*, stripping vendor envelopes.
      Some servers double-wrap: the record lives under `data.entity` → `"unwrap": ["data", "entity"]`.
      Read `_observed_shape` to find the level where the meaningful keys appear.
@@ -329,9 +349,10 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 - **Don't model depth from one probe.** Promote only the top 1–2 levels of stable
   scalars. Deep/variadic nests (`proposals.candidate.seniority.level`) stay `dict` /
   `Any`. Over-modelling = authoritative lies about a shape you saw once.
-- **Scrub `probed_args` before committing.** Every probe captures live data; the
-  shape-spec is committable input, so placeholder any real ids/names/PII. Generalizable
-  rule, not a one-off — see step 3.
+- **Scrub `probed_args` before committing.** The post-merge scrub at step 4 is the single
+  scrub point — placeholder any real ids/names/PII directly in `shapes.json`. Parts
+  (`.parts/` dirs) and `<server>.verify.json` are gitignored raw counterparts; the only
+  committable artifact is a fully-scrubbed `shapes.json`.
 - **Drift is not the type's job.** A `TypedDict` catches no runtime drift by design.
   Schema drift is the deferred `--check` mode's job (re-probe → diff vs stored
   shape-spec), not a reason to pick a heavier return type.
