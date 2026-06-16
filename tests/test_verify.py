@@ -11,8 +11,10 @@ from eval_harness.verify import (
     check_ast,
     check_signatures,
     check_pii,
+    check_roundtrip,
     CheckResult,
 )
+from eval_harness.manifest import ServerSpec
 
 
 # ---------------------------------------------------------------------------
@@ -202,3 +204,59 @@ def test_check_pii_fail_long_id(tmp_path: Path) -> None:
 
     result = check_pii(shapes_path)
     assert result.status == "fail", f"Expected fail, got {result.status!r}: {result.detail}"
+
+
+# ---------------------------------------------------------------------------
+# Check 5: Roundtrip — sidecar lookup
+# ---------------------------------------------------------------------------
+
+# Minimal module whose function ignores the caller and returns a stable dict.
+# No mcp_client_kit import needed in the module itself — the test only needs
+# the package importable (it's a project dep), not used inside the function.
+_MODULE_ROUNDTRIP = """\
+async def get_me(caller, **kwargs):
+    return {"login": "octocat", "id": 1}
+"""
+
+_SHAPES_PLACEHOLDER = {
+    "get_me": {
+        "return_model": "User",
+        "fields": {"login": "str", "id": "int"},
+        "probed_args": {"owner": "<example-owner>"},
+    }
+}
+
+_SPEC_FAKE = ServerSpec(
+    name="testserver",
+    transport="stdio",
+    launch="echo hello",
+    auth="none",
+)
+
+
+def test_check_roundtrip_no_sidecar_skips(tmp_path: Path) -> None:
+    """Without verify sidecar, placeholder args → skip(probed_args_contain_placeholders)."""
+    (tmp_path / "testserver.py").write_text(_MODULE_ROUNDTRIP, encoding="utf-8")
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(json.dumps(_SHAPES_PLACEHOLDER), encoding="utf-8")
+
+    result = check_roundtrip(_SPEC_FAKE, tmp_path, shapes)
+    assert result.status == "skip", f"Expected skip, got {result.status!r}: {result.detail}"
+    assert "placeholder" in result.detail
+
+
+def test_check_roundtrip_with_sidecar_bypasses_placeholder_guard(tmp_path: Path) -> None:
+    """With verify sidecar, real args used → placeholder guard bypassed → roundtrip passes."""
+    (tmp_path / "testserver.py").write_text(_MODULE_ROUNDTRIP, encoding="utf-8")
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(json.dumps(_SHAPES_PLACEHOLDER), encoding="utf-8")
+    # Sidecar with real (non-placeholder) args keyed by tool name
+    (tmp_path / "testserver.verify.json").write_text(
+        json.dumps({"get_me": {"owner": "octocat"}}), encoding="utf-8"
+    )
+
+    result = check_roundtrip(_SPEC_FAKE, tmp_path, shapes)
+    # Placeholder guard must NOT have fired — any other outcome (pass or fail) is acceptable
+    assert not (result.status == "skip" and "placeholder" in result.detail), (
+        f"Sidecar should have bypassed placeholder guard, got: {result.status!r} {result.detail!r}"
+    )

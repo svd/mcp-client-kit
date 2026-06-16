@@ -314,6 +314,18 @@ def check_roundtrip(
     probed_args = candidate_shape.get("probed_args", {})
     if not isinstance(probed_args, dict):
         return skip_("roundtrip", "probed_args is not a dict (multi-probe list not supported for live call)")
+    # Prefer real pre-scrub args from a gitignored sidecar when available, so the
+    # live call uses values the server accepts instead of <example-*> placeholders.
+    verify_args_path = shapes_json.parent / f"{spec.name}.verify.json"
+    if verify_args_path.exists():
+        try:
+            overrides = json.loads(verify_args_path.read_text(encoding="utf-8"))
+            if isinstance(overrides, dict) and isinstance(overrides.get(candidate_name), dict):
+                probed_args = overrides[candidate_name]
+        except (OSError, json.JSONDecodeError):
+            pass  # unreadable sidecar — fall through to placeholder guard
+    if any(isinstance(v, str) and _is_placeholder(v) for v in probed_args.values()):
+        return skip_("roundtrip", "probed_args_contain_placeholders")
     return_model: str = candidate_shape["return_model"]
     return_container: str | None = candidate_shape.get("return_container")
     expected_fields: dict = candidate_shape.get("fields", {})

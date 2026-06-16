@@ -77,9 +77,9 @@ mcp-kit list {{SERVER_NAME}} --url "{{LAUNCH}}" --bearer "$<ENV_VAR>"
 **You are running as a workflow subagent — you CANNOT call `AskUserQuestion`.** When the skill reaches an interactive gate, do NOT prompt. Apply these defaults instead:
 
 1. **Tool-selection gate (skill Step 2):** probe **all non-mutating** tools; **skip mutating** tools entirely (never call them live). Treat a tool as mutating if its name contains any of: `create`, `update`, `delete`, `remove`, `send`, `set`, `write`, `post`, `patch`, `put`, `cancel`, `approve`, `submit`, `assign`. Record which tools were skipped and why in `session-overview.md`.
-2. **Discriminator gate (skill Step 4):** choose the **generic base model** option (or unwrap-only `Any` if no stable shared base exists). Never emit a variant-specific `return_model` from a single-variant probe.
+2. **Discriminator gate (skill Step 4):** choose the **generic base model** option (or unwrap-only `Any` if no stable shared base exists). Never emit a variant-specific `return_model` from a single-variant probe. A parameter is a discriminator candidate only if its values correspond to **structurally different response shapes** — disqualify immediately if the parameter is a plain filesystem path, a repo identifier, or a pagination hint (e.g. `head`, `tail`, `page`, `limit`, `repoName`, `projectPath`). No need to probe variants for these.
 3. **>20-variant cap:** fall back to unwrap-only `Any`.
-4. **Sample ids / probe args:** use minimal safe values; pass `'{}'` when a tool has no required arguments. Invent realistic-looking but fake values for required string/ID args.
+4. **Sample ids / probe args:** Before probing a tool, check its `inputSchema.required` array. If it is non-empty, do NOT probe with `{}` — call the tool directly with minimal but valid required args on the first attempt and declare those args as `probed_args`. Pass `'{}'` only when `required` is absent or empty. Invent realistic-looking but fake values for required string/ID args.
 5. **Run as a single driver thread — do NOT dispatch sub-subagents.**
 
 **PII scrub (mandatory before finishing):** replace all real IDs, emails, usernames, and names in `probed_args` with `<example-*>` placeholders (e.g. `<example-user-id>`, `<example-email>`). Never commit real personal data.
