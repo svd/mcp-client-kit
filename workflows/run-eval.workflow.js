@@ -26,7 +26,7 @@ if (typeof resolvedArgs === 'string' && resolvedArgs !== 'all') {
 
 log('Loading servers manifest…')
 const manifestAgent = await agent(
-  'Read /Users/Sviataslau_Svirydau/src/mcp-client-kit-eval/servers/servers.toml and return a JSON object with a "servers" array. Each item: {name, transport, launch, auth, auth_notes}. For auth_notes: if auth starts with "bearer:" write "Set ' + 'ENV_VAR=<token>" (use the actual env var name from the auth field); if auth is "oauth" write "Run: mcp-kit login <server>"; if auth is "none" write "No auth required.".',
+  'Read servers/servers.toml and return a JSON object with a "servers" array. Each item: {name, transport, launch, auth, auth_notes}. For auth_notes: if auth starts with "bearer:" write "Set ' + 'ENV_VAR=<token>" (use the actual env var name from the auth field); if auth is "oauth" write "Run: mcp-kit login <server>"; if auth is "none" write "No auth required.".',
   {
     label: 'load-manifest',
     schema: {
@@ -77,7 +77,7 @@ if (servers.length === 0) {
 
 log('Loading agent prompt template…')
 const promptTemplate = await agent(
-  'Read the file /Users/Sviataslau_Svirydau/src/mcp-client-kit-eval/agents/server-eval-agent.md and return its full content verbatim. Do not summarize or modify it.',
+  'Read agents/server-eval-agent.md and return its full content verbatim. Do not summarize or modify it.',
   { label: 'load-template' }
 )
 
@@ -106,6 +106,7 @@ const results = await pipeline(
         type: 'object',
         properties: {
           server:        { type: 'string' },
+          session_id:    { type: 'string' },
           tool_count:    { type: 'number' },
           shaped_tools:  { type: 'array', items: { type: 'string' } },
           modes_hit:     { type: 'array', items: { type: 'string' } },
@@ -124,16 +125,23 @@ const results = await pipeline(
   async ({ server, summary }) => {
     log(`[${server.name}] Starting analyze stage…`)
 
-    await agent(
-      `You are running the session-analyzer skill on the eval agent transcript for server "${server.name}".
+    const sessionHint = summary?.session_id
+      ? `The generate agent session ID was: ${summary.session_id}. Look for its transcript under ~/.claude/projects/.`
+      : ''
+
+    const analyzePrompt = `${sessionHint ? sessionHint + '\n\n' : ''}You are running the session-analyzer skill on the eval agent transcript for server "${server.name}".
 
 Use the session-analyzer skill to analyze what just happened in the generate-mcp-wrappers skill run for "${server.name}".
-Write the analysis to /Users/Sviataslau_Svirydau/src/mcp-client-kit-eval/${server.name}/session-analyzer.md.
+Write the analysis to eval/${server.name}/session-analyzer.md.
 The analysis should cover: tool calls made, stages executed, decisions made, any errors/retries, approximate token usage.
 
-When done, return "DONE: ${server.name}/session-analyzer.md written"`,
-      { label: `analyze:${server.name}`, phase: 'Analyze' }
-    )
+When done, return "DONE: eval/${server.name}/session-analyzer.md written"`
+
+    let analyzeResult = await agent(analyzePrompt, { label: `analyze:${server.name}`, phase: 'Analyze' })
+    if (!analyzeResult || analyzeResult.includes('API Error') || analyzeResult.includes('Please run /login')) {
+      log(`[${server.name}] Analyze failed — retrying once…`)
+      analyzeResult = await agent(analyzePrompt, { label: `analyze:${server.name}:retry`, phase: 'Analyze' })
+    }
 
     log(`[${server.name}] Analyze done`)
     return { server, summary }
@@ -144,11 +152,12 @@ When done, return "DONE: ${server.name}/session-analyzer.md written"`,
     log(`[${server.name}] Starting merge/verify/runner stage…`)
 
     const mergeVerify = await agent(
-      `Run these commands in sequence in the working directory /Users/Sviataslau_Svirydau/src/mcp-client-kit-eval/:
+      `Run these commands in sequence in the project root (your current working directory):
 
-1. uv run eval-kit merge-session ${server.name}
-2. uv run eval-kit verify ${server.name}
-3. uv run eval-kit runner ${server.name}
+1. Check whether eval/${server.name}/session-analyzer.md exists. If it does not exist, log a warning and skip step 2 (merge-session) — set merged=false.
+2. uv run eval-kit merge-session ${server.name}
+3. uv run eval-kit verify ${server.name}
+4. uv run eval-kit runner ${server.name}
 
 Report what each command printed to stdout and whether it succeeded (exit code 0).
 Return a JSON object with these fields:
@@ -185,7 +194,7 @@ const successCount = results.filter(Boolean).length
 log(`Pipeline complete — ${successCount}/${servers.length} servers succeeded`)
 
 const reportResult = await agent(
-  `Run this command in /Users/Sviataslau_Svirydau/src/mcp-client-kit-eval/:
+  `Run this command in the project root (your current working directory):
 
   uv run eval-kit report
 

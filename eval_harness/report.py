@@ -162,7 +162,7 @@ def render_detail(result: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def generate_report(
-    base_dir: Path = Path("."),
+    base_dir: Path = Path("eval"),
     out_path: Path = Path("doc/EVAL_REPORT.md"),
 ) -> str:
     """Find all results, render report, write to out_path, return content."""
@@ -230,8 +230,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--base-dir",
         type=Path,
-        default=Path("."),
-        help="Directory containing <server>/result.json files (default: .)",
+        default=Path("eval"),
+        help="Directory containing <server>/result.json files (default: eval)",
     )
     parser.add_argument(
         "--out",

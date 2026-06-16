@@ -132,4 +132,4 @@ Every item (in both reports) must satisfy:
 | Root cause | P0 | Mechanistic, not "the LLM guessed wrong" |
 | Fix | all | Actionable, not "improve X" |
 
-**mcp-client-kit report extra constraint:** no eval-repo-only paths (e.g. no `/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval/...`). All paths must be relative to the mcp-client-kit repo or be generic.
+**mcp-client-kit report extra constraint:** no eval-repo-only paths (e.g. no `<eval-repo-path>/...`). All paths must be relative to the mcp-client-kit repo or be generic.

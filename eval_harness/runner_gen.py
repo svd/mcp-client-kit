@@ -90,8 +90,9 @@ def _build_demo_calls(server_name: str, shaped: list, unshaped: str | None, shap
         if isinstance(args_dict, list):
             args_dict = args_dict[0] if args_dict else {}
         args_str = _kwargs_str(args_dict)
+        fn_name = unshaped.replace("-", "_")
         lines.append(f"    # {unshaped} → Any")
-        lines.append(f"    result = await {module_name}.{unshaped}(caller{args_str})")
+        lines.append(f"    result = await {module_name}.{fn_name}(caller{args_str})")
         lines.append(f'    print(f"{unshaped}: {{type(result).__name__}}")')
         lines.append("")
 
@@ -102,8 +103,9 @@ def _build_demo_calls(server_name: str, shaped: list, unshaped: str | None, shap
             args_dict = args_dict[0] if args_dict else {}
         args_str = _kwargs_str(args_dict)
         ret_type = f"list[{model}]" if is_list else model
+        fn_name = tool_name.replace("-", "_")
         lines.append(f"    # {tool_name} → {ret_type}")
-        lines.append(f"    result = await {module_name}.{tool_name}(caller{args_str})")
+        lines.append(f"    result = await {module_name}.{fn_name}(caller{args_str})")
         if is_list:
             lines.append(f'    print(f"{tool_name}: {{len(result)}} item(s)")')
         else:

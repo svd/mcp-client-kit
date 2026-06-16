@@ -43,14 +43,13 @@ auth = "none"
 notes = "Upstash Context7 — library documentation lookup."
 
 # --- codegraph ---
-# Local install required: install codegraph-mcp via its own instructions.
-# Must be on PATH. No auth.
+# Local install required. No auth.
 [[server]]
 name = "codegraph"
 transport = "stdio"
-launch = "codegraph-mcp"
+launch = "codegraph serve --mcp"
 auth = "none"
-notes = "Local codegraph code-intelligence server. Must be installed on PATH."
+notes = "Local codegraph code-intelligence server. Binary: codegraph serve --mcp."
 
 # --- sqlite ---
 # SQLite database server. No auth. Requires uvx (uv tool runner).

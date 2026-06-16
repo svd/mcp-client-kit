@@ -64,7 +64,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     server_dir = base_dir / spec.name
     result_json = server_dir / "result.json"
-    print(f"Written: {spec.name}/result.json")
+    print(f"Written: eval/{spec.name}/result.json")
 
     if verdict == "pass":
         return 0
@@ -109,7 +109,7 @@ def cmd_runner(args: argparse.Namespace) -> int:
         )
 
     generate_runner(spec, server_dir, shapes)
-    print(f"Runner written: {spec.name}/run.py")
+    print(f"Runner written: eval/{spec.name}/run.py")
     return 0
 
 
@@ -180,7 +180,7 @@ def cmd_merge_session(args: argparse.Namespace) -> int:
 
     out_path = server_dir / "session-overview.md"
     out_path.write_text(merged, encoding="utf-8")
-    print(f"Merged: {args.server}/session-overview.md")
+    print(f"Merged: eval/{args.server}/session-overview.md")
     return 0
 
 
@@ -199,8 +199,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_verify = sub.add_parser("verify", help="Verify a server's generated artifacts.")
     p_verify.add_argument("server", help="Server name (must appear in manifest).")
     p_verify.add_argument(
-        "--base-dir", default=".", metavar="DIR",
-        help="Project root where <server>/ folders live (default: .).",
+        "--base-dir", default="eval", metavar="DIR",
+        help="Directory where <server>/ folders live (default: eval).",
     )
     p_verify.add_argument(
         "--manifest", default="servers/servers.toml", metavar="PATH",
@@ -211,8 +211,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_runner = sub.add_parser("runner", help="Generate a sample runner script for a server.")
     p_runner.add_argument("server", help="Server name (must appear in manifest).")
     p_runner.add_argument(
-        "--base-dir", default=".", metavar="DIR",
-        help="Project root where <server>/ folders live (default: .).",
+        "--base-dir", default="eval", metavar="DIR",
+        help="Directory where <server>/ folders live (default: eval).",
     )
     p_runner.add_argument(
         "--manifest", default="servers/servers.toml", metavar="PATH",
@@ -222,8 +222,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # --- report ---
     p_report = sub.add_parser("report", help="Generate EVAL_REPORT.md from result.json files.")
     p_report.add_argument(
-        "--base-dir", default=".", metavar="DIR",
-        help="Project root where <server>/ folders live (default: .).",
+        "--base-dir", default="eval", metavar="DIR",
+        help="Directory where <server>/ folders live (default: eval).",
     )
     p_report.add_argument(
         "--out", default="doc/EVAL_REPORT.md", metavar="PATH",
@@ -237,8 +237,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_merge.add_argument("server", help="Server name (subfolder under base-dir).")
     p_merge.add_argument(
-        "--base-dir", default=".", metavar="DIR",
-        help="Project root where <server>/ folders live (default: .).",
+        "--base-dir", default="eval", metavar="DIR",
+        help="Directory where <server>/ folders live (default: eval).",
     )
 
     return parser

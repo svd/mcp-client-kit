@@ -399,7 +399,7 @@ def _compute_modes_hit(shapes: dict | None) -> list[str]:
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 
-def verify_server(spec: ServerSpec, base_dir: Path = Path(".")) -> dict:
+def verify_server(spec: ServerSpec, base_dir: Path = Path("eval")) -> dict:
     """Run all 5 checks for a server and write result.json.
 
     Returns the result dict.

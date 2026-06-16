@@ -4,7 +4,7 @@ Eval framework for the `generate-mcp-wrappers` skill.
 
 ## What it is
 
-A framework for running reproducible evaluations of the `mcp-client-kit` `generate-mcp-wrappers` skill. For each MCP server under test, it produces a committed folder containing:
+A framework for running reproducible evaluations of the `mcp-client-kit` `generate-mcp-wrappers` skill. For each MCP server under test, it produces a committed folder under `eval/` containing:
 
 | File | Description |
 |------|-------------|
@@ -49,17 +49,17 @@ server: generate, analyze, merge, and verify.
 ## CLI reference
 
 ```bash
-eval-kit verify github            # Run 5-check contract on github/
+eval-kit verify github            # Run 5-check contract on eval/github/
 eval-kit report                   # Regenerate doc/EVAL_REPORT.md from all result.json files
-eval-kit runner github            # Regenerate run.py for github/
+eval-kit runner github            # Regenerate run.py for eval/github/
 eval-kit merge-session github     # Merge session-overview.draft.md + session-analyzer.md
-                                  #   → session-overview.md
+                                  #   → eval/github/session-overview.md
 ```
 
 ## Existing eval: github
 
-The `github/` folder contains a completed eval of the GitHub Copilot MCP server (HTTP/Bearer
-auth). See `github/session-overview.md` for how the skill executed, and `github/result.json`
+The `eval/github/` folder contains a completed eval of the GitHub Copilot MCP server (HTTP/Bearer
+auth). See `eval/github/session-overview.md` for how the skill executed, and `eval/github/result.json`
 for the verification results.
 
 ## Architecture
@@ -82,13 +82,14 @@ workflows/run-eval.workflow.js  (one pipeline per server)
 ## Repo layout
 
 ```
-<server>/               # one folder per evaluated server
-  <server>.py
-  <server>.shapes.json
-  run.py
-  session-overview.md
-  session-analyzer.md
-  result.json
+eval/
+  <server>/             # one folder per evaluated server
+    <server>.py
+    <server>.shapes.json
+    run.py
+    session-overview.md
+    session-analyzer.md
+    result.json
 agents/
   server-eval-agent.md  # prompt template for per-server skill agent
 doc/
