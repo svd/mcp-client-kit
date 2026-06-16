@@ -31,6 +31,9 @@ dist/
 github.bak/
 g.bak/
 
+# Archived eval runs
+eval.*/
+
 # Project config
 .mcp.json
 .mcp.eval.json
