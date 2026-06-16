@@ -824,3 +824,109 @@ def test_benign_output_byte_stable():
     assert '"get_entity"' in src
     # Known stable fragment: required param key in args dict literal.
     assert '"entityId"' in src
+
+
+# ---------------------------------------------------------------------------
+# #5 — _dig / _dig_list double-serialization (JSON-encoded string response)
+# ---------------------------------------------------------------------------
+
+def test_generated_dig_parses_double_serialized_outer():
+    """_dig handles when the entire MCP response is a JSON-encoded string."""
+    import json as _json
+    src = codegen.render_module("acme", [_GET_ENTITY], shapes={"get_entity": _GET_ENTITY_SHAPE})
+    ns: dict = {}
+    exec(compile(src, "acme_gen.py", "exec"), ns)
+
+    entity = {"entityId": "1", "entityType": 1, "benchDurationCurrent": 42.0}
+    double_encoded = _json.dumps({"data": {"entity": entity}})  # str, not dict
+
+    class _Caller:
+        async def call(self, server, tool, arguments):
+            return double_encoded
+
+    got = asyncio.run(ns["get_entity"](_Caller(), entityId="1", entityType=1))
+    assert got == entity
+
+
+def test_generated_dig_parses_double_serialized_value():
+    """_dig handles when the value AT the unwrap path is a JSON-encoded string."""
+    import json as _json
+    src = codegen.render_module("acme", [_GET_ENTITY], shapes={"get_entity": _GET_ENTITY_SHAPE})
+    ns: dict = {}
+    exec(compile(src, "acme_gen.py", "exec"), ns)
+
+    entity = {"entityId": "1", "entityType": 1}
+    resp = {"data": {"entity": _json.dumps(entity)}}  # entity is a JSON string
+
+    class _Caller:
+        async def call(self, server, tool, arguments):
+            return resp
+
+    got = asyncio.run(ns["get_entity"](_Caller(), entityId="1", entityType=1))
+    assert got == entity
+
+
+def test_generated_dig_list_parses_double_serialized_outer():
+    """_dig_list handles when the entire MCP response is a JSON-encoded string."""
+    import json as _json
+    src = codegen.render_module("acme", [_QUERY_ACME], shapes={"query_acme": _QUERY_ACME_SHAPE})
+    ns: dict = {}
+    exec(compile(src, "acme_gen.py", "exec"), ns)
+
+    results = [{"_id": "1"}, {"_id": "2"}]
+    double_encoded = _json.dumps({"data": {"results": results}})
+
+    class _Caller:
+        async def call(self, server, tool, arguments):
+            return double_encoded
+
+    got = asyncio.run(ns["query_acme"](_Caller(), entityType=1, query={}))
+    assert got == results
+
+
+# ---------------------------------------------------------------------------
+# #12 — _append_model: guard against Python builtin names
+# ---------------------------------------------------------------------------
+
+def test_render_module_builtin_return_model_ignored(capsys):
+    """return_model with a Python builtin name is dropped with a stderr warning."""
+    tools = [{"name": "get_data", "description": "x", "inputSchema": {}}]
+    shapes = {"get_data": {"return_model": "str", "fields": {}, "source": "live"}}
+    src = codegen.render_module("demo", tools, shapes=shapes)
+    err = capsys.readouterr().err
+    assert "class str(TypedDict" not in src, "builtin 'str' must not be emitted as TypedDict"
+    assert "builtin" in err.lower(), f"expected warning mentioning 'builtin' in stderr: {err!r}"
+    ast.parse(src)
+
+
+def test_render_module_builtin_all_known_names_ignored(capsys):
+    """All Python builtin names are rejected as return_model."""
+    builtins = ["str", "int", "float", "list", "dict", "bool", "bytes", "object", "type", "set", "tuple"]
+    tools = [{"name": f"tool_{b}", "description": "x", "inputSchema": {}} for b in builtins]
+    shapes = {f"tool_{b}": {"return_model": b, "fields": {}, "source": "live"} for b in builtins}
+    src = codegen.render_module("demo", tools, shapes=shapes)
+    for b in builtins:
+        assert f"class {b}(TypedDict" not in src, f"builtin {b!r} must not be emitted"
+    ast.parse(src)
+
+
+# ---------------------------------------------------------------------------
+# #8 — denylist: camelCase compound forms suppressed
+# ---------------------------------------------------------------------------
+
+def test_detect_discriminators_denylist_camelcase_compound_forms():
+    """camelCase compound params (repoName, userName, etc.) are excluded from discriminators."""
+    compound_params = {
+        "repoName": {"type": "string"},
+        "repo_name": {"type": "string"},
+        "repositoryName": {"type": "string"},
+        "userName": {"type": "string"},
+        "orgName": {"type": "string"},
+    }
+    tools = [
+        _make_tool("tool_a", compound_params),
+        _make_tool("tool_b", compound_params),
+    ]
+    result = codegen.detect_discriminators(tools)
+    for param in compound_params:
+        assert param not in result, f"compound param {param!r} must be in denylist"

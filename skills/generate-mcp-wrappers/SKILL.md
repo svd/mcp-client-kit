@@ -237,6 +237,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      Some servers double-wrap: the record lives under `data.entity` → `"unwrap": ["data", "entity"]`.
      Read `_observed_shape` to find the level where the meaningful keys appear.
    - **`return_model`**: name the `TypedDict` (e.g. `"Entity"`). Absent → return stays `Any`.
+     Never set to a Python primitive name (`str`, `int`, `list`, etc.) — use `null` for tools that return plain scalars.
    - **`return_container`**: set `"list"` when the unwrapped value is a *list* of records
      (e.g. `query_acme`'s `data.results`). Return type becomes `list[<model>]` and the body
      digs via `_dig_list` (list passes through, envelope dug, else `[]`) instead of `_dig`.

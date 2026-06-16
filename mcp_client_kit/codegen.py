@@ -107,13 +107,27 @@ def render_model(name: str, fields: dict[str, str]) -> str:
 
 # Emitted once per module when any tool unwraps a vendor envelope. Mirrors the
 # hand-built oracle wrapper's `_unwrap_entity` semantics (return as-is on miss).
+# Also handles double-serialized responses where the MCP TextContent text field
+# is itself a JSON-encoded string (e.g. sqlite, github describe_table).
 _DIG = '''def _dig(obj: Any, path: tuple[str, ...]) -> Any:
-    """Dig into a nested dict by key path; return obj unchanged if the path is absent."""
-    cur = obj
+    """Dig into a nested dict by key path; return obj unchanged if the path is absent.
+    If obj or the extracted value is a JSON-encoded string, parses it first."""
+    raw = obj
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            pass
+    cur = raw
     for key in path:
         if not isinstance(cur, dict) or key not in cur:
-            return obj
+            return raw
         cur = cur[key]
+    if isinstance(cur, str):
+        try:
+            return json.loads(cur)
+        except (ValueError, TypeError):
+            pass
     return cur'''
 
 
@@ -122,18 +136,37 @@ _DIG = '''def _dig(obj: Any, path: tuple[str, ...]) -> Any:
 # passes through, a full envelope is dug, otherwise fall back to the last path
 # key at top level — defaulting to [] so the return is always a list (never
 # the raw envelope dict, unlike `_dig`).
+# Also handles double-serialized responses (same as _dig).
 _DIG_LIST = '''def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
     """Unwrap to a list at the given key path, honouring the list contract.
 
     A list passes through; a full envelope is dug; otherwise fall back to the last
-    path key at top level, defaulting to [] (never a non-list)."""
+    path key at top level, defaulting to [] (never a non-list).
+    If obj or the extracted value is a JSON-encoded string, parses it first."""
     if isinstance(obj, list):
         return obj
-    cur = obj
+    raw = obj
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+            if isinstance(raw, list):
+                return raw
+        except (ValueError, TypeError):
+            pass
+    if not isinstance(raw, dict):
+        return []
+    cur = raw
     for key in path:
         if not isinstance(cur, dict) or key not in cur:
-            return obj.get(path[-1], []) if isinstance(obj, dict) else []
+            return raw.get(path[-1], [])
         cur = cur[key]
+    if isinstance(cur, str):
+        try:
+            parsed = json.loads(cur)
+            if isinstance(parsed, list):
+                return parsed
+        except (ValueError, TypeError):
+            pass
     return cur'''
 
 
@@ -315,6 +348,11 @@ SERVER = {server!r}
 '''
 
 
+_PY_BUILTINS = frozenset({
+    "str", "int", "float", "list", "dict", "bool", "bytes", "object", "type", "set", "tuple"
+})
+
+
 def render_module(server: str, tools: list[dict], shapes: dict | None = None,
                   probe_note: str = "") -> str:
     """Render a full wrapper module.
@@ -326,12 +364,16 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None,
     shapes = shapes or {}
     note = f"\n{probe_note}\n" if probe_note else ""
     has_disc = any(s.get("discriminator") and s.get("variants") for s in shapes.values())
+    needs_json = bool(shapes) and any(
+        (shapes.get(t["name"]) or {}).get("unwrap") for t in tools
+    )
     if has_disc:
-        imports = "from typing import Any, Literal, TypedDict, cast, overload"
+        type_imports = "from typing import Any, Literal, TypedDict, cast, overload"
     elif shapes:
-        imports = "from typing import Any, TypedDict, cast"
+        type_imports = "from typing import Any, TypedDict, cast"
     else:
-        imports = "from typing import Any"
+        type_imports = "from typing import Any"
+    imports = ("import json\n" + type_imports) if needs_json else type_imports
     parts = [_HEADER.format(server=server, probe_note=note, imports=imports)]
 
     if shapes:
@@ -339,6 +381,12 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None,
         _seen_models: dict[str, str] = {}  # name → rendered body; dedup across tools
 
         def _append_model(name: str, fields: dict) -> None:
+            if name in _PY_BUILTINS:
+                print(
+                    f"[codegen] ⚠  return_model {name!r} is a Python builtin — ignored; use null instead",
+                    file=sys.stderr,
+                )
+                return
             body = render_model(name, fields)
             if name not in _seen_models:
                 _seen_models[name] = body
@@ -499,11 +547,14 @@ def detect_discriminators(tools: list[dict]) -> dict[str, list[str]]:
 
     # Params that are routinely shared across tools but never discriminate response
     # shape — pagination, routing, path, and common filter args.
+    # Comparison uses pname.lower(), so include common camelCase compound forms
+    # (e.g. "repoName".lower() == "reponame", not "repo").
     _DENYLIST = {
         "page", "per_page", "limit", "offset", "cursor",
         "path", "repo", "owner", "org", "branch", "ref",
         "method", "query", "search", "filter", "sort", "order", "direction",
         "context_lines", "include", "exclude",
+        "reponame", "repo_name", "repositoryname", "username", "orgname",
     }
 
     # candidates[param_name] = [tool_name, ...]
