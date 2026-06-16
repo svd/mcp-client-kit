@@ -133,6 +133,13 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
       *polymorphic-suspect* and must be resolved in step 4 before the shape-spec is
       considered complete.
 
+      **Filter before probing:** before treating a candidate as a real discriminator,
+      confirm the field appears in the *response* payload of at least one probed call
+      (i.e. it is a key in `_observed_shape`). A parameter that appears only in
+      `inputSchema.properties` but never in any observed response dict is an *input*
+      parameter, not a response discriminator — discard it immediately regardless of how
+      many tools share it.
+
 3. **Probe each selected tool → skeleton (parallel-safe).**
 
    > **Dispatch (>4 selected tools):** Before probing, dispatch a **recon subagent** to
@@ -206,12 +213,24 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
    **Security: the skeleton records live `probed_args` verbatim — real ids, names, possibly
    PII.** With multi-probe this is a *list* of arg-dicts; scrub **every element** before
-   committing. Replace real values with placeholders (`"entityId": "<example-id>"`). A real
-   identifier in a version-controlled file is a leak that survives deletion (git history)
-   and travels to anyone the repo reaches. The shape-spec must record *that* `entityType`
-   was probed as `int` and the response *shape* — never the sample values. If you keep the
-   raw responses for reference, write them to `<server>.probe-raw.json` (git-ignored), not
-   into the shape-spec.
+   committing. A real identifier in a version-controlled file is a leak that survives
+   deletion (git history) and travels to anyone the repo reaches.
+
+   **Only replace values that match a PII pattern** — email addresses, UUIDs
+   (`xxxxxxxx-xxxx-…`), long numeric IDs (8+ digits), auth tokens, personal names, or
+   hostnames that could identify a user or system.
+
+   **Do NOT replace functional values** — timezone names (`"UTC"`, `"America/New_York"`),
+   generic table names (`"users"`, `"products"`), public repo owners/names, ISO timestamps,
+   standard SQL queries, or any value that is not personally identifiable. Replacing these
+   breaks the roundtrip verifier, which passes `probed_args` to the live server.
+
+   When a value *must* be redacted, add `"probe_args_scrubbed": true` to the shape-spec
+   entry so downstream tooling can skip the roundtrip check rather than fail it.
+
+   The shape-spec must record *that* `entityType` was probed as `int` and the response
+   *shape* — never the sample values. If you keep raw responses for reference, write them
+   to `<server>.probe-raw.json` (git-ignored), not into the shape-spec.
 
 3b. **Consolidate parts → shapes.json.**
    ```
@@ -238,6 +257,12 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      Read `_observed_shape` to find the level where the meaningful keys appear.
    - **`return_model`**: name the `TypedDict` (e.g. `"Entity"`). Absent → return stays `Any`.
      Never set to a Python primitive name (`str`, `int`, `list`, etc.) — use `null` for tools that return plain scalars.
+     The name must be a new, capitalized identifier (e.g. `CurrentTime`, `CommitSummary`) — never a Python keyword or builtin.
+     When multiple tools share a conceptual type but differ in fields, mint distinct names:
+     - singular read → base name (`Release`, `Issue`, `Commit`)
+     - list endpoint → append `Summary` (`ReleaseSummary`, `CommitSummary`)
+     - search endpoint → append the verb (`SearchIssueItem`, `SearchPRItem`)
+     Two tools may not share a `return_model` name unless their `fields` dicts are identical. Check for collisions before finalising.
    - **`return_container`**: set `"list"` when the unwrapped value is a *list* of records
      (e.g. `query_acme`'s `data.results`). Return type becomes `list[<model>]` and the body
      digs via `_dig_list` (list passes through, envelope dug, else `[]`) instead of `_dig`.

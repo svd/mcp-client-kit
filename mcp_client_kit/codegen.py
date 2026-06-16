@@ -367,9 +367,10 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None,
     needs_json = bool(shapes) and any(
         (shapes.get(t["name"]) or {}).get("unwrap") for t in tools
     )
+    has_typed_return = has_disc or any(s.get("return_model") for s in shapes.values())
     if has_disc:
         type_imports = "from typing import Any, Literal, TypedDict, cast, overload"
-    elif shapes:
+    elif has_typed_return:
         type_imports = "from typing import Any, TypedDict, cast"
     else:
         type_imports = "from typing import Any"
