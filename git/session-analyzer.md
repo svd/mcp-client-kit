@@ -1,0 +1,225 @@
+# Session Report: git MCP Wrapper Generation
+
+**Session ID:** `agent-a81256d0ff1aef9da` (generate:git workflow agent)
+**Parent workflow:** `c9f0c24b-604c-406c-aec0-52b3fe72187d` / `wf_721787cc-a68`
+**Date:** 2026-06-16 01:02 UTC
+**Model:** `claude-sonnet-4-6`
+**Skill analyzed:** `mcp-client-kit:generate-mcp-wrappers`
+
+---
+
+## 1. Tool Calls Summary
+
+### generate:git Agent (22 total)
+
+| # | Tool | Input summary | Is error | Attribution |
+|---|------|---------------|----------|-------------|
+| 1 | Skill | Invoke `mcp-client-kit:generate-mcp-wrappers` | no | skill-driven |
+| 2 | Bash | `mcp-kit codegen git --out git/git.py` — missing transport arg | **yes** | LLM autonomous (error recovery) |
+| 3 | Bash | `mcp-kit codegen git --cmd "uvx mcp-server-git" --out git/git.py` — wrong flag | **yes** | LLM autonomous (error recovery) |
+| 4 | Bash | `mcp-kit --help && mcp-kit codegen --help` — CLI introspection | no | LLM autonomous (error recovery) |
+| 5 | Bash | `mcp-kit codegen git --stdio "uvx mcp-server-git" --out git/git.py` — success | no | skill-driven (step 1) |
+| 6 | Bash | `mcp-kit list git --stdio "uvx mcp-server-git"` | no | skill-driven (step 2a) |
+| 7 | Bash | `pwd && git -C … log --oneline -3` — verify working directory | no | LLM autonomous |
+| 8 | Bash | `mcp-kit probe git git_status --stdio … --emit-shape git/git.shapes.json` | no | skill-driven (step 3) |
+| 9 | Bash | Probe `git_diff_unstaged`, `git_diff_staged`, `git_log`, `git_diff` in parallel | no | skill-driven (step 3) |
+| 10 | Bash | Probe `git_diff`, `git_show`, `git_branch` | no | skill-driven (step 3) |
+| 11 | Bash | `mcp-kit merge git --out git/git.shapes.json` | no | skill-driven (step 3b) |
+| 12 | Read | Read `git/git.shapes.json` to inspect observed shapes | no | skill-driven (step 4 judgment) |
+| 13 | Write | Rewrite `git/git.shapes.json` with PII-scrubbed `probed_args` and `note` fields | no | skill-driven (step 4 + PII scrub) |
+| 14 | Bash | `mcp-kit codegen git --stdio … --out git/git.py --shapes git/git.shapes.json` | no | skill-driven (step 5) |
+| 15 | Bash | `python3 -c "import ast; ast.parse(open('git/git.py').read())"` | no | skill-driven (step 6 verify) |
+| 16 | Read | Read `git/git.py` to inspect generated signatures | no | skill-driven (step 6 verify) |
+| 17 | Bash | `uv run eval-kit runner git` — generate `run.py` sample runner | no | LLM autonomous (eval framework) |
+| 18 | Write | Write `git/session-overview.draft.md` | no | LLM autonomous (eval reporting) |
+| 19 | Bash | `ls -la git/` — list output artifacts | no | LLM autonomous |
+| 20 | Bash | `python3 -c "json.load(open('git/git.shapes.json'))"` — validate JSON + print notes | no | LLM autonomous |
+| 21 | Bash | `grep -n "Sviataslau\|…\|mcp-client-kit-eval" git/git.shapes.json` — PII audit | no | skill-driven (step 3 guard) |
+| 22 | StructuredOutput | Emit eval verdict JSON (`server=git`, `tool_count=12`, `verdict_hint=pass`) | no | LLM autonomous (eval framework) |
+
+**Errors:** 2 (seq 2 and seq 3 — both CLI invocation mistakes, recovered by seq 4–5)
+
+### Other git-Pipeline Agents (same workflow)
+
+| Agent label | Phase | State | Tool calls | Errors |
+|-------------|-------|-------|-----------|--------|
+| generate:git | Generate | done | 22 | 2 |
+| analyze:git | Analyze | done | 34 | 1 |
+| verify:git | Verify | done | 4 | 0 |
+
+The `analyze:git` agent ran the session-analyzer skill on the generate:git transcript (34 tool calls, 1 minor error on parse_session.py path lookup). The `verify:git` agent ran `eval-kit merge-session`, `eval-kit verify`, and `eval-kit runner` sequentially, all passing.
+
+---
+
+## 2. Stages Executed
+
+The generate-mcp-wrappers skill prescribes these stages. All were completed:
+
+| Stage | Steps | Status |
+|-------|-------|--------|
+| **Stage 1 — Initial codegen** | `mcp-kit codegen git --stdio …` | Done (after 2 failed attempts) |
+| **Stage 2 — Discover tools** | `mcp-kit list git --stdio …` | Done — 12 tools found, discriminator candidates noted |
+| **Stage 3 — Live probing** | `mcp-kit probe` × 7 tools + `mcp-kit merge` | Done — 7 tools probed inline using bash parallelism (`&`) |
+| **Stage 4 — Shape-spec judgment** | Read shapes, annotate, scrub PII, write back | Done — 7 tools have shape annotations |
+| **Stage 5 — Final codegen with shapes** | `mcp-kit codegen … --shapes git/git.shapes.json` | Done — 4372 bytes written |
+| **Stage 6 — Verification** | AST parse + visual inspect | Done — `AST parse: OK` |
+| **Eval bookkeeping** | `eval-kit runner`, `session-overview.draft.md`, `StructuredOutput` | Done |
+
+**Key decisions made during the run:**
+
+1. **CLI flag discovery:** When `--out` alone failed and `--cmd` was rejected, the agent proactively read `mcp-kit --help` and `mcp-kit codegen --help` before retrying — a good self-recovery pattern.
+
+2. **Inline probing vs. subagent dispatch:** With 7 tools to probe, the skill's batching rule recommends subagents for >4 tools. The agent chose bash background parallelism (`&`) instead, running probes in groups of 3–4 via a single Bash call. This avoids subagent overhead but risks shell-level race conditions on the `.parts` directory.
+
+3. **Discriminator candidate dismissal:** `mcp-kit list` flagged `branch_name → git_checkout, git_create_branch` as discriminator candidates. The agent correctly dismissed both (they are mutating tools excluded from probing) and did not probe them.
+
+4. **PII scrubbing:** The agent replaced hardcoded repo paths (containing the username `Sviataslau_Svirydau`) in `probed_args` with generic placeholders before writing the final `git.shapes.json`. Verified with `grep` at seq 21.
+
+5. **Shape annotation coverage:** Only 7 of 12 tools were probed (probing excluded mutating tools: `git_commit`, `git_checkout`, `git_create_branch`, `git_add`, `git_reset`). Shape annotations cover: `git_branch`, `git_diff`, `git_diff_staged`, `git_diff_unstaged`, `git_log`, `git_show`, `git_status`.
+
+---
+
+## 3. Errors and Recovery
+
+### Error 1 — Bash (seq 2): missing transport flag
+
+**What happened:** The agent called `mcp-kit codegen git --out git/git.py` with no transport argument. `mcp-kit` cannot connect to the server without a transport spec.
+
+**Error output:**
+```
+Exit code 1
++ Exception Group Traceback (most recent call last):
+|   File "…/mcp-kit", line 10, in <module>
+|     sys.exit(main())
+```
+
+**How the LLM recovered:** Immediately tried `--cmd "uvx mcp-server-git"` (seq 3), guessing a flag name.
+
+**Root cause and fix options:**
+- Option A: The eval agent prompt should inject the exact `mcp-kit codegen` invocation for the given transport (it already knows `transport=stdio` and `launch="uvx mcp-server-git"`). Passing `--stdio "uvx mcp-server-git"` directly would skip this error entirely.
+- Option B: The skill's SKILL.md step 1 could explicitly list all transport flags (`--stdio`, `--sse`, `--http`) so agents don't have to guess.
+
+---
+
+### Error 2 — Bash (seq 3): unrecognized `--cmd` flag
+
+**What happened:** The agent guessed `--cmd "uvx mcp-server-git"` but that flag does not exist in `mcp-kit codegen`.
+
+**Error output:**
+```
+Exit code 2
+mcp-kit: error: unrecognized arguments: --cmd uvx mcp-server-git
+```
+
+**How the LLM recovered:** Called `mcp-kit --help && mcp-kit codegen --help` (seq 4) to read the actual CLI interface. Found the correct `--stdio` flag and used it successfully at seq 5.
+
+**Root cause and fix options:**
+- Option A: Same as Error 1 — inject the correct invocation in the eval prompt.
+- Option B: Call `mcp-kit codegen --help` proactively as the first Bash call before attempting codegen. This adds one round-trip but eliminates the two-failure recovery loop.
+
+---
+
+### Error 3 — Bash (analyze:git agent, seq 19): wrong parse_session.py path
+
+**What happened:** The `analyze:git` agent tried to run `parse_session.py` using the plugin cache path `claude-plugins-official/…` which did not exist.
+
+**Error output:**
+```
+Python: can't open file '.../claude-plugins-official/.../scripts/parse_session.py': [Errno 2] No such file or directory
+```
+
+**How the LLM recovered:** Used `find` to locate the correct path (`/Users/Sviataslau_Svirydau/src/agent-skills/plugins/session-analyzer/skills/session-analyzer/scripts/parse_session.py`) and retried successfully (seq 20–21).
+
+**Root cause and fix options:**
+- Option A: The session-analyzer skill should document the `$CLAUDE_PLUGIN_ROOT` variable expansion in its instructions or provide a `which parse_session` utility.
+- Option B: The skill could use `find` or `$(python3 -c "import importlib.util; ...")` to locate the script rather than assuming a hardcoded path.
+
+---
+
+## 4. Token Usage and Cost
+
+### generate:git agent
+
+| Metric | Value |
+|--------|-------|
+| Input tokens | 46 |
+| Output tokens | 5,687 |
+| Cache writes | 50,911 |
+| Cache reads | 954,401 |
+| **Estimated cost** | **$0.5627** |
+
+### analyze:git agent
+
+| Metric | Value |
+|--------|-------|
+| Input tokens | 144 |
+| Output tokens | 4,845 |
+| Cache writes | 73,452 |
+| Cache reads | 1,010,022 |
+| **Estimated cost** | **$0.6516** |
+
+### verify:git agent
+
+| Metric | Value |
+|--------|-------|
+| Input tokens | 10 |
+| Output tokens | 302 |
+| Cache writes | 10,178 |
+| Cache reads | 58,490 |
+| **Estimated cost** | **$0.0603** |
+
+### git server pipeline total
+
+| Metric | generate | analyze | verify | Total |
+|--------|----------|---------|--------|-------|
+| Input tokens | 46 | 144 | 10 | **200** |
+| Output tokens | 5,687 | 4,845 | 302 | **10,834** |
+| Cache writes | 50,911 | 73,452 | 10,178 | **134,541** |
+| Cache reads | 954,401 | 1,010,022 | 58,490 | **2,022,913** |
+| **Estimated cost** | $0.5627 | $0.6516 | $0.0603 | **$1.2746** |
+
+All three agents ran on `claude-sonnet-4-6`. Cache reads dominate cost (2M tokens, ~$0.61). Raw input is negligible (200 tokens) because the large shared skill context (~60 skills) is fully cached. Cache efficiency is excellent: >99.9% of context served from cache.
+
+### Cost by model (full workflow)
+
+| Model | Sessions | Input | Output | Cache write | Cache read | Cost |
+|-------|----------|-------|--------|-------------|------------|------|
+| claude-sonnet-4-6 | 54 | 6,564 | 314,180 | 3,668,895 | 62,689,199 | $37.2973 |
+
+*The git pipeline accounts for ~$1.27 of the total $37.30 workflow cost (3.4%).*
+
+---
+
+## 5. Skill vs. LLM Attribution
+
+### generate:git agent (22 tool calls)
+
+| Source | Tool calls | % |
+|--------|-----------|---|
+| `mcp-client-kit:generate-mcp-wrappers` (skill-prescribed) | 13 | 59% |
+| LLM autonomous (error recovery) | 3 | 14% |
+| LLM autonomous (eval framework / bookkeeping) | 6 | 27% |
+
+**Skill-prescribed (13):** Skill invocation (#1), initial codegen (#5), `mcp-kit list` (#6), all probe calls (#8–#10), merge (#11), reading shapes for judgment (#12), writing back the scrubbed shape-spec (#13), regenerating with shapes (#14), AST verify (#15), reading the output module (#16), PII grep audit (#21).
+
+**LLM autonomous — error recovery (3):** Failed codegen attempts (#2–#3) and the help introspection (#4). The skill does not prescribe retry logic; these were autonomous decisions to self-diagnose.
+
+**LLM autonomous — eval bookkeeping (6):** Working-directory check (#7), `eval-kit runner` invocation (#17), session-overview write (#18), directory listing (#19), JSON-validity print (#20), and StructuredOutput verdict (#22) are all eval-framework artifacts not prescribed by the generate-mcp-wrappers skill itself.
+
+Attribution is based on direct comparison with `/Users/Sviataslau_Svirydau/src/mcp-client-kit/skills/generate-mcp-wrappers/SKILL.md`.
+
+---
+
+## 6. Optimization Recommendations
+
+1. **Inject the exact `mcp-kit codegen` invocation into the eval agent prompt.** The two failed attempts (seq 2–3) and the help lookup (seq 4) burned 3 Bash round-trips because the agent had to discover that `--stdio` was the correct flag. The eval workflow already knows `transport=stdio` and `launch="uvx mcp-server-git"` — passing the complete command would eliminate these failures.
+
+2. **The agent ran 7 probes inline instead of dispatching subagents.** The skill's batching rule recommends subagents for >4 tools. The agent chose bash background parallelism (`&`) in a single Bash command instead. This works but risks race conditions on the `.parts` directory and is harder to debug. For 7 tools the subagent dispatch path would be more aligned with the skill's prescribed execution model.
+
+3. **The `session-overview.draft.md` write (seq 18) and JSON-validity print (seq 20) are redundant with the StructuredOutput verdict (seq 22).** These verification steps add ~200 output tokens. The eval framework should pick one canonical output artifact; the draft overview should be the responsibility of a separate Merge phase agent (which the workflow already runs) rather than the Generate agent.
+
+4. **The `analyze:git` agent spent 15+ Bash calls locating the session transcript** before it could run `parse_session.py`. This discovery overhead accounts for ~40% of the analyze agent's output tokens. The workflow prompt for the analyze agent should inject the agent transcript path directly (it is known at dispatch time: `agent-a81256d0ff1aef9da.jsonl`).
+
+5. **Cache efficiency is excellent** (>99.9% cache hit rate for both generate and analyze agents). No action needed — the large shared skill context is properly cached across all eval workflow agents.
+
+6. **The `git_branch_name` discriminator candidate was correctly dismissed.** `mcp-kit list` flagged `branch_name → git_checkout, git_create_branch` as discriminator candidates; the agent recognized both are mutating tools excluded from probing. Documenting this dismissal pattern explicitly in the eval agent prompt would make future agents more confident when they encounter the same warning.

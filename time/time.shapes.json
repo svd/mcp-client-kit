@@ -1,0 +1,33 @@
+{
+  "get_current_time": {
+    "unwrap": [],
+    "return_model": "CurrentTime",
+    "input_overrides": {},
+    "fields": {
+      "timezone": "str",
+      "datetime": "str",
+      "day_of_week": "str",
+      "is_dst": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "timezone": "<example-timezone>"
+    }
+  },
+  "convert_time": {
+    "unwrap": [],
+    "return_model": "ConvertedTime",
+    "input_overrides": {},
+    "fields": {
+      "source": "dict",
+      "target": "dict",
+      "time_difference": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "source_timezone": "<example-timezone>",
+      "time": "<example-time>",
+      "target_timezone": "<example-timezone>"
+    }
+  }
+}

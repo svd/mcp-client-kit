@@ -18,14 +18,17 @@ A framework for running reproducible evaluations of the `mcp-client-kit` `genera
 ## Quick start
 
 ```bash
-# 1. Install mcp-client-kit (required — not on PyPI)
-pip install -e ../mcp-client-kit
+# 1. Create the venv (Python >=3.11 auto-selected)
+uv venv
 
-# 2. Install this framework
-pip install -e ".[dev]"
+# 2. Install this framework + dev group (generates uv.lock on first run)
+uv sync
 
-# 3. Verify
-eval-kit --help
+# 3. Install mcp-client-kit (required — not on PyPI; do this after uv sync)
+uv pip install -e ../mcp-client-kit
+
+# 4. Verify
+uv run eval-kit --help
 ```
 
 > **Note:** `mcp-client-kit` is intentionally not listed in `dependencies` because it must be
@@ -117,5 +120,6 @@ The following are intentionally excluded from version control:
 ## Requirements
 
 - Python 3.11+
+- [uv](https://docs.astral.sh/uv/) installed
 - `mcp-client-kit` installed from local clone (see Quick start above)
-- `pytest>=8` (dev dependency)
+- `pytest>=8` (dev dependency, installed via `uv sync`)

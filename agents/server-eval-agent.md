@@ -27,113 +27,25 @@ At the end, return a structured JSON summary so the Workflow can record the resu
 
 ---
 
-## Step-by-step instructions
+## Run the skill
 
-### Step 1: Generate mechanical stubs
+Invoke the **`mcp-client-kit:generate-mcp-wrappers`** skill via the Skill tool to generate the wrappers for `{{SERVER_NAME}}`. Let the skill drive the whole procedure (codegen → list → probe → merge → edit shapes → regenerate → verify).
 
-Run the codegen command to produce a Python wrapper with one `async def` per tool, all returning `Any`:
+Use these path conventions so artifacts land where the harness expects:
+- module out: `{{SERVER_NAME}}/{{SERVER_NAME}}.py`
+- shape-spec: `{{SERVER_NAME}}/{{SERVER_NAME}}.shapes.json`
 
-```bash
-mcp-kit codegen {{SERVER_NAME}} --out {{SERVER_NAME}}/{{SERVER_NAME}}.py
-```
+### Non-interactive gate overrides
 
-Inspect the output. You will see one function per tool, signature derived from the tool's input schema, body is a single `mcp_call(...)` returning `Any`. No live calls are made here — this is purely schema-driven. Note the total number of tools generated; you will report this in the JSON summary.
+**You are running as a workflow subagent — you CANNOT call `AskUserQuestion`.** When the skill reaches an interactive gate, do NOT prompt. Apply these defaults instead:
 
-### Step 2: List and classify tools
+1. **Tool-selection gate (skill Step 2):** probe **all non-mutating** tools; **skip mutating** tools entirely (never call them live). Treat a tool as mutating if its name contains any of: `create`, `update`, `delete`, `remove`, `send`, `set`, `write`, `post`, `patch`, `put`, `cancel`, `approve`, `submit`, `assign`. Record which tools were skipped and why in `session-overview.draft.md`.
+2. **Discriminator gate (skill Step 4):** choose the **generic base model** option (or unwrap-only `Any` if no stable shared base exists). Never emit a variant-specific `return_model` from a single-variant probe.
+3. **>20-variant cap:** fall back to unwrap-only `Any`.
+4. **Sample ids / probe args:** use minimal safe values; pass `'{}'` when a tool has no required arguments. Invent realistic-looking but fake values for required string/ID args.
+5. **Run as a single driver thread — do NOT dispatch sub-subagents.**
 
-Print the full tool inventory:
-
-```bash
-mcp-kit list {{SERVER_NAME}}
-```
-
-Read through the tool names. Mark any tool as **mutating** if its name contains any of these substrings: `create`, `update`, `delete`, `remove`, `send`, `write`, `post`, `patch`, `put`, `cancel`, `approve`, `submit`, `assign`.
-
-In this eval context, **probe all non-mutating tools**. Skip mutating tools entirely — do not call them live. Note which tools were skipped and why in `session-overview.draft.md`.
-
-### Step 3: Probe non-mutating tools
-
-For each non-mutating tool, call it live and record the observed shape:
-
-```bash
-mcp-kit probe {{SERVER_NAME}} <tool_name> --args '<json_args>' --emit-shape {{SERVER_NAME}}/{{SERVER_NAME}}.shapes.json
-```
-
-Use minimal, safe arguments. If a tool takes no required arguments, pass `'{}'`. If it requires an ID or query string, use a realistic but generic value.
-
-**PII warning:** Before committing, replace all real IDs, emails, usernames, and names in `probed_args` with `<example-*>` placeholders (e.g., `<example-user-id>`, `<example-email>`). Never commit real personal data.
-
-### Step 3b: Merge shape parts
-
-After probing all tools, merge the per-tool shape fragments into a single sidecar:
-
-```bash
-mcp-kit merge {{SERVER_NAME}} --out {{SERVER_NAME}}/{{SERVER_NAME}}.shapes.json
-```
-
-Open `{{SERVER_NAME}}.shapes.json` and verify every probed tool has an entry with at least `_observed_shape` recorded.
-
-### Step 4: Edit shapes.json — the judgment step
-
-This is the most important step. For each entry in `{{SERVER_NAME}}.shapes.json`, decide which mode applies and edit the JSON accordingly.
-
-**Mode A — Plain text / string response**
-The tool returned a string or unstructured text. Leave `return_model: null`. The wrapper stays `-> Any`. Document why in the session overview.
-
-```json
-{ "return_model": null }
-```
-
-**Mode B — JSON dict response (single object)**
-The tool returned a predictable dictionary. Set `return_model` to a PascalCase name, list the top-level scalar fields under `fields`, and set `unwrap` to the key path if the payload is nested inside a wrapper key.
-
-```json
-{
-  "return_model": "UserProfile",
-  "fields": { "id": "str", "name": "str", "email": "str", "created_at": "str" },
-  "unwrap": "data"
-}
-```
-
-**Mode C — JSON list response**
-The tool returned a list of similar dicts. Set `return_container: "list"`, then fill `return_model` and `fields` the same as Mode B.
-
-```json
-{
-  "return_container": "list",
-  "return_model": "SearchResult",
-  "fields": { "id": "str", "title": "str", "score": "float" },
-  "unwrap": "results"
-}
-```
-
-**Path-F guard — omit nested non-scalars from `fields`**
-Only include top-level stable scalar fields (`str`, `int`, `float`, `bool`) in `fields`. Omit any field whose value is itself a dict or a list-of-objects. Nested structures are unstable across API versions and must not be typed. If a tool's response is *entirely* nested non-scalars with no stable top-level scalars, fall back to Mode A.
-
-**Decision matrix:**
-
-| Response shape | `return_container` | `return_model` | `fields` | Mode |
-|---|---|---|---|---|
-| Plain string / text | — | `null` | — | A |
-| Dict with scalar top-level keys | — | `"ModelName"` | top-level scalars only | B |
-| List of similar dicts | `"list"` | `"ModelName"` | top-level scalars only | C |
-| Dict whose values are all nested objects | — | `null` | — | A (Path-F) |
-
-### Step 5: Regenerate
-
-With the edited shapes file in place, regenerate the wrapper to apply the type annotations:
-
-```bash
-mcp-kit codegen {{SERVER_NAME}} --out {{SERVER_NAME}}/{{SERVER_NAME}}.py --shapes {{SERVER_NAME}}/{{SERVER_NAME}}.shapes.json
-```
-
-After generation, verify the output parses cleanly:
-
-```bash
-python -c "import ast; ast.parse(open('{{SERVER_NAME}}/{{SERVER_NAME}}.py').read()); print('OK')"
-```
-
-If `ast.parse` raises a `SyntaxError`, fix the shapes entry that caused it and regenerate. Do not hand-edit the generated `.py` file.
+**PII scrub (mandatory before finishing):** replace all real IDs, emails, usernames, and names in `probed_args` with `<example-*>` placeholders (e.g. `<example-user-id>`, `<example-email>`). Never commit real personal data.
 
 ### Step 6: Write session-overview.draft.md
 
@@ -156,7 +68,7 @@ Include a compact mode table:
 Run the eval-kit runner to produce a transport-aware sample script:
 
 ```bash
-eval-kit runner {{SERVER_NAME}}
+uv run eval-kit runner {{SERVER_NAME}}
 ```
 
 This writes `{{SERVER_NAME}}/run.py`. Do not hand-edit it.
@@ -167,7 +79,7 @@ This writes `{{SERVER_NAME}}/run.py`. Do not hand-edit it.
 
 - Folder: `{{SERVER_NAME}}/` — all four artifacts go here, nothing else
 - `{{SERVER_NAME}}.shapes.json`: valid JSON, fully PII-scrubbed, `_observed_shape` keys may remain as evidence
-- `session-overview.draft.md`: 200–500 words, covers all 6 steps, includes the mode table
+- `session-overview.draft.md`: 200–500 words, covers how the skill executed, includes the mode table
 - `run.py`: generated by `eval-kit runner` — do not hand-edit
 
 ---

@@ -1,0 +1,83 @@
+{
+  "git_branch": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>",
+      "branch_type": "all"
+    },
+    "note": "Returns plain text listing of branches (one per line); no dict envelope, no TypedDict needed."
+  },
+  "git_diff": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>",
+      "target": "HEAD"
+    },
+    "note": "Returns unified diff as plain text string; no dict envelope, no TypedDict needed."
+  },
+  "git_diff_staged": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>"
+    },
+    "note": "Returns unified diff of staged changes as plain text string."
+  },
+  "git_diff_unstaged": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>"
+    },
+    "note": "Returns unified diff of unstaged changes as plain text string."
+  },
+  "git_log": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>",
+      "max_count": 5
+    },
+    "note": "Returns commit log as plain text string; no dict envelope."
+  },
+  "git_show": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>",
+      "revision": "HEAD"
+    },
+    "note": "Returns commit contents (patch + metadata) as plain text string."
+  },
+  "git_status": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>"
+    },
+    "note": "Returns working tree status as plain text string (like `git status` output)."
+  }
+}

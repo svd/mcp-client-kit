@@ -1,0 +1,25 @@
+{
+  "server": "github",
+  "transport": "http",
+  "auth": "bearer:GITHUB_PAT",
+  "checks": {
+    "ast": "pass",
+    "signatures": "pass",
+    "idempotency": "pass",
+    "pii": "pass",
+    "roundtrip": "fail"
+  },
+  "check_details": {
+    "ast": "",
+    "signatures": "",
+    "idempotency": "offline determinism check (stub schemas only)",
+    "pii": "",
+    "roundtrip": "expected typed dict (Label) but got a string result"
+  },
+  "modes_hit": [
+    "A",
+    "B",
+    "C"
+  ],
+  "verdict": "partial"
+}

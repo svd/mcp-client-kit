@@ -1,0 +1,24 @@
+{
+  "server": "sequential-thinking",
+  "transport": "stdio",
+  "auth": "none",
+  "checks": {
+    "ast": "pass",
+    "signatures": "pass",
+    "idempotency": "pass",
+    "pii": "pass",
+    "roundtrip": "pass"
+  },
+  "check_details": {
+    "ast": "",
+    "signatures": "",
+    "idempotency": "offline determinism check (stub schemas only)",
+    "pii": "",
+    "roundtrip": "live call to 'sequentialthinking' returned typed result"
+  },
+  "modes_hit": [
+    "A",
+    "B"
+  ],
+  "verdict": "pass"
+}

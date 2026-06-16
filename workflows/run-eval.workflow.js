@@ -18,35 +18,49 @@ if (args === undefined || args === null) {
   throw new Error('args is required: pass a server name array (e.g. ["github"]) or "all"')
 }
 
+// args may arrive as JSON string if the caller serialized it
+let resolvedArgs = args
+if (typeof resolvedArgs === 'string' && resolvedArgs !== 'all') {
+  try { resolvedArgs = JSON.parse(resolvedArgs) } catch(e) {}
+}
+
 log('Loading servers manifest…')
 const manifestAgent = await agent(
-  'Read /Users/Sviataslau_Svirydau/src/mcp-client-kit-eval/servers/servers.toml and return a JSON array of server objects. Each object: {name, transport, launch, auth, auth_notes}. For auth_notes: if auth starts with "bearer:" write "Set ' + 'ENV_VAR=<token>" (use the actual env var name from the auth field); if auth is "oauth" write "Run: mcp-kit login <server>"; if auth is "none" write "No auth required.". Return ONLY the JSON array, no other text.',
+  'Read /Users/Sviataslau_Svirydau/src/mcp-client-kit-eval/servers/servers.toml and return a JSON object with a "servers" array. Each item: {name, transport, launch, auth, auth_notes}. For auth_notes: if auth starts with "bearer:" write "Set ' + 'ENV_VAR=<token>" (use the actual env var name from the auth field); if auth is "oauth" write "Run: mcp-kit login <server>"; if auth is "none" write "No auth required.".',
   {
     label: 'load-manifest',
     schema: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          name:       { type: 'string' },
-          transport:  { type: 'string' },
-          launch:     { type: 'string' },
-          auth:       { type: 'string' },
-          auth_notes: { type: 'string' },
+      type: 'object',
+      properties: {
+        servers: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name:       { type: 'string' },
+              transport:  { type: 'string' },
+              launch:     { type: 'string' },
+              auth:       { type: 'string' },
+              auth_notes: { type: 'string' },
+            },
+            required: ['name', 'transport', 'launch', 'auth', 'auth_notes'],
+          },
         },
-        required: ['name', 'transport', 'launch', 'auth', 'auth_notes'],
       },
+      required: ['servers'],
     },
   }
 )
 
+const allServers = manifestAgent.servers
+
 let servers
-if (args === 'all') {
-  servers = manifestAgent
+if (resolvedArgs === 'all') {
+  servers = allServers
   log(`Evaluating all ${servers.length} server(s): ${servers.map(s => s.name).join(', ')}`)
-} else if (Array.isArray(args)) {
-  servers = manifestAgent.filter(s => args.includes(s.name))
-  const missing = args.filter(name => !manifestAgent.find(s => s.name === name))
+} else if (Array.isArray(resolvedArgs)) {
+  servers = allServers.filter(s => resolvedArgs.includes(s.name))
+  const missing = resolvedArgs.filter(name => !allServers.find(s => s.name === name))
   if (missing.length > 0) {
     log(`Warning: server(s) not found in manifest: ${missing.join(', ')}`)
   }
@@ -132,9 +146,9 @@ When done, return "DONE: ${server.name}/session-analyzer.md written"`,
     const mergeVerify = await agent(
       `Run these commands in sequence in the working directory /Users/Sviataslau_Svirydau/src/mcp-client-kit-eval/:
 
-1. eval-kit merge-session ${server.name}
-2. eval-kit verify ${server.name}
-3. eval-kit runner ${server.name}
+1. uv run eval-kit merge-session ${server.name}
+2. uv run eval-kit verify ${server.name}
+3. uv run eval-kit runner ${server.name}
 
 Report what each command printed to stdout and whether it succeeded (exit code 0).
 Return a JSON object with these fields:
@@ -173,7 +187,7 @@ log(`Pipeline complete — ${successCount}/${servers.length} servers succeeded`)
 const reportResult = await agent(
   `Run this command in /Users/Sviataslau_Svirydau/src/mcp-client-kit-eval/:
 
-  eval-kit report
+  uv run eval-kit report
 
 This generates doc/EVAL_REPORT.md from all result.json files.
 Return the first 30 lines of the generated report file at doc/EVAL_REPORT.md.`,

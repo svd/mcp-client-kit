@@ -6,7 +6,7 @@ authors = [{name = "Sviatoslav Sviridov", email = "sviridov@gmail.com"}]
 requires-python = ">=3.11"
 dependencies = []   # mcp-client-kit must be installed separately; see README
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = ["pytest>=8,<10"]
 
 [project.scripts]

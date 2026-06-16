@@ -1,0 +1,13 @@
+{
+  "fetch": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "url": "<example-url>"
+    },
+    "notes": "Returns a plain string (markdown or raw content). No dict envelope. No TypedDict warranted — return type is str, not Any."
+  }
+}

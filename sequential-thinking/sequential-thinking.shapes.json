@@ -1,0 +1,20 @@
+{
+  "sequentialthinking": {
+    "unwrap": [],
+    "return_model": "SequentialThinkingResult",
+    "input_overrides": {},
+    "fields": {
+      "thoughtNumber": "int",
+      "totalThoughts": "int",
+      "nextThoughtNeeded": "bool",
+      "thoughtHistoryLength": "int"
+    },
+    "source": "live",
+    "probed_args": {
+      "thought": "<example-thought-text>",
+      "nextThoughtNeeded": false,
+      "thoughtNumber": 1,
+      "totalThoughts": 1
+    }
+  }
+}

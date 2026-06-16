@@ -1,0 +1,41 @@
+{
+  "open_nodes": {
+    "unwrap": [],
+    "return_model": "KnowledgeGraph",
+    "input_overrides": {},
+    "fields": {
+      "entities": "list",
+      "relations": "list"
+    },
+    "source": "live",
+    "probed_args": {
+      "names": [
+        "<example-node-name>"
+      ]
+    }
+  },
+  "read_graph": {
+    "unwrap": [],
+    "return_model": "KnowledgeGraph",
+    "input_overrides": {},
+    "fields": {
+      "entities": "list",
+      "relations": "list"
+    },
+    "source": "live",
+    "probed_args": {}
+  },
+  "search_nodes": {
+    "unwrap": [],
+    "return_model": "KnowledgeGraph",
+    "input_overrides": {},
+    "fields": {
+      "entities": "list",
+      "relations": "list"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "<example-query>"
+    }
+  }
+}
