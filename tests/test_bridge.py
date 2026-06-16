@@ -789,6 +789,109 @@ def test_delete_cred_last_keyring_clears(tmp_path):
     assert remaining == {}
 
 
+def test_keyring_clear_raw_propagates_non_notfound(tmp_path):
+    """_keyring_clear_raw propagates errors that are not PasswordDeleteError.
+
+    A locked keychain or access-denied failure must not be silently eaten —
+    callers reporting deletion success when the entry still exists breaks the
+    security contract.
+    """
+    class _LockedKeyring:
+        class errors:
+            class PasswordDeleteError(Exception):
+                pass
+        def get_password(self, s, u): return None
+        def set_password(self, s, u, p): pass
+        def delete_password(self, s, u): raise RuntimeError("keychain locked")
+
+    with patch.dict("sys.modules", {"keyring": _LockedKeyring()}):
+        with pytest.raises(RuntimeError, match="keychain locked"):
+            _bridge._keyring_clear_raw()
+
+
+def test_keyring_clear_raw_silent_on_not_found(tmp_path):
+    """_keyring_clear_raw is a no-op (no raise) when the entry is absent."""
+    class _EmptyKeyring:
+        class errors:
+            class PasswordDeleteError(Exception):
+                pass
+        def get_password(self, s, u): return None
+        def set_password(self, s, u, p): pass
+        def delete_password(self, s, u):
+            raise self.errors.PasswordDeleteError("no such entry")
+
+    with patch.dict("sys.modules", {"keyring": _EmptyKeyring()}):
+        _bridge._keyring_clear_raw()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# login() — credential preservation on OAuth failure
+# ---------------------------------------------------------------------------
+
+def test_login_restores_credential_on_oauth_failure(tmp_path):
+    """login() restores the prior credential when the OAuth flow fails.
+
+    If the network is down, the user cancels, or the server rejects
+    dynamic registration, the original access/refresh token must survive —
+    the user must not be locked out of a previously-working server.
+    """
+    creds = tmp_path / "credentials.json"
+    original_entry = {"tokens": {"access_token": "orig_tok", "token_type": "bearer"}}
+    creds.write_text(json.dumps({"acme": original_entry}))
+    os.chmod(creds, 0o600)
+
+    async def fake_callback_server():
+        fut = asyncio.get_event_loop().create_future()
+        fut.set_result(("code", "state"))
+        return 9999, fut
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield  # makes this an async generator; unreachable
+
+    async def run():
+        with patch("mcp_client_kit._bridge._local_callback_server", fake_callback_server), \
+             patch("mcp_client_kit._bridge._open_http", fake_http_fail), \
+             patch("mcp_client_kit._bridge.OAuthClientProvider", MagicMock()):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+    data = json.loads(creds.read_text())
+    assert "acme" in data, "prior credential must be restored after failed login"
+    assert data["acme"] == original_entry
+
+
+def test_login_no_prior_credential_does_not_create_on_failure(tmp_path):
+    """login() failure when no prior credential existed leaves no partial entry."""
+    creds = tmp_path / "credentials.json"
+
+    async def fake_callback_server():
+        fut = asyncio.get_event_loop().create_future()
+        fut.set_result(("code", "state"))
+        return 9999, fut
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield
+
+    async def run():
+        with patch("mcp_client_kit._bridge._local_callback_server", fake_callback_server), \
+             patch("mcp_client_kit._bridge._open_http", fake_http_fail), \
+             patch("mcp_client_kit._bridge.OAuthClientProvider", MagicMock()):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("newserver", creds_path=creds,
+                                    url="https://new.example.com/mcp")
+
+    asyncio.run(run())
+    # Either no file, or file exists but "newserver" is absent.
+    if creds.exists():
+        data = json.loads(creds.read_text())
+        assert "newserver" not in data
+
+
 # ---------------------------------------------------------------------------
 # parse() — JSON, repr, and plain-text payloads  (#4)
 # ---------------------------------------------------------------------------

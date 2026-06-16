@@ -176,12 +176,17 @@ def _keyring_write_raw(data: dict) -> None:
 
 
 def _keyring_clear_raw() -> None:
-    """Delete the credentials entry from the OS keyring (no-op if absent)."""
+    """Delete the credentials entry from the OS keyring (no-op if absent).
+
+    Only suppresses PasswordDeleteError (entry not found). All other failures
+    — locked keychain, access denied, backend error — propagate so callers
+    can surface them rather than falsely reporting deletion success.
+    """
     import keyring as _kr
     try:
         _kr.delete_password(_KEYRING_SERVICE, _KEYRING_USER)
-    except Exception:
-        pass  # already absent or no delete support
+    except _kr.errors.PasswordDeleteError:
+        pass  # already absent
 
 
 # Named HTTP+OAuth servers are loaded from a user config — never hardcoded, so no
@@ -946,57 +951,69 @@ async def login(
 
     storage = FileTokenStorage(server_name, creds_path, backend=resolve_cred_backend(cred_backend))
 
-    # Clear existing credentials so we start fresh.
+    # Stash the existing entry before clearing it. If the OAuth flow fails for
+    # any reason (user cancel, network error, bad registration), we restore it
+    # so the caller is not locked out of a previously-working server.
     data = storage._load()
-    data.pop(server_name, None)
+    stashed = data.pop(server_name, None)
     storage._save(data)
 
-    port, callback_future = await _local_callback_server()
-    callback_uri = f"http://localhost:{port}/callback"
-
-    async def redirect_handler(url: str) -> None:
-        print(f"\nOpening browser: {url}\n")
-        webbrowser.open(url)
-
-    async def callback_handler() -> tuple[str, str | None]:
-        print("Waiting for OAuth callback… (complete login in your browser)")
-        return await callback_future
-
-    provider = OAuthClientProvider(
-        server_url=server_url,
-        client_metadata=OAuthClientMetadata(
-            client_name=client_name or _resolve_client_name(server_name),
-            redirect_uris=[callback_uri],
-            grant_types=["authorization_code", "refresh_token"],
-            response_types=["code"],
-        ),
-        storage=storage,
-        redirect_handler=redirect_handler,
-        callback_handler=callback_handler,
-    )
-
     try:
-        async with _open_http(server_url, auth=provider) as (read, write, _):
-            async with ClientSession(read, write) as s:
-                await s.initialize()
+        port, callback_future = await _local_callback_server()
+        callback_uri = f"http://localhost:{port}/callback"
 
-                # Persist the token endpoint for later pre-flight refresh. Do this
-                # independently of any tool call — not every server exposes `whoami`.
-                if provider.context.oauth_metadata is not None:
-                    endpoint_url = str(provider.context.oauth_metadata.token_endpoint)
-                    creds_data = storage._load()
-                    creds_data.setdefault(server_name, {})["token_endpoint"] = endpoint_url
-                    storage._save(creds_data)
+        async def redirect_handler(url: str) -> None:
+            print(f"\nOpening browser: {url}\n")
+            webbrowser.open(url)
 
-                # Confirm the authenticated session works with a server-agnostic
-                # call. `list_tools` is part of the MCP protocol — every server
-                # supports it, unlike any specific tool name.
-                tools = await s.list_tools()
-                print(f"Login OK ({server_name}); {len(tools.tools)} tool(s) available")
-    finally:
-        if not callback_future.done():
-            callback_future.set_result((None, None))
-        await asyncio.sleep(0)
+        async def callback_handler() -> tuple[str, str | None]:
+            print("Waiting for OAuth callback… (complete login in your browser)")
+            return await callback_future
+
+        provider = OAuthClientProvider(
+            server_url=server_url,
+            client_metadata=OAuthClientMetadata(
+                client_name=client_name or _resolve_client_name(server_name),
+                redirect_uris=[callback_uri],
+                grant_types=["authorization_code", "refresh_token"],
+                response_types=["code"],
+            ),
+            storage=storage,
+            redirect_handler=redirect_handler,
+            callback_handler=callback_handler,
+        )
+
+        try:
+            async with _open_http(server_url, auth=provider) as (read, write, _):
+                async with ClientSession(read, write) as s:
+                    await s.initialize()
+
+                    # Persist the token endpoint for later pre-flight refresh. Do this
+                    # independently of any tool call — not every server exposes `whoami`.
+                    if provider.context.oauth_metadata is not None:
+                        endpoint_url = str(provider.context.oauth_metadata.token_endpoint)
+                        creds_data = storage._load()
+                        creds_data.setdefault(server_name, {})["token_endpoint"] = endpoint_url
+                        storage._save(creds_data)
+
+                    # Confirm the authenticated session works with a server-agnostic
+                    # call. `list_tools` is part of the MCP protocol — every server
+                    # supports it, unlike any specific tool name.
+                    tools = await s.list_tools()
+                    print(f"Login OK ({server_name}); {len(tools.tools)} tool(s) available")
+        finally:
+            if not callback_future.done():
+                callback_future.set_result((None, None))
+            await asyncio.sleep(0)
+
+    except BaseException:
+        # Restore the stashed credential so a failed login attempt doesn't lock
+        # the user out of a previously-working server.
+        if stashed is not None:
+            restore = storage._load()
+            restore[server_name] = stashed
+            storage._save(restore)
+        raise
 
     print(f"Credentials saved to {creds_path}")
 
