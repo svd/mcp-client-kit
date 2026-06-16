@@ -34,8 +34,8 @@ FAKE_STR = "plain text response"
 # ── dict payload ──────────────────────────────────────────────────────────────
 
 def test_call_writes_json_payload(tmp_path):
-    out = tmp_path / "radar.probe-raw.json"
-    ns = _ns("radar", "whoami", str(out))
+    out = tmp_path / "acme.probe-raw.json"
+    ns = _ns("acme", "whoami", str(out))
 
     with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
         rc = _cmd_call(ns)
@@ -46,8 +46,8 @@ def test_call_writes_json_payload(tmp_path):
 
 
 def test_call_nothing_on_stdout(tmp_path, capsys):
-    out = tmp_path / "radar.probe-raw.json"
-    ns = _ns("radar", "whoami", str(out))
+    out = tmp_path / "acme.probe-raw.json"
+    ns = _ns("acme", "whoami", str(out))
 
     with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
         _cmd_call(ns)
@@ -56,8 +56,8 @@ def test_call_nothing_on_stdout(tmp_path, capsys):
 
 
 def test_call_stderr_summary_has_size_and_path(tmp_path, capsys):
-    out = tmp_path / "radar.probe-raw.json"
-    ns = _ns("radar", "whoami", str(out))
+    out = tmp_path / "acme.probe-raw.json"
+    ns = _ns("acme", "whoami", str(out))
 
     with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
         _cmd_call(ns)
@@ -82,8 +82,8 @@ def test_call_string_payload_not_double_encoded(tmp_path):
 # ── --args forwarded ──────────────────────────────────────────────────────────
 
 def test_call_passes_args_to_underlying_call(tmp_path):
-    out = tmp_path / "radar.probe-raw.json"
-    ns = _ns("radar", "get_entity", str(out), args='{"entityId":"x","entityType":1}')
+    out = tmp_path / "acme.probe-raw.json"
+    ns = _ns("acme", "get_entity", str(out), args='{"entityId":"x","entityType":1}')
 
     with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT) as mock_c:
         _cmd_call(ns)
@@ -94,8 +94,8 @@ def test_call_passes_args_to_underlying_call(tmp_path):
 
 def test_call_no_args_defaults_to_empty_dict(tmp_path):
     """--args omitted → args={} passed to _call."""
-    out = tmp_path / "radar.probe-raw.json"
-    ns = _ns("radar", "whoami", str(out), args=None)
+    out = tmp_path / "acme.probe-raw.json"
+    ns = _ns("acme", "whoami", str(out), args=None)
 
     with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT) as mock_c:
         _cmd_call(ns)
@@ -108,15 +108,15 @@ def test_call_no_args_defaults_to_empty_dict(tmp_path):
 
 def test_call_missing_out_exits_nonzero():
     with pytest.raises(SystemExit) as exc_info:
-        main(["call", "radar", "whoami"])  # no --out
+        main(["call", "acme", "whoami"])  # no --out
     assert exc_info.value.code == 2  # argparse required-arg violation
 
 
 # ── bad --args JSON ───────────────────────────────────────────────────────────
 
 def test_call_bad_args_json_returns_1(tmp_path, capsys):
-    out = tmp_path / "radar.probe-raw.json"
-    ns = _ns("radar", "whoami", str(out), args="{bad json")
+    out = tmp_path / "acme.probe-raw.json"
+    ns = _ns("acme", "whoami", str(out), args="{bad json")
 
     rc = _cmd_call(ns)
 
@@ -129,8 +129,8 @@ def test_call_bad_args_json_returns_1(tmp_path, capsys):
 # ── PII warning ───────────────────────────────────────────────────────────────
 
 def test_call_emits_pii_warning(tmp_path, capsys):
-    out = tmp_path / "radar.probe-raw.json"
-    ns = _ns("radar", "whoami", str(out))
+    out = tmp_path / "acme.probe-raw.json"
+    ns = _ns("acme", "whoami", str(out))
 
     with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
         _cmd_call(ns)

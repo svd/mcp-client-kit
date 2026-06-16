@@ -7,7 +7,7 @@ All claims below are primary-source-backed unless flagged.
 ## TL;DR
 
 - The "**call MCP from code, not from LLM context**" pattern is **vendor-endorsed**
-  (Anthropic, Nov 2025) — exactly what you built into staffing-assistant.
+  (Anthropic, Nov 2025) — exactly what the origin project proved in practice.
 - **Your reusable-client idea overlaps heavily** with the official `mcp` SDK and
   **FastMCP 2.x** — neither is a green field.
 - **Your codegen-skill idea (generate per-server *typed importable Python wrapper
@@ -63,7 +63,7 @@ Soft signal, not proof.
   - **Operational cost** — sandboxing/monitoring overhead "that direct tool calls
     avoid" (Anthropic's own caveat).
   - **Response-shape assumptions** — inputSchema describes inputs, not outputs;
-    your staffing-assistant already learned this (empirical projection validation).
+    the origin project already learned this (empirical projection validation).
 
 ## Q4 — Distributing a small internal Python lib (2025-2026)
 
@@ -90,9 +90,9 @@ not adversarially verified. Treat as advisory.
 
 ## Open questions carried forward
 
-1. Does EPAM's OAuth need **pre-flight** refresh (short refresh-token life / odd
-   expiry) or would FastMCP reactive-refresh + `token_storage` suffice? → decides
-   whether your hand-rolled pre-flight is a true differentiator or redundant.
+1. ~~Does the server's OAuth need **pre-flight** refresh?~~ **Closed** — pre-flight
+   IS load-bearing due to an mcp SDK cold-start gap (not a server requirement). See
+   `doc/VERDICT.md §Fixed decisions`.
 2. Real demand for **static importable** wrappers (diff/audit/IDE-without-runtime)
    over mcp2py's runtime proxy?
 3. Distribution best practice (Q4) — needs its own research pass.

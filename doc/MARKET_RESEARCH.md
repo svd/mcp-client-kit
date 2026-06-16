@@ -46,7 +46,7 @@ OAuth is consistently cited by Python MCP developers as "harder than the server 
 **The gap in the official `mcp` Python SDK:**
 
 - The canonical example uses in-memory `TokenStorage` — tokens do not persist across process restarts.
-- The SDK's reactive-refresh path (on-401) is never reached at cold start because `_initialize` skips `update_token_expiry` (verified internally via `OQ1_PREFLIGHT.md`).
+- The SDK's reactive-refresh path (on-401) is never reached at cold start because `_initialize` skips `update_token_expiry` (verified — see `doc/VERDICT.md §Fixed decisions`).
 - Without `_pre_flight_refresh`, every fresh process re-authenticates in browser.
 
 **FastMCP** ships pluggable persistent `token_storage` but had a token-cache/refresh bug (cached relative `expires_in` reinterpreted as fresh after reload → already-expired token looks valid on restart). This is fixed as of fastmcp 3.2.0 (released Mar 30, 2026 — confirmed in PyPI release history). The issue is closed; the specific GitHub issue number in earlier drafts of this document may not be accurate but the fix and version are correct.

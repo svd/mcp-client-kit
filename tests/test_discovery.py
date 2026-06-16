@@ -25,8 +25,8 @@ claude.ai Microsoft 365: https://microsoft365.mcp.claude.com/mcp - ✔ Connected
 claude.ai Context7: https://mcp.context7.com/mcp - ✔ Connected
 codegraph: codegraph serve --mcp - ✔ Connected
 m365-copilot: node /Users/user/src/m365copilot-mcp/build/index.js - ✔ Connected
-epam-radar: https://mcp.epam.com/mcp/radar (HTTP) - ! Needs authentication
-epam-staffing: https://mcp.epam.com/mcp/staffing (HTTP) - ! Needs authentication
+acme-api: https://mcp.example.com/mcp/acme (HTTP) - ! Needs authentication
+acme-staffing: https://api.example.com/mcp/staffing (HTTP) - ! Needs authentication
 """
 
 FIXTURE_GET_CODEGRAPH = """\
@@ -40,12 +40,12 @@ codegraph:
 To remove this server, run: claude mcp remove "codegraph" -s user
 """
 
-FIXTURE_GET_EPAM_RADAR = """\
-epam-radar:
+FIXTURE_GET_ACME_API = """\
+acme-api:
   Scope: User config (available in all your projects)
   Status: ! Needs authentication
   Type: http
-  URL: https://mcp.epam.com/mcp/radar
+  URL: https://mcp.example.com/mcp/acme
 """
 
 FIXTURE_GET_CONTEXT7 = """\
@@ -63,9 +63,9 @@ FIXTURE_CLAUDE_JSON = {
             "command": "codegraph",
             "args": ["serve", "--mcp"],
         },
-        "epam-radar": {
+        "acme-api": {
             "type": "http",
-            "url": "https://mcp.epam.com/mcp/radar",
+            "url": "https://mcp.example.com/mcp/acme",
         },
     },
     "projects": {
@@ -76,9 +76,9 @@ FIXTURE_CLAUDE_JSON = {
                     "command": "python",
                     "args": ["-m", "my_tool"],
                 },
-                "epam-radar": {
+                "acme-api": {
                     "type": "http",
-                    "url": "https://old.epam.com/mcp/radar",
+                    "url": "https://old.example.com/mcp/acme",
                 },
             }
         }
@@ -115,10 +115,10 @@ def test_parse_mcp_list_stdio_server():
 
 def test_parse_mcp_list_http_server():
     entries = _parse_mcp_list(FIXTURE_MCP_LIST)
-    assert "epam-radar" in entries
-    entry = entries["epam-radar"]
+    assert "acme-api" in entries
+    entry = entries["acme-api"]
     assert entry["transport_hint"] == "http"
-    assert entry["url_hint"] == "https://mcp.epam.com/mcp/radar"
+    assert entry["url_hint"] == "https://mcp.example.com/mcp/acme"
     assert "(HTTP)" not in (entry["url_hint"] or "")
     assert entry["status"] == "Needs authentication"
 
@@ -145,9 +145,9 @@ def test_parse_mcp_get_stdio():
 
 
 def test_parse_mcp_get_http():
-    fields = _parse_mcp_get(FIXTURE_GET_EPAM_RADAR)
+    fields = _parse_mcp_get(FIXTURE_GET_ACME_API)
     assert fields.get("Type") == "http"
-    assert fields.get("URL") == "https://mcp.epam.com/mcp/radar"
+    assert fields.get("URL") == "https://mcp.example.com/mcp/acme"
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +162,8 @@ def test_cli_discover_codegraph(tmp_path):
         ("claude", "mcp", "get", "claude.ai Microsoft 365"): None,
         ("claude", "mcp", "get", "claude.ai Context7"): FIXTURE_GET_CONTEXT7,
         ("claude", "mcp", "get", "m365-copilot"): None,
-        ("claude", "mcp", "get", "epam-radar"): FIXTURE_GET_EPAM_RADAR,
-        ("claude", "mcp", "get", "epam-staffing"): None,
+        ("claude", "mcp", "get", "acme-api"): FIXTURE_GET_ACME_API,
+        ("claude", "mcp", "get", "acme-staffing"): None,
     }
 
     # Call _discover_via_cli() directly — discover() uses JSON path by default
@@ -188,8 +188,8 @@ def test_cli_connector_not_probeable(tmp_path):
         ("claude", "mcp", "get", "claude.ai Microsoft 365"): None,
         ("claude", "mcp", "get", "claude.ai Context7"): FIXTURE_GET_CONTEXT7,
         ("claude", "mcp", "get", "m365-copilot"): None,
-        ("claude", "mcp", "get", "epam-radar"): FIXTURE_GET_EPAM_RADAR,
-        ("claude", "mcp", "get", "epam-staffing"): None,
+        ("claude", "mcp", "get", "acme-api"): FIXTURE_GET_ACME_API,
+        ("claude", "mcp", "get", "acme-staffing"): None,
     }
 
     # Call _discover_via_cli() directly — discover() uses JSON path by default.
@@ -225,11 +225,11 @@ def test_cli_json_fallback(tmp_path):
     assert cg.command == "codegraph"
     assert cg.args == ["serve", "--mcp"]
 
-    # epam-radar: user scope URL wins over project scope URL.
-    assert "epam-radar" in by_name
-    er = by_name["epam-radar"]
+    # acme-api: user scope URL wins over project scope URL.
+    assert "acme-api" in by_name
+    er = by_name["acme-api"]
     assert er.transport == "http"
-    assert er.url == "https://mcp.epam.com/mcp/radar"
+    assert er.url == "https://mcp.example.com/mcp/acme"
 
     # local-tool is only in a project scope that doesn't match cwd (tmp_path).
     assert "local-tool" not in by_name
@@ -282,6 +282,89 @@ def test_available_false_when_nothing(tmp_path):
 def test_discover_all_host_filter():
     result = discover_all(hosts=["nonexistent-host"])
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: DiscoveredServer.as_dict() secret redaction
+# ---------------------------------------------------------------------------
+
+
+def test_as_dict_redacts_env_values_by_default():
+    """env values are replaced with '***' by default to prevent secret leaks."""
+    s = DiscoveredServer(host="claude-code", name="my-server",
+                         env={"API_KEY": "supersecret", "TOKEN": "tok_abc"})
+    d = s.as_dict()
+    assert "supersecret" not in json.dumps(d)
+    assert "tok_abc" not in json.dumps(d)
+    assert d["env"] == {"API_KEY": "***", "TOKEN": "***"}
+
+
+def test_as_dict_preserves_env_keys_when_redacting():
+    """Keys are kept even when values are redacted (user can see what's configured)."""
+    s = DiscoveredServer(host="claude-code", name="my-server",
+                         env={"API_KEY": "secret"})
+    d = s.as_dict()
+    assert "API_KEY" in d["env"]
+
+
+def test_as_dict_includes_raw_env_with_redact_env_false():
+    """redact_env=False passes the raw values through unchanged."""
+    s = DiscoveredServer(host="claude-code", name="my-server",
+                         env={"API_KEY": "supersecret"})
+    d = s.as_dict(redact_env=False)
+    assert d["env"] == {"API_KEY": "supersecret"}
+
+
+def test_as_dict_empty_env_unaffected():
+    """Empty env dict is not mutated by redaction."""
+    s = DiscoveredServer(host="claude-code", name="my-server")
+    assert s.as_dict()["env"] == {}
+
+
+def test_cli_discover_json_redacts_env_by_default(tmp_path):
+    """discover --json must not expose raw env values to stdout."""
+    config = {
+        "mcpServers": {
+            "secret-server": {
+                "type": "stdio",
+                "command": "my-tool",
+                "args": [],
+                "env": {"API_KEY": "supersecret"},
+            }
+        }
+    }
+    (tmp_path / ".claude.json").write_text(json.dumps(config))
+
+    from mcp_client_kit import cli, discovery as disc_mod
+    import io
+
+    provider = ClaudeCodeProvider(_run=_make_run({}), _home=tmp_path)
+
+    class _NS:
+        host = None
+        json = True
+        include_env = False
+
+    buf = io.StringIO()
+    original_providers = disc_mod.PROVIDERS
+    try:
+        disc_mod.PROVIDERS = [provider]
+        import sys
+        old_stdout = sys.stdout
+        sys.stdout = buf
+        try:
+            cli._cmd_discover(_NS())
+        finally:
+            sys.stdout = old_stdout
+    finally:
+        disc_mod.PROVIDERS = original_providers
+
+    output = buf.getvalue()
+    assert "supersecret" not in output
+    data = json.loads(output)
+    assert any(s["name"] == "secret-server" for s in data)
+    server_entry = next(s for s in data if s["name"] == "secret-server")
+    assert server_entry["env"]["API_KEY"] == "***"
 
 
 def test_discover_all_skips_unavailable(tmp_path, monkeypatch):

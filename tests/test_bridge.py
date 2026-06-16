@@ -403,3 +403,55 @@ def test_keyring_backend_falls_back_to_file_when_unavailable(tmp_path):
     assert creds.exists(), "fallback must write to file"
     assert any("keyring" in str(w.message).lower() for w in caught), "must warn on fallback"
     assert stat.S_IMODE(os.stat(creds).st_mode) == 0o600, "fallback file must be 0600"
+
+
+# ---------------------------------------------------------------------------
+# parse() — JSON, repr, and plain-text payloads  (#4)
+# ---------------------------------------------------------------------------
+
+def _item(text: str) -> dict:
+    return {"type": "text", "text": text}
+
+
+def test_parse_json_dict():
+    """Standard JSON dict payload is parsed to a Python dict."""
+    result = _bridge.parse([_item('{"name": "Alice", "id": 1}')])
+    assert result == {"name": "Alice", "id": 1}
+
+
+def test_parse_json_list():
+    """Standard JSON list payload is parsed to a Python list."""
+    result = _bridge.parse([_item('[{"name": "users"}, {"name": "orders"}]')])
+    assert result == [{"name": "users"}, {"name": "orders"}]
+
+
+def test_parse_python_repr_dict():
+    """Python repr()-formatted single-quoted dict is parsed via ast.literal_eval."""
+    result = _bridge.parse([_item("[{'name': 'users'}, {'name': 'orders'}]")])
+    assert result == [{"name": "users"}, {"name": "orders"}]
+    assert isinstance(result, list), "repr payload must parse to a list, not str"
+
+
+def test_parse_python_repr_nested():
+    """Nested Python repr() structure is parsed correctly."""
+    result = _bridge.parse([_item("{'tables': [{'name': 'users'}]}")])
+    assert result == {"tables": [{"name": "users"}]}
+
+
+def test_parse_plain_text_fallback():
+    """Non-JSON non-repr plain text falls back to str."""
+    result = _bridge.parse([_item("OK")])
+    assert result == "OK"
+
+
+def test_parse_empty_content_raises():
+    """Empty content list raises ValueError."""
+    with pytest.raises(ValueError, match="empty"):
+        _bridge.parse([])
+
+
+def test_parse_repr_not_exec_unsafe():
+    """ast.literal_eval does not execute arbitrary expressions — rejects code."""
+    result = _bridge.parse([_item("__import__('os').system('true')")])
+    # Must fall back to str, not execute.
+    assert isinstance(result, str)

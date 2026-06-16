@@ -4,7 +4,7 @@ import asyncio
 
 from mcp_client_kit import codegen
 
-# A representative get_entity shape-spec (the EVAL_RADAR differentiator, codified).
+# A representative get_entity shape-spec (the double-envelope differentiator, codified).
 _GET_ENTITY = {
     "name": "get_entity",
     "description": "Fetch an entity.",
@@ -78,9 +78,9 @@ def test_render_module_parses():
          "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}},
                          "required": ["id"]}},
     ]
-    src = codegen.render_module("radar", tools)
+    src = codegen.render_module("acme", tools)
     ast.parse(src)  # must be valid Python
-    assert "SERVER = 'radar'" in src
+    assert "SERVER = 'acme'" in src
 
 
 # ── shape-spec consuming mode ────────────────────────────────────────────────
@@ -111,7 +111,7 @@ def test_render_tool_with_shape_unwraps_and_types():
 
 def test_render_module_with_shapes_parses_and_has_helpers():
     tools = [_GET_ENTITY, {"name": "whoami", "description": "x", "inputSchema": {}}]
-    src = codegen.render_module("radar", tools, shapes={"get_entity": _GET_ENTITY_SHAPE})
+    src = codegen.render_module("acme", tools, shapes={"get_entity": _GET_ENTITY_SHAPE})
     ast.parse(src)
     assert "from typing import Any, TypedDict, cast" in src
     assert "class Entity(TypedDict, total=False):" in src
@@ -122,8 +122,8 @@ def test_render_module_with_shapes_parses_and_has_helpers():
 
 def test_render_module_no_shapes_unchanged():
     tools = [{"name": "whoami", "description": "x", "inputSchema": {}}]
-    assert codegen.render_module("radar", tools) == codegen.render_module("radar", tools, shapes=None)
-    assert "TypedDict" not in codegen.render_module("radar", tools)
+    assert codegen.render_module("acme", tools) == codegen.render_module("acme", tools, shapes=None)
+    assert "TypedDict" not in codegen.render_module("acme", tools)
 
 
 def test_generated_unwrap_matches_oracle():
@@ -131,9 +131,9 @@ def test_generated_unwrap_matches_oracle():
 
     Oracle semantics: result['data']['entity'] when present, else result as-is.
     """
-    src = codegen.render_module("radar", [_GET_ENTITY], shapes={"get_entity": _GET_ENTITY_SHAPE})
+    src = codegen.render_module("acme", [_GET_ENTITY], shapes={"get_entity": _GET_ENTITY_SHAPE})
     ns: dict = {}
-    exec(compile(src, "radar_gen.py", "exec"), ns)
+    exec(compile(src, "acme_gen.py", "exec"), ns)
 
     class _Caller:
         def __init__(self, resp):
@@ -158,13 +158,13 @@ def test_generated_unwrap_matches_oracle():
         assert got == oracle(resp)
 
 
-# ── list-envelope mode (query_radar: data.results is a LIST) ─────────────────
+# ── list-envelope mode (query_acme: data.results is a LIST) ──────────────────
 
-# query_radar returns a LIST under data.results, a different envelope than
+# query_acme returns a LIST under data.results, a different envelope than
 # get_entity's data.entity dict. Proves the machinery isn't overfit to one shape.
-_QUERY_RADAR = {
-    "name": "query_radar",
-    "description": "Query radar.",
+_QUERY_ACME = {
+    "name": "query_acme",
+    "description": "Query acme.",
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -174,10 +174,10 @@ _QUERY_RADAR = {
         "required": ["entityType", "query"],
     },
 }
-_QUERY_RADAR_SHAPE = {
+_QUERY_ACME_SHAPE = {
     "unwrap": ["data", "results"],
     "return_container": "list",
-    "return_model": "RadarResult",
+    "return_model": "AcmeResult",
     "input_overrides": {"entityType": "int"},
     "fields": {"_id": "str", "fullName": "str"},
     "source": "fixture",
@@ -185,20 +185,20 @@ _QUERY_RADAR_SHAPE = {
 
 
 def test_render_tool_list_envelope_returns_list_of_model():
-    src = codegen.render_tool(_QUERY_RADAR, _QUERY_RADAR_SHAPE)
+    src = codegen.render_tool(_QUERY_ACME, _QUERY_ACME_SHAPE)
     # return type is list[Model], not Any and not a bare Model
-    assert ") -> list[RadarResult]:" in src
+    assert ") -> list[AcmeResult]:" in src
     assert "entityType: int" in src
     # body digs via the list-aware helper and casts to list[Model]
-    assert 'result = await caller.call(SERVER, "query_radar", args)' in src
-    assert 'return cast("list[RadarResult]", _dig_list(result, (\'data\', \'results\', )))' in src
+    assert 'result = await caller.call(SERVER, "query_acme", args)' in src
+    assert 'return cast("list[AcmeResult]", _dig_list(result, (\'data\', \'results\', )))' in src
 
 
 def test_render_module_list_envelope_emits_dig_list():
-    src = codegen.render_module("radar", [_QUERY_RADAR], shapes={"query_radar": _QUERY_RADAR_SHAPE})
+    src = codegen.render_module("acme", [_QUERY_ACME], shapes={"query_acme": _QUERY_ACME_SHAPE})
     ast.parse(src)
     assert "def _dig_list(obj: Any, path: tuple[str, ...]) -> list:" in src
-    assert "class RadarResult(TypedDict, total=False):" in src
+    assert "class AcmeResult(TypedDict, total=False):" in src
     # a pure list envelope needs no dict _dig
     assert "def _dig(obj" not in src
 
@@ -209,9 +209,9 @@ def test_generated_unwrap_matches_unwrap_results_oracle():
     Oracle semantics: already-a-list passes through; result['data']['results'] when
     present; else result.get('results', []) — always a list.
     """
-    src = codegen.render_module("radar", [_QUERY_RADAR], shapes={"query_radar": _QUERY_RADAR_SHAPE})
+    src = codegen.render_module("acme", [_QUERY_ACME], shapes={"query_acme": _QUERY_ACME_SHAPE})
     ns: dict = {}
-    exec(compile(src, "radar_gen.py", "exec"), ns)
+    exec(compile(src, "acme_gen.py", "exec"), ns)
 
     class _Caller:
         def __init__(self, resp):
@@ -236,7 +236,7 @@ def test_generated_unwrap_matches_unwrap_results_oracle():
         {"data": {"other": 1}},                                # envelope, no results -> []
         {"unexpected": 1},                                     # nothing -> []
     ):
-        got = asyncio.run(ns["query_radar"](_Caller(resp), entityType=1, query={}))
+        got = asyncio.run(ns["query_acme"](_Caller(resp), entityType=1, query={}))
         assert got == oracle(resp), resp
 
 
@@ -281,14 +281,14 @@ def test_render_tool_discriminated_emits_overloads():
 
 def test_render_tool_discriminated_parses():
     src = codegen.render_module(
-        "radar", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
+        "acme", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
     )
     ast.parse(src)
 
 
 def test_render_module_discriminated_imports_and_models():
     src = codegen.render_module(
-        "radar", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
+        "acme", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
     )
     assert "from typing import Any, Literal, TypedDict, cast, overload" in src
     assert "class Person(TypedDict, total=False):" in src
@@ -306,10 +306,10 @@ def test_render_tool_flat_path_not_affected():
 def test_generated_discriminated_unwrap_matches_oracle():
     """Both discriminated variants unwrap the same envelope (same oracle as flat)."""
     src = codegen.render_module(
-        "radar", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
+        "acme", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
     )
     ns: dict = {}
-    exec(compile(src, "radar_disc_gen.py", "exec"), ns)
+    exec(compile(src, "acme_disc_gen.py", "exec"), ns)
 
     class _Caller:
         def __init__(self, resp):
@@ -337,10 +337,10 @@ def test_generated_discriminated_unwrap_matches_oracle():
 def test_generated_discriminated_fallback_for_unmodeled_variant():
     """Unmodeled entityType (99) hits the int impl — no raise, union returned."""
     src = codegen.render_module(
-        "radar", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
+        "acme", [_GET_ENTITY_DISC_TOOL], shapes={"get_entity": _GET_ENTITY_DISC_SHAPE}
     )
     ns: dict = {}
-    exec(compile(src, "radar_disc_gen.py", "exec"), ns)
+    exec(compile(src, "acme_disc_gen.py", "exec"), ns)
 
     class _Caller:
         def __init__(self, resp):
@@ -548,12 +548,12 @@ def _make_tool(name, props, required=None):
 def test_detect_discriminators_heuristic_name_shared():
     """Shared scalar named entityType across ≥2 tools appears in result."""
     tools = [
-        _make_tool("query_radar", {"entityType": {"type": "integer"}, "q": {"type": "string"}}),
+        _make_tool("query_acme", {"entityType": {"type": "integer"}, "q": {"type": "string"}}),
         _make_tool("get_entity", {"entityType": {"type": "integer"}, "entityId": {"type": "string"}}),
     ]
     result = codegen.detect_discriminators(tools)
     assert "entityType" in result
-    assert "query_radar" in result["entityType"]
+    assert "query_acme" in result["entityType"]
     assert "get_entity" in result["entityType"]
 
 
@@ -604,11 +604,11 @@ def test_detect_discriminators_uppercase_param_name_shared_across_tools():
     assert sorted(result["EntityType"]) == ["tool_a", "tool_b"]
 
 
-def test_detect_discriminators_radar_fixture():
-    """Radar-like fixture: query_radar, get_entity, get_filters all with entityType."""
+def test_detect_discriminators_acme_fixture():
+    """Acme-like fixture: query_acme, get_entity, get_filters all with entityType."""
     tools = [
         _make_tool(
-            "query_radar",
+            "query_acme",
             {"entityType": {"type": "integer"}, "query": {"type": "object"}},
             required=["entityType", "query"],
         ),
@@ -625,7 +625,7 @@ def test_detect_discriminators_radar_fixture():
     ]
     result = codegen.detect_discriminators(tools)
     assert "entityType" in result
-    assert "query_radar" in result["entityType"]
+    assert "query_acme" in result["entityType"]
     assert "get_entity" in result["entityType"]
     assert result["entityType"] == sorted(result["entityType"])  # alphabetically sorted
 
@@ -640,3 +640,187 @@ def test_detect_discriminators_result_sorted():
     assert list(result.keys()) == sorted(result.keys())
     for tool_list in result.values():
         assert tool_list == sorted(tool_list)
+
+
+def test_detect_discriminators_denylist_excludes_pagination_params():
+    """Pagination and routing params (page, limit, offset, path, owner, …) must be excluded."""
+    denylist_params = {
+        "page": {"type": "integer"},
+        "per_page": {"type": "integer"},
+        "limit": {"type": "integer"},
+        "offset": {"type": "integer"},
+        "cursor": {"type": "string"},
+        "path": {"type": "string"},
+        "repo": {"type": "string"},
+        "owner": {"type": "string"},
+        "org": {"type": "string"},
+        "branch": {"type": "string"},
+        "ref": {"type": "string"},
+        "method": {"type": "string"},
+        "query": {"type": "string"},
+        "search": {"type": "string"},
+        "filter": {"type": "string"},
+        "sort": {"type": "string"},
+        "order": {"type": "string"},
+        "direction": {"type": "string"},
+        "context_lines": {"type": "integer"},
+        "include": {"type": "string"},
+        "exclude": {"type": "string"},
+    }
+    # Each param appears in 2+ tools — without the deny-list they would all be returned.
+    tools = [
+        _make_tool("tool_a", denylist_params),
+        _make_tool("tool_b", denylist_params),
+    ]
+    result = codegen.detect_discriminators(tools)
+    for param in denylist_params:
+        assert param not in result, f"deny-listed param {param!r} must be excluded"
+
+
+def test_detect_discriminators_denylist_does_not_suppress_real_discriminators():
+    """Genuine discriminators (type, kind, entityType) still appear when shared across ≥2 tools."""
+    tools = [
+        _make_tool("tool_a", {
+            "type": {"type": "string"},    # genuine discriminator — keep
+            "page": {"type": "integer"},   # deny-listed — drop
+        }),
+        _make_tool("tool_b", {
+            "type": {"type": "string"},
+            "page": {"type": "integer"},
+        }),
+    ]
+    result = codegen.detect_discriminators(tools)
+    assert "type" in result, "genuine discriminator must survive the deny-list"
+    assert "page" not in result, "deny-listed param must be suppressed"
+
+
+# ---------------------------------------------------------------------------
+# #3 — duplicate TypedDict dedup in render_module
+# ---------------------------------------------------------------------------
+
+def test_render_module_deduplicates_identical_return_models():
+    """Two tools sharing the same return_model name emit the TypedDict class once."""
+    shared_shape = {
+        "return_model": "Release",
+        "fields": {"id": "str", "tag": "str"},
+        "source": "live",
+    }
+    tools = [
+        {"name": "get_release", "description": "Get.", "inputSchema": {}},
+        {"name": "list_releases", "description": "List.", "inputSchema": {}},
+    ]
+    src = codegen.render_module(
+        "github", tools,
+        shapes={"get_release": shared_shape, "list_releases": shared_shape},
+    )
+    class_count = src.count("class Release(TypedDict, total=False):")
+    assert class_count == 1, f"Expected 1 Release class, got {class_count}"
+
+
+def test_render_module_dedup_triple_same_model():
+    """Three tools sharing the same return_model emit exactly one TypedDict."""
+    shared_shape = {
+        "return_model": "KnowledgeGraph",
+        "fields": {"nodes": "Any"},
+        "source": "live",
+    }
+    tools = [{"name": f"tool_{i}", "description": "x", "inputSchema": {}} for i in range(3)]
+    src = codegen.render_module(
+        "memory", tools,
+        shapes={f"tool_{i}": shared_shape for i in range(3)},
+    )
+    count = src.count("class KnowledgeGraph(TypedDict, total=False):")
+    assert count == 1, f"Expected 1 KnowledgeGraph class, got {count}"
+
+
+def test_render_module_collision_emits_suffixed_variant(capsys):
+    """Two tools with the same return_model name but different fields emit a suffixed variant."""
+    tools = [
+        {"name": "tool_a", "description": "x", "inputSchema": {}},
+        {"name": "tool_b", "description": "y", "inputSchema": {}},
+    ]
+    shapes = {
+        "tool_a": {"return_model": "Result", "fields": {"id": "str"}, "source": "live"},
+        "tool_b": {"return_model": "Result", "fields": {"name": "str"}, "source": "live"},
+    }
+    src = codegen.render_module("demo", tools, shapes=shapes)
+    err = capsys.readouterr().err
+
+    assert "class Result(TypedDict, total=False):" in src
+    assert "class Result_2(TypedDict, total=False):" in src
+    assert "collision" in err.lower() or "Result_2" in err
+
+
+# ---------------------------------------------------------------------------
+# Security: injection-safe code generation
+# ---------------------------------------------------------------------------
+
+def _adversarial_tool(name: str = 'a"b', description: str = 'evil"""\nimport os  # injected',
+                       param_name: str = 'x"y') -> dict:
+    """Tool dict with server-controlled values that would break naive interpolation."""
+    return {
+        "name": name,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                param_name: {"type": "string"},
+                "safe_param": {"type": "integer"},
+            },
+            "required": [param_name],
+        },
+    }
+
+
+def test_adversarial_tool_generates_valid_python():
+    """Generated source must parse even with triple-quote / backslash in tool metadata."""
+    tool = _adversarial_tool()
+    src = codegen.render_module("test-server", [tool])
+    # Must parse without SyntaxError.
+    tree = ast.parse(src)
+    # Module-level nodes: only Expr (module docstring), ImportFrom, Assign, FunctionDef.
+    # An injected 'import os' would appear as a module-level Import node.
+    import_names = [
+        node.names[0].name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+    ]
+    assert "os" not in import_names, (
+        f"Injected bare 'import os' found in generated module. Unsafe codegen.\n\nSource:\n{src}"
+    )
+
+
+def test_adversarial_description_does_not_break_out_of_docstring():
+    """A description containing triple-quotes must not inject code above the function body."""
+    evil_desc = '"""\nimport subprocess\nsubprocess.run(["rm", "-rf", "/"])'
+    tool = _adversarial_tool(name="safe_tool", description=evil_desc, param_name="arg")
+    src = codegen.render_module("test-server", [tool])
+    tree = ast.parse(src)
+    # No subprocess import should appear at any level.
+    import_names = [
+        node.names[0].name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+    ]
+    assert "subprocess" not in import_names
+
+
+def test_adversarial_param_name_with_backslash():
+    """A parameter name containing a backslash must not produce invalid Python."""
+    tool = _adversarial_tool(name="my_tool", description="Normal description.",
+                              param_name='p\\n')
+    src = codegen.render_module("test-server", [tool])
+    ast.parse(src)  # must not raise SyntaxError
+
+
+def test_benign_output_byte_stable():
+    """Benign names/descriptions must produce byte-identical output after the escaping fix."""
+    # Use _GET_ENTITY — no special chars anywhere, so _str_literal and _docstring
+    # must take the fast-path (no repr()) and produce the same source as before.
+    src = codegen.render_module("example-server", [_GET_ENTITY], shapes={"get_entity": _GET_ENTITY_SHAPE})
+    # Sanity: output still parses.
+    ast.parse(src)
+    # Known stable fragment: tool name in caller.call must be a plain double-quoted literal.
+    assert '"get_entity"' in src
+    # Known stable fragment: required param key in args dict literal.
+    assert '"entityId"' in src

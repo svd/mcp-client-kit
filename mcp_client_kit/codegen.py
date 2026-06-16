@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import keyword
 import re
+import sys
 from typing import Any
 
 # ── JSON Schema -> Python type ───────────────────────────────────────────────
@@ -57,15 +58,35 @@ def sanitize(name: str) -> str:
 
 # ── Rendering ────────────────────────────────────────────────────────────────
 
+def _str_literal(s: str) -> str:
+    """Emit a Python string literal for *s* that is injection-safe.
+
+    Uses a plain double-quoted literal when the value contains no characters
+    that could break out of ``"…"`` (preserving byte-identical output for
+    well-formed names); falls back to ``repr()``, which always produces a
+    valid, injection-safe literal.
+    """
+    if not any(c in s for c in ('"', '\\', '\n', '\r')):
+        return f'"{s}"'
+    return repr(s)
+
+
 def _docstring(text: str | None, indent: str) -> str:
     text = (text or "").strip()
     if not text:
         return f'{indent}""" """'
-    lines = text.splitlines()
-    if len(lines) == 1:
-        return f'{indent}"""{lines[0]}"""'
-    body = f"\n{indent}".join(lines)
-    return f'{indent}"""{body}\n{indent}"""'
+    # Triple-quote form is safe only when the text cannot break out of it:
+    # no backslash, no triple-quote sequence, and not ending with a quote
+    # char (which would form an accidental close sequence like `foo"""""`).
+    if '\\' not in text and '"""' not in text and not text.endswith('"'):
+        lines = text.splitlines()
+        if len(lines) == 1:
+            return f'{indent}"""{lines[0]}"""'
+        body = f"\n{indent}".join(lines)
+        return f'{indent}"""{body}\n{indent}"""'
+    # Server-controlled text with special chars — use a repr() literal.
+    # repr() always produces a valid, injection-safe Python string literal.
+    return f'{indent}{repr(text)}'
 
 
 def render_model(name: str, fields: dict[str, str]) -> str:
@@ -73,7 +94,7 @@ def render_model(name: str, fields: dict[str, str]) -> str:
 
     `total=False` because field projection means any field may be absent; only the
     top-level stable scalars the probe actually saw belong here (deep/variadic nests
-    stay `Any` upstream). See doc/EVAL_RADAR.md and the skill's guards.
+    stay `Any` upstream). See the skill's guards.
     """
     lines = [f"class {name}(TypedDict, total=False):"]
     if not fields:
@@ -172,16 +193,16 @@ def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict,
         args_expr = "{}"
     else:
         if req_pairs:
-            inits = ", ".join(f'"{pname}": {py}' for py, pname in req_pairs)
+            inits = ", ".join(f'{_str_literal(pname)}: {py}' for py, pname in req_pairs)
             impl_lines.append(f"    args: dict[str, Any] = {{{inits}}}")
         else:
             impl_lines.append("    args: dict[str, Any] = {}")
         for py, pname in opt_pairs:
             impl_lines.append(f"    if {py} is not None:")
-            impl_lines.append(f'        args["{pname}"] = {py}')
+            impl_lines.append(f'        args[{_str_literal(pname)}] = {py}')
         args_expr = "args"
 
-    call = f'await caller.call(SERVER, "{raw_name}", {args_expr})'
+    call = f'await caller.call(SERVER, {_str_literal(raw_name)}, {args_expr})'
     if unwrap:
         path = "(" + "".join(f"{k!r}, " for k in unwrap) + ")"
         impl_lines.append(f"    result = {call}")
@@ -216,7 +237,7 @@ def render_tool(tool: dict, shape: dict | None = None) -> str:
     return_model: str | None = shape.get("return_model")
     overrides: dict = shape.get("input_overrides") or {}
     # return_container="list" => the unwrapped value is a LIST of return_model
-    # records (e.g. query_radar's data.results). Annotation/cast become
+    # records (e.g. query_acme's data.results). Annotation/cast become
     # list[Model] and the body digs via _dig_list. Default (None) = dict/scalar.
     container: str | None = shape.get("return_container")
     if return_model:
@@ -253,16 +274,16 @@ def render_tool(tool: dict, shape: dict | None = None) -> str:
         args_expr = "{}"
     else:
         if req_pairs:
-            inits = ", ".join(f'"{pname}": {py}' for py, pname in req_pairs)
+            inits = ", ".join(f'{_str_literal(pname)}: {py}' for py, pname in req_pairs)
             lines.append(f"    args: dict[str, Any] = {{{inits}}}")
         else:
             lines.append("    args: dict[str, Any] = {}")
         for py, pname in opt_pairs:
             lines.append(f"    if {py} is not None:")
-            lines.append(f'        args["{pname}"] = {py}')
+            lines.append(f'        args[{_str_literal(pname)}] = {py}')
         args_expr = "args"
 
-    call = f'await caller.call(SERVER, "{raw_name}", {args_expr})'
+    call = f'await caller.call(SERVER, {_str_literal(raw_name)}, {args_expr})'
     if unwrap:
         path = "(" + "".join(f"{k!r}, " for k in unwrap) + ")"
         lines.append(f"    result = {call}")
@@ -314,7 +335,27 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None,
     parts = [_HEADER.format(server=server, probe_note=note, imports=imports)]
 
     if shapes:
-        models = []
+        models: list[str] = []
+        _seen_models: dict[str, str] = {}  # name → rendered body; dedup across tools
+
+        def _append_model(name: str, fields: dict) -> None:
+            body = render_model(name, fields)
+            if name not in _seen_models:
+                _seen_models[name] = body
+                models.append(body)
+            elif _seen_models[name] == body:
+                pass  # identical duplicate — skip silently
+            else:
+                # True shape collision: same name, different fields → emit suffixed variant.
+                suffix = 2
+                while f"{name}_{suffix}" in _seen_models:
+                    suffix += 1
+                suffixed = f"{name}_{suffix}"
+                suffixed_body = render_model(suffixed, fields)
+                _seen_models[suffixed] = suffixed_body
+                models.append(suffixed_body)
+                print(f"[codegen] ⚠  shape collision for {name!r}; emitted {suffixed!r}", file=sys.stderr)
+
         for tool in sorted(tools, key=lambda t: t["name"]):
             sp = shapes.get(tool["name"])
             if not sp:
@@ -322,9 +363,9 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None,
             if sp.get("discriminator") and sp.get("variants"):
                 for _, variant in sorted(sp["variants"].items(), key=lambda kv: int(kv[0])):
                     if variant.get("return_model"):
-                        models.append(render_model(variant["return_model"], variant.get("fields") or {}))
+                        _append_model(variant["return_model"], variant.get("fields") or {})
             elif sp.get("return_model"):
-                models.append(render_model(sp["return_model"], sp.get("fields") or {}))
+                _append_model(sp["return_model"], sp.get("fields") or {})
         parts.extend(models)
         specs = [shapes.get(t["name"]) or {} for t in tools]
         if any(s.get("unwrap") and s.get("return_container") != "list" for s in specs):
@@ -343,7 +384,7 @@ def summarize_shape(obj: Any, max_keys: int = 40, max_depth: int = 6,
                     _depth: int = 0) -> Any:
     """Reduce a live response to a compact shape (keys + types + nesting).
 
-    Records structure, NOT payload — radar responses are 100-500 KB and must not
+    Records structure, NOT payload — server responses can be 100-500 KB and must not
     be embedded wholesale. Lists collapse to their first element's shape.
     """
     if _depth >= max_depth:
@@ -450,11 +491,20 @@ def detect_discriminators(tools: list[dict]) -> dict[str, list[str]]:
 
     Returns:
         Mapping of candidate param name to sorted list of tool names that carry
-        it. Returns all scalar (integer/number/string) params that appear in ≥2
-        tools. Heuristic-name and enum-carrying params naturally satisfy this
-        criterion when shared across tools.
+        it. Returns scalar (integer/number/string) params that appear in ≥2
+        tools, excluding common pagination/routing/path params that are never
+        shape discriminators.
     """
     _SCALAR_TYPES = {"integer", "number", "string"}
+
+    # Params that are routinely shared across tools but never discriminate response
+    # shape — pagination, routing, path, and common filter args.
+    _DENYLIST = {
+        "page", "per_page", "limit", "offset", "cursor",
+        "path", "repo", "owner", "org", "branch", "ref",
+        "method", "query", "search", "filter", "sort", "order", "direction",
+        "context_lines", "include", "exclude",
+    }
 
     # candidates[param_name] = [tool_name, ...]
     candidates: dict[str, list[str]] = {}
@@ -464,6 +514,8 @@ def detect_discriminators(tools: list[dict]) -> dict[str, list[str]]:
         schema = tool.get("inputSchema") or {}
         props: dict = schema.get("properties") or {}
         for pname, pschema in props.items():
+            if pname.lower() in _DENYLIST:
+                continue
             if not isinstance(pschema, dict):
                 continue
             ptype = pschema.get("type")

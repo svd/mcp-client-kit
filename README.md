@@ -10,14 +10,13 @@ the working prototype this builds on.
 ## Status: deterministic CLI prototype works (2026-06-14)
 
 `mcp-kit codegen <server>` connects to a live MCP server, lists tools, and emits a
-typed `async def` per tool against the `McpCaller` seam. Validated end-to-end
-against a corporate-internal MCP server (radar, 16 tools; generated wrappers run live). Optional `--probe`
+typed `async def` per tool against the `McpCaller` seam. Optional `--probe`
 records a tool's real response *shape* — the empirical pass that beats pure
-inputSchema codegen. See `doc/EVAL_RADAR.md`.
+inputSchema codegen.
 
 ```
-uv run mcp-kit codegen radar --out radar.py
-uv run mcp-kit codegen radar --probe get_entity --probe-args '{"entityId":"…","entityType":1}'
+uv run mcp-kit codegen acme --out acme.py
+uv run mcp-kit codegen acme --probe get_entity --probe-args '{"entityId":"…","entityType":1}'
 ```
 
 `mcp-kit discover` lists MCP servers configured in installed agent hosts and prints a ready-to-run `mcp-kit list` command for each server it can connect to.
@@ -34,8 +33,8 @@ uv run mcp-kit discover --host claude-code
   codegraph              stdio      User config      Connected
     → mcp-kit list codegraph --stdio "codegraph serve --mcp"
 
-  epam-radar             http       User config      Needs authentication
-    → mcp-kit list epam-radar --url https://mcp.epam.com/mcp/radar
+  my-api                 http       User config      Needs authentication
+    → mcp-kit list my-api --url https://example.com/mcp
 
   claude.ai Context7     http       User config      Connected
   ⚠  claude.ai connector — managed OAuth, not probeable by mcp-kit
@@ -53,11 +52,9 @@ findings, tool curation), `--check` drift mode. Auth is done:
 Read in this order:
 
 1. **[`doc/VERDICT.md`](doc/VERDICT.md)** — should you build it? (TL;DR: skill yes, client mostly no) + Fixed decisions.
-2. **[`doc/OQ1_PREFLIGHT.md`](doc/OQ1_PREFLIGHT.md)** — OQ#1 closed: mcp SDK needs pre-flight at cold start (§Removal eval); the server accepts reactive refresh but the SDK never reaches that path.
-3. **[`doc/EVAL_RADAR.md`](doc/EVAL_RADAR.md)** — the prototype's first eval against radar.
-4. **[`doc/LANDSCAPE.md`](doc/LANDSCAPE.md)** — verified competitor landscape (mid-2026, 19 sources).
-5. **[`doc/EXTRACTION_ANALYSIS.md`](doc/EXTRACTION_ANALYSIS.md)** — what's generic in `mcp_client.py`, API sketch, design debts.
-6. **[`doc/CODEGEN_SKILL_IDEA.md`](doc/CODEGEN_SKILL_IDEA.md)** — design for the wrapper-generator skill + CLI split.
+2. **[`doc/LANDSCAPE.md`](doc/LANDSCAPE.md)** — verified competitor landscape (mid-2026, 19 sources).
+3. **[`doc/EXTRACTION_ANALYSIS.md`](doc/EXTRACTION_ANALYSIS.md)** — what's generic in `mcp_client.py`, API sketch, design debts.
+4. **[`doc/CODEGEN_SKILL_IDEA.md`](doc/CODEGEN_SKILL_IDEA.md)** — design for the wrapper-generator skill + CLI split.
 
 ## One-line answer
 
@@ -72,7 +69,7 @@ small focused dependency, already done.**
 
 `_pre_flight_refresh` is load-bearing — the official mcp SDK 1.27.2 never reaches
 its silent-refresh path at cold start (`_initialize` skips `update_token_expiry`).
-Fresh-process CLI re-auths in browser without it. See `doc/OQ1_PREFLIGHT.md §Removal eval`.
+Fresh-process CLI re-auths in browser without it.
 
 ## Docs
 

@@ -69,9 +69,17 @@ class DiscoveredServer:
     note: str | None = None
     """Human-readable annotation explaining any special handling."""
 
-    def as_dict(self) -> dict:
-        """Return a JSON-serialisable copy of this server entry."""
-        return dataclasses.asdict(self)
+    def as_dict(self, *, redact_env: bool = True) -> dict:
+        """Return a JSON-serialisable copy of this server entry.
+
+        By default env values are redacted to ``"***"`` to avoid leaking
+        credentials stored in ``~/.claude.json`` or similar host configs.
+        Pass ``redact_env=False`` to include raw values.
+        """
+        d = dataclasses.asdict(self)
+        if redact_env and d.get("env"):
+            d["env"] = {k: "***" for k in d["env"]}
+        return d
 
 
 # ---------------------------------------------------------------------------

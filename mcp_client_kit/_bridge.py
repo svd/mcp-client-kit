@@ -10,8 +10,8 @@ browser re-auth (authorization_code flow) instead of a silent refresh —
 `_pre_flight_refresh()` renews the access token out-of-band (plain httpx, RFC 8414
 discovery) before the session opens.
 
-VERIFIED (2026-06-14, eval_preflight.py + mcp 1.27.2 source read,
-doc/OQ1_PREFLIGHT.md §"Removal eval"): pre-flight IS load-bearing — but the precise
+VERIFIED (2026-06-14, eval_preflight.py + mcp 1.27.2 source read): pre-flight IS
+load-bearing — but the precise
 reason is subtler than "the SDK can't refresh". The SDK's `async_auth_flow` DOES
 have a silent `refresh_token`-grant branch (`if not is_token_valid() and
 can_refresh_token(): _refresh_token()`). It is simply UNREACHABLE for a
@@ -40,6 +40,7 @@ absolute `expires_at` so that class of bug cannot occur regardless.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import errno as _errno
 import json
@@ -582,8 +583,9 @@ class McpBridgeCaller:
 def parse(content_items: list) -> Any:
     """Extract and JSON-parse the text payload from an MCP tool result.
 
-    If the text is not valid JSON (e.g. the server returns plain text), return
-    it as a plain string so callers can still inspect the response.
+    Falls back to ``ast.literal_eval`` for Python-repr payloads (e.g. servers
+    that return single-quoted dicts like sqlite), then to a plain string as a
+    last resort so callers can still inspect the response.
     """
     if not content_items:
         raise ValueError("MCP tool result has empty content")
@@ -592,7 +594,10 @@ def parse(content_items: list) -> Any:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        return text
+        try:
+            return ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            return text
 
 
 # ---------------------------------------------------------------------------

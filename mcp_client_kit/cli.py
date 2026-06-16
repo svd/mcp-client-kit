@@ -1,7 +1,7 @@
 """mcp-kit CLI: generate typed wrappers from a live MCP server.
 
-    mcp-kit codegen radar --out radar.py
-    mcp-kit codegen radar --probe whoami --probe-args '{}'
+    mcp-kit codegen acme --out acme.py
+    mcp-kit codegen acme --probe whoami --probe-args '{}'
 
 Deterministic stub generation is the 80%; the optional --probe adds one live call
 and records the observed response *shape* (not payload) — the empirical step that
@@ -123,7 +123,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
 def _parts_dir(target: Path) -> Path:
     """Return the parts directory for a shapes target path.
 
-    e.g. radar.shapes.json  →  radar.shapes.json.parts/
+    e.g. acme.shapes.json  →  acme.shapes.json.parts/
     """
     return target.with_name(target.name + ".parts")
 
@@ -230,14 +230,21 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     else:
         sys.stdout.write(out + "\n")
 
-    _DISCRIMINATOR_KEYS = {"entitytype", "type", "kind", "category", "entity_type", "objecttype", "resourcetype"}
-    all_keys: set[str] = set().union(*(a.keys() for a in args_list))
-    for key in sorted(all_keys):
-        values = {args[key] for args in args_list if key in args}
-        if len(values) == 1 and key.lower() in _DISCRIMINATOR_KEYS:
-            val = next(iter(values))
-            print(f"[probe] ⚠  {key} probed as {val!r} only — response shape is variant-specific.", file=sys.stderr)
-            print(f"[probe]    Do NOT emit a single-variant model. Probe every value or use a base model (SKILL step 4).", file=sys.stderr)
+    try:
+        _DISCRIMINATOR_KEYS = {"entitytype", "type", "kind", "category", "entity_type", "objecttype", "resourcetype"}
+        all_keys: set[str] = set().union(*(a.keys() for a in args_list))
+        for key in sorted(all_keys):
+            # Skip non-hashable values (lists, dicts) — discriminators are scalars by definition.
+            values = {
+                args[key] for args in args_list
+                if key in args and isinstance(args[key], (str, int, float, bool, type(None)))
+            }
+            if len(values) == 1 and key.lower() in _DISCRIMINATOR_KEYS:
+                val = next(iter(values))
+                print(f"[probe] ⚠  {key} probed as {val!r} only — response shape is variant-specific.", file=sys.stderr)
+                print(f"[probe]    Do NOT emit a single-variant model. Probe every value or use a base model (SKILL step 4).", file=sys.stderr)
+    except Exception as exc:
+        print(f"[probe] ⚠  discriminator advisory skipped ({exc})", file=sys.stderr)
 
     return 0
 
@@ -330,7 +337,7 @@ def _cmd_discover(ns: argparse.Namespace) -> int:
         return 1
 
     if ns.json:
-        sys.stdout.write(json.dumps([s.as_dict() for s in servers], indent=2) + "\n")
+        sys.stdout.write(json.dumps([s.as_dict(redact_env=not ns.include_env) for s in servers], indent=2) + "\n")
         return 0
 
     # ------------------------------------------------------------------ #
@@ -443,11 +450,18 @@ def _add_conn_args(p: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from importlib.metadata import version as _pkg_version
+    try:
+        _version = _pkg_version("mcp-client-kit")
+    except Exception:
+        _version = "unknown"
+
     parser = argparse.ArgumentParser(prog="mcp-kit")
+    parser.add_argument("--version", action="version", version=f"mcp-kit {_version}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     cg = sub.add_parser("codegen", help="generate typed wrappers for a server")
-    cg.add_argument("server", help="server name (e.g. radar) or URL")
+    cg.add_argument("server", help="server name (e.g. acme) or URL")
     cg.add_argument("--out", help="output .py path (default: stdout)")
     cg.add_argument("--shapes", help="shape-spec JSON sidecar (default: <server>.shapes.json beside --out)")
     cg.add_argument("--probe", help="tool to call live and record response shape (docstring note only)")
@@ -457,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
     cg.set_defaults(func=_cmd_codegen)
 
     pr = sub.add_parser("probe", help="live-call a tool and emit a shape-spec skeleton")
-    pr.add_argument("server", help="server name (e.g. radar) or URL")
+    pr.add_argument("server", help="server name (e.g. acme) or URL")
     pr.add_argument("tool", help="tool to call live")
     pr.add_argument("--args", action="append", metavar="JSON",
                     help="JSON args for one probe call; repeat for multi-probe (default: {})")
@@ -467,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
     pr.set_defaults(func=_cmd_probe)
 
     cl = sub.add_parser("call", help="live-call a tool and write the raw payload to --out")
-    cl.add_argument("server", help="server name (e.g. radar) or URL")
+    cl.add_argument("server", help="server name (e.g. acme) or URL")
     cl.add_argument("tool", help="tool to call live")
     cl.add_argument("--args", metavar="JSON", default=None,
                     help="JSON args for the tool call (default: {})")
@@ -478,7 +492,7 @@ def main(argv: list[str] | None = None) -> int:
     cl.set_defaults(func=_cmd_call)
 
     mg = sub.add_parser("merge", help="consolidate per-tool probe parts into <server>.shapes.json")
-    mg.add_argument("server", help="server name (e.g. radar) or URL")
+    mg.add_argument("server", help="server name (e.g. acme) or URL")
     mg.add_argument(
         "--out",
         help=(
@@ -492,13 +506,13 @@ def main(argv: list[str] | None = None) -> int:
     mg.set_defaults(func=_cmd_merge)
 
     ls = sub.add_parser("list", help="list tools for a server as JSON [{name, description}]")
-    ls.add_argument("server", help="server name (e.g. radar) or URL")
+    ls.add_argument("server", help="server name (e.g. acme) or URL")
     ls.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(ls)
     ls.set_defaults(func=_cmd_list)
 
     lg = sub.add_parser("login", help="browser OAuth login for a named server")
-    lg.add_argument("server", help="server name (e.g. radar)")
+    lg.add_argument("server", help="server name (e.g. acme)")
     _add_conn_args(lg)
     lg.set_defaults(func=_cmd_login)
 
@@ -507,6 +521,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="filter to this host id (repeatable; default: all)")
     dc.add_argument("--json", action="store_true",
                     help="emit JSON array instead of human table")
+    dc.add_argument("--include-env", action="store_true", dest="include_env",
+                    help="include raw env values in JSON output (may expose secrets)")
     dc.set_defaults(func=_cmd_discover)
 
     ns = parser.parse_args(argv)

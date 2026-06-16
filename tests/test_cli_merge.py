@@ -37,9 +37,9 @@ def test_merge_skeletons_single():
 
 def test_merge_skeletons_union():
     a = {"get_entity": {"fields": {"id": "str"}}}
-    b = {"query_radar": {"fields": {"results": "list"}}}
+    b = {"query_acme": {"fields": {"results": "list"}}}
     merged = codegen.merge_skeletons([a, b])
-    assert set(merged.keys()) == {"get_entity", "query_radar"}
+    assert set(merged.keys()) == {"get_entity", "query_acme"}
 
 
 def test_merge_skeletons_later_wins():
@@ -90,8 +90,8 @@ def test_atomic_write_text_overwrites(tmp_path):
 # ── _parts_dir ────────────────────────────────────────────────────────────────
 
 def test_parts_dir_name():
-    p = _parts_dir(Path("/work/radar.shapes.json"))
-    assert p == Path("/work/radar.shapes.json.parts")
+    p = _parts_dir(Path("/work/acme.shapes.json"))
+    assert p == Path("/work/acme.shapes.json.parts")
 
 
 # ── probe emit path (unit) ────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
     """Probe with --emit-shape writes a per-tool part, NOT the shared target."""
     from mcp_client_kit.cli import main
 
-    target = tmp_path / "radar.shapes.json"
+    target = tmp_path / "acme.shapes.json"
     ns_tool = "get_entity"
 
     # Stub _probe so no network call is made.
@@ -115,7 +115,7 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
 
     from mcp_client_kit.cli import _cmd_probe
     ns = SimpleNamespace(
-        server="radar",
+        server="acme",
         tool=ns_tool,
         args=['{"entityId": "x", "entityType": 1}'],
         emit_shape=str(target),
@@ -162,7 +162,7 @@ def test_probe_url_quotes_tool_name(tmp_path):
 
 def test_concurrent_distinct_tools_no_clobber(tmp_path):
     """N threads writing distinct tool parts concurrently produce N intact files."""
-    target = tmp_path / "radar.shapes.json"
+    target = tmp_path / "acme.shapes.json"
     tools = [f"tool_{i}" for i in range(16)]
     errors: list[Exception] = []
 
@@ -207,7 +207,7 @@ def _merge_ns(server: str, target: Path, keep_parts: bool = False) -> SimpleName
 
 
 def test_merge_union_of_parts_and_base(tmp_path):
-    target = tmp_path / "radar.shapes.json"
+    target = tmp_path / "acme.shapes.json"
 
     # Existing base with hand-edited entry.
     base = {"hand_edited": {"unwrap": ["data"], "return_model": "Entity", "source": "live"}}
@@ -219,7 +219,7 @@ def test_merge_union_of_parts_and_base(tmp_path):
         "new_tool": {"fields": {"x": "int"}, "source": "live"},
     })
 
-    rc = _cmd_merge(_merge_ns("radar", target))
+    rc = _cmd_merge(_merge_ns("acme", target))
 
     assert rc == 0
     result = json.loads(target.read_text())
@@ -229,28 +229,28 @@ def test_merge_union_of_parts_and_base(tmp_path):
 
 
 def test_merge_removes_parts_dir_by_default(tmp_path):
-    target = tmp_path / "radar.shapes.json"
+    target = tmp_path / "acme.shapes.json"
     _seed_parts(target, {"t1": {"source": "live"}})
 
-    _cmd_merge(_merge_ns("radar", target))
+    _cmd_merge(_merge_ns("acme", target))
 
     assert not _parts_dir(target).exists(), "parts dir should be cleaned up"
 
 
 def test_merge_keep_parts_flag(tmp_path):
-    target = tmp_path / "radar.shapes.json"
+    target = tmp_path / "acme.shapes.json"
     _seed_parts(target, {"t1": {"source": "live"}})
 
-    _cmd_merge(_merge_ns("radar", target, keep_parts=True))
+    _cmd_merge(_merge_ns("acme", target, keep_parts=True))
 
     assert _parts_dir(target).exists(), "--keep-parts should retain the directory"
 
 
 def test_merge_no_parts_dir_is_noop(tmp_path):
-    target = tmp_path / "radar.shapes.json"
+    target = tmp_path / "acme.shapes.json"
     target.write_text('{"existing": {}}')
 
-    rc = _cmd_merge(_merge_ns("radar", target))
+    rc = _cmd_merge(_merge_ns("acme", target))
 
     assert rc == 0
     # Target unchanged.
@@ -258,11 +258,11 @@ def test_merge_no_parts_dir_is_noop(tmp_path):
 
 
 def test_merge_empty_parts_dir_is_noop(tmp_path):
-    target = tmp_path / "radar.shapes.json"
+    target = tmp_path / "acme.shapes.json"
     target.write_text('{"existing": {}}')
     _parts_dir(target).mkdir()
 
-    rc = _cmd_merge(_merge_ns("radar", target))
+    rc = _cmd_merge(_merge_ns("acme", target))
 
     assert rc == 0
     assert json.loads(target.read_text()) == {"existing": {}}
@@ -270,10 +270,10 @@ def test_merge_empty_parts_dir_is_noop(tmp_path):
 
 def test_merge_no_base_file(tmp_path):
     """Merge creates target from parts alone when no base exists."""
-    target = tmp_path / "radar.shapes.json"
+    target = tmp_path / "acme.shapes.json"
     _seed_parts(target, {"t1": {"source": "live"}, "t2": {"source": "live"}})
 
-    rc = _cmd_merge(_merge_ns("radar", target))
+    rc = _cmd_merge(_merge_ns("acme", target))
 
     assert rc == 0
     result = json.loads(target.read_text())

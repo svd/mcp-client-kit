@@ -228,10 +228,10 @@ directly. Coexists with the aggregator entry.
 REQUIRED before first publish — not scope for the doc/versioning work, called out so
 they don't get skipped:
 
-- [ ] **Genericize internal references.** README, docs, and eval scripts still cite a
-  real corporate server ("EPAM radar") as the validation target, and
-  `servers.example.json` uses internal naming. Replace all org-specific examples with
-  `example.com` / a public demo MCP server. A real editing pass, not a one-liner.
+- [x] **Genericize internal references.** All org-specific server names, endpoints,
+  and internal doc references replaced with neutral `example.com` examples throughout
+  code, tests, SKILL.md, and public docs. Three internal-only eval docs excluded via
+  `.gitattributes export-ignore`; remove them from the repo before first public push.
 - [ ] **Add `LICENSE`** (MIT or Apache-2.0 — pick one).
 - [ ] **Fill `pyproject.toml` metadata:** `authors`, `license`, `readme = "README.md"`,
   `classifiers`, `[project.urls]` (Homepage, Source, Issues).
@@ -254,4 +254,4 @@ they don't get skipped:
 | Skill→engine link | `uvx "mcp-client-kit==<engine>"`, exact pin; CI asserts pin == pyproject |
 | Discovery | `svd-agent-skills` marketplace external-source entry; code stays here |
 | Publish auth | uv Trusted Publishing (OIDC) — no stored tokens |
-| First gating task | genericize internal EPAM references |
+| First gating task | ~~genericize internal references~~ ✅ done |

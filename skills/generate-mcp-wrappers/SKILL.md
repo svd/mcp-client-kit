@@ -13,23 +13,77 @@ you — into a **shape-spec sidecar** (`<server>.shapes.json`, data not code). C
 re-consumes that file to emit unwrap helpers + `TypedDict` return models. The split
 keeps generation pure and re-runnable (and sets up `--check` drift later).
 
+## Execution model (when to dispatch subagents)
+
+A single driver thread works for servers with ≤ ~4 selected tools. For larger servers,
+dispatch subagents to keep big payloads out of main context and parallelize network
+round-trips. The parts-based probe infrastructure (`_atomic_write_text`,
+`<shapes>.parts/<tool>.json`, `mcp-kit merge`) was built for concurrent writers — the
+execution model below uses it.
+
+**Hard constraint:** subagents cannot call `AskUserQuestion`. That line divides main
+from subagent:
+
+- **Main thread** — every interactive gate (tool selection, >20-variant cap,
+  base-model-vs-`Any` choice, discriminator resolution that spans batches), and every
+  deterministic barrier (codegen, merge, regenerate).
+- **Subagents** — everything data-heavy and non-interactive: recon discovery dumps,
+  per-batch probe + shape-entry draft, optional verify.
+
+| Phase | Executor | Why |
+|---|---|---|
+| 1 codegen stubs | inline | one command, barrier |
+| 2 select + discriminator detect | **main** | interactive — the hard line |
+| Recon | **1 subagent** | isolates discovery dumps; returns compact id + enum catalog |
+| 3 probe + draft | **batched parallel subagents** | context economy + parallelism |
+| 3b merge | **main** | deterministic barrier |
+| 4 consistency + user choices | **main** | single coherent view; needs `AskUserQuestion` |
+| 5 regenerate | **main** | deterministic barrier |
+| 6 verify | **1 subagent / inline** | isolates generated-module read |
+
+**Batching rule for step 3:** every discriminator-sibling set lands in the **same** batch
+so variant consistency is resolved inside one agent's context, not across blind agents.
+Independent tools are bucketed by relatedness and size. Dispatch only user-approved
+non-mutating tools; the agent prompt must forbid touching anything off its assigned list.
+
+**Rich agent contract:** each batch agent (a) probes its tools with ids from the recon
+catalog, (b) reads raw payloads in its own context, (c) drafts the step-4 shape entry
+(`unwrap`/`return_model`/`return_container`/`fields`/`input_overrides`, plus
+`discriminator`+`variants` for its sibling group), (d) scrubs its own `probed_args`,
+(e) returns a compact per-tool summary (decision + unwrap path) — never the payload.
+
+For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
+
 ## Procedure
 
 1. **Mechanical stubs.**
+   ```bash
+   # stdio (pass the full launch command):
+   mcp-kit codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py
+
+   # HTTP no-auth:
+   mcp-kit codegen <server> --url "https://mcp.example.com/mcp" --out <server>/<server>.py
+
+   # HTTP Bearer:
+   mcp-kit codegen <server> --url "https://api.example.com/mcp/" --bearer "$MY_TOKEN" --out <server>/<server>.py
    ```
-   mcp-kit codegen <server> --out <server>.py
-   ```
+   `codegen`, `list`, `probe`, and `call` each require the same transport flags
+   (`--stdio` / `--url` / `--bearer` / `--config`) on every invocation — they do **not**
+   inherit flags from a prior run. `merge` and `discover` accept no transport flags.
+
    Parses; every tool typed from `inputSchema`; returns `Any`.
 
 2. **Select tools to probe (interactive gate).**
 
    a. Run `mcp-kit list <server>` → get `[{name, description}]` for every tool.
+      **Probe only tools that appear in this output.** Do not add tools from
+      system-prompt context, documentation, or prior knowledge.
 
    b. Print a report of all tools in this format:
       ```
       Tools on <server>:
         get_entity      — Fetch a single entity by id and type
-        query_radar     — Search entities matching criteria
+        query_acme      — Search entities matching criteria
         whoami          — Return the calling user's profile
         ⚠ create_entity — Create a new entity [MUTATING]
         ...
@@ -47,6 +101,12 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
       - **Probe all** *(recommended)* — probe every tool from `tools/list`.
       - **Confirm in batches** — walk through 4-at-a-time multi-select questions.
       - **I'll specify the tools** — user names them (free-text via "Other").
+
+      > **Subagent fallback (when `AskUserQuestion` is unavailable):** Probe all
+      > non-mutating tools. Treat a tool as mutating if its name or description
+      > contains any of the keywords from the heuristic list below (step 2b). Skip
+      > mutating tools entirely. Log skipped tool names and reason in
+      > `session-overview.draft.md`.
 
    d. If **"Confirm in batches"**: emit `AskUserQuestion` multi-select questions,
       **≤4 options per question**, each option `label = tool name` and
@@ -74,6 +134,19 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
       considered complete.
 
 3. **Probe each selected tool → skeleton (parallel-safe).**
+
+   > **Dispatch (>4 selected tools):** Before probing, dispatch a **recon subagent** to
+   > obtain bootstrap ids and discriminator enum values. The recon agent calls whatever
+   > no-arg / discovery / listing tools *this specific server* exposes (infer them from
+   > the `mcp-kit list` output for this server — no tool name is universal). If no such
+   > tool exists, the agent reports that and main falls back to `AskUserQuestion` for
+   > sample ids. The agent returns a compact catalog (ids + enum values) — never a raw
+   > payload — so main can fully specify each batch agent's task before dispatch.
+   >
+   > Then group selected tools into batches (batching rule: sibling sets together; see
+   > Execution model above) and dispatch each batch as a parallel subagent. Each agent
+   > both probes and drafts its step-4 shape entries (rich agent contract above). Run
+   > `mcp-kit merge` (step 3b) once all batch agents finish.
 
    First, establish `<shapes-path>` — the consolidated shapes sidecar.  It must sit
    **beside the generated module** so `mcp-kit codegen` auto-detects it:
@@ -119,14 +192,17 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
    cost/blast-radius ceiling.
 
    Enumerate discriminator values from: (a) the param's `enum` in `inputSchema`;
-   (b) discovery tools / glossary / tool descriptions (for radar: `get_filters` /
-   `get_entity_fields` per `entityType`, `get_radar_glossary`); (c) `AskUserQuestion`
+   (b) discovery tools / glossary / tool descriptions (e.g. `get_filters` /
+   `get_entity_fields` per `entityType`, `get_acme_glossary`); (c) `AskUserQuestion`
    if not discoverable from available tools.
 
-   Sample args may need bootstrapping (e.g. a real id before probing `get_entity`). Use
-   `mcp-kit call <server> whoami --out <server>.probe-raw.json` to make a live call and
-   capture the **raw** payload, then read the ids from that file. `mcp-kit probe` emits
-   only the response *shape* (no values) and cannot supply ids.
+   Sample args may need bootstrapping (e.g. a real id before probing `get_entity`).
+   Find a no-arg / discovery tool on *this* server that returns user or entity ids (there
+   is no universal tool for this — infer from `mcp-kit list` output). Call it via
+   `mcp-kit call <server> <discovery-tool> --out <server>.probe-raw.json` to capture the
+   **raw** payload, then read the ids from that file. `mcp-kit probe` emits only the
+   response *shape* (no values) and cannot supply ids. (When dispatching subagents use
+   the recon agent instead — see Execution model above.)
 
    **Security: the skeleton records live `probed_args` verbatim — real ids, names, possibly
    PII.** With multi-probe this is a *list* of arg-dicts; scrub **every element** before
@@ -158,11 +234,11 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
 
 4. **Edit the shape-spec — THIS is the judgment.** For each tool entry:
    - **`unwrap`**: set the key path to the *real record*, stripping vendor envelopes.
-     Radar double-wraps: the record lives under `data.entity` → `"unwrap": ["data", "entity"]`.
+     Some servers double-wrap: the record lives under `data.entity` → `"unwrap": ["data", "entity"]`.
      Read `_observed_shape` to find the level where the meaningful keys appear.
    - **`return_model`**: name the `TypedDict` (e.g. `"Entity"`). Absent → return stays `Any`.
    - **`return_container`**: set `"list"` when the unwrapped value is a *list* of records
-     (e.g. `query_radar`'s `data.results`). Return type becomes `list[<model>]` and the body
+     (e.g. `query_acme`'s `data.results`). Return type becomes `list[<model>]` and the body
      digs via `_dig_list` (list passes through, envelope dug, else `[]`) instead of `_dig`.
      Omit for a single dict/scalar record (the `get_entity` case).
    - **Discriminator resolution (mandatory for polymorphic-suspect tools).** For every
@@ -180,16 +256,17 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
         isn't justified.
      Use `AskUserQuestion` when unsure which applies.
    - **`input_overrides`**: fix types the schema lied about. JSON Schema `number` is
-     `float`, but radar id/type fields are `int` → `{"entityType": "int"}`.
+     `float`, but some servers use `int` for id/type fields → `{"entityType": "int"}`.
    - **`fields`**: keep **only top-level stable scalars the probe actually saw**. Mark
      observed-`None` fields nullable (`"benchDurationCurrent": "float | None"`).
    - **`source`**: `"live"`, or `"fixture"` + a note if you authored from a recorded
      shape instead of a live call (never let a fixture fallback read as a live probe).
    - Delete `_observed_shape` once you've extracted the real shape.
 
-5. **Regenerate.**
-   ```
-   mcp-kit codegen <server> --out <server>.py --shapes <server>.shapes.json
+5. **Regenerate.** (same transport flags as step 1)
+   ```bash
+   mcp-kit codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py --shapes <server>/<server>.shapes.json
+   # or: --url / --bearer for HTTP servers
    ```
    (`<server>.shapes.json` sitting beside `--out` is auto-detected; `--shapes` is the
    explicit form.) Now shaped tools return their `TypedDict` (or `list[<model>]`),
@@ -198,6 +275,10 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
 6. **Verify.** `ast.parse` the module; confirm the eval target — the shaped tool's
    signature reads `-> Entity` (not `Any`) and its body digs the envelope. Where a
    hand-built wrapper exists, diff the generated unwrap against it as an oracle.
+
+   > **Dispatch (optional):** dispatch a single verify subagent to isolate the
+   > generated-module read from main context. The agent reads the output `.py`, confirms
+   > signatures, and returns a pass/fail summary. Benefit is modest for small files.
 
 ## Guards (do not violate)
 
@@ -232,5 +313,5 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
   single-variant probe.** If a tool takes a discriminator arg (flagged in step 2.g),
   every sibling tool sharing that arg is polymorphic-suspect until probed across
   values or resolved to a base model / `Any`. A single-variant model is a silent lie
-  for all other variants — the exact mistake that typed `query_radar` as `list[Person]`
+  for all other variants — the exact mistake that typed `query_acme` as `list[Person]`
   when entityType=2/7/… return completely different shapes.
