@@ -32,6 +32,7 @@ github.bak/
 g.bak/
 
 # Archived eval runs
+eval/
 eval.*/
 
 # Project config
