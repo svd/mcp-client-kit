@@ -16,7 +16,7 @@ You are evaluating the `generate-mcp-wrappers` skill for the **{{SERVER_NAME}}**
 - Auth: `{{AUTH}}`
 - Auth notes: {{AUTH_NOTES}}
 
-Your goal is to run the skill end-to-end and produce these committed artifacts in `eval/{{SERVER_NAME}}/`:
+Your goal is to run the skill end-to-end and produce these artifacts in `eval/{{SERVER_NAME}}/`:
 
 1. `{{SERVER_NAME}}.py` — the generated Python wrapper module
 2. `{{SERVER_NAME}}.shapes.json` — shape-spec sidecar (PII-scrubbed)
@@ -139,7 +139,7 @@ When done, output this exact JSON block (the Workflow parser looks for it):
 }
 ```
 
-Commit all five artifacts: `session-overview.md`, `<server>.py`, `<server>.shapes.json`, `run.py`, `result.json`.
+Do NOT commit or `git add` anything. Leave all five artifacts (`session-overview.md`, `<server>.py`, `<server>.shapes.json`, `run.py`, `result.json`) in the working tree for the user to review and commit manually.
 
 `verdict_hint` values:
 - `"pass"` — all probed tools produced honest shapes, generated module parses cleanly
