@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime
 import json
 import os
 import shutil
@@ -531,6 +532,67 @@ def _cmd_migrate_creds(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_list_creds(ns: argparse.Namespace) -> int:
+    """Print stored credentials as a human table (default) or JSON (--json)."""
+    rows = _bridge.list_creds(backend=ns.cred_backend, expired_only=ns.expired)
+
+    if ns.json:
+        sys.stdout.write(json.dumps(rows, indent=2) + "\n")
+        return 0
+
+    if not rows:
+        msg = "no expired credentials stored" if ns.expired else "no credentials stored"
+        print(f"[list-creds] {msg}", file=sys.stderr)
+        return 0
+
+    # Human table: NAME / STATUS / EXPIRES
+    col_name = max(len(r["name"]) for r in rows)
+    col_name = max(col_name, 4)  # min header width "NAME"
+    col_status = 9  # longest status value: "no-expiry"
+    header = (
+        "NAME".ljust(col_name) + "  " +
+        "STATUS".ljust(col_status) + "  " +
+        "EXPIRES"
+    )
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        if r["expired"]:
+            status = "expired"
+        elif r["expires_at"] is None:
+            status = "no-expiry"
+        else:
+            status = "valid"
+        if r["expires_at"] is not None:
+            expires = datetime.fromtimestamp(r["expires_at"]).isoformat(timespec="seconds")
+        else:
+            expires = "-"
+        print(r["name"].ljust(col_name) + "  " + status.ljust(col_status) + "  " + expires)
+    return 0
+
+
+def _cmd_delete_creds(ns: argparse.Namespace) -> int:
+    """Delete a single stored credential by server name."""
+    if not ns.yes:
+        print(
+            f"[delete-creds] delete stored credential for {ns.server!r}? [y/N] ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        answer = input().strip().lower()
+        if answer not in ("y", "yes"):
+            print("[delete-creds] aborted", file=sys.stderr)
+            return 0
+
+    existed = _bridge.delete_cred(ns.server, backend=ns.cred_backend)
+    if existed:
+        print(f"[delete-creds] deleted {ns.server!r}", file=sys.stderr)
+    else:
+        print(f"[delete-creds] no stored credential for {ns.server!r}", file=sys.stderr)
+    return 0
+
+
 def _add_conn_args(p: argparse.ArgumentParser) -> None:
     """Inline server-connection args shared by all commands (override config)."""
     p.add_argument("--url", help="server URL inline; enables OAuth without a config entry")
@@ -645,6 +707,33 @@ def main(argv: list[str] | None = None) -> int:
              "commands default to the target backend (default: leave config untouched)",
     )
     mc.set_defaults(func=_cmd_migrate_creds)
+
+    lc = sub.add_parser("list-creds", help="list stored credentials (flags expired)")
+    lc.add_argument(
+        "--expired", action="store_true",
+        help="show only expired credentials (omit valid and non-expiring entries)",
+    )
+    lc.add_argument(
+        "--json", action="store_true",
+        help="emit JSON array instead of a human table",
+    )
+    lc.add_argument(
+        "--cred-backend", dest="cred_backend", choices=["file", "keyring", "auto"],
+        help="credential storage backend (default: resolved from env/config, else file)",
+    )
+    lc.set_defaults(func=_cmd_list_creds)
+
+    dl = sub.add_parser("delete-creds", help="delete the stored credential for one server")
+    dl.add_argument("server", help="server name whose stored credential to delete")
+    dl.add_argument(
+        "--yes", "-y", action="store_true",
+        help="skip the confirmation prompt",
+    )
+    dl.add_argument(
+        "--cred-backend", dest="cred_backend", choices=["file", "keyring", "auto"],
+        help="credential storage backend (default: resolved from env/config, else file)",
+    )
+    dl.set_defaults(func=_cmd_delete_creds)
 
     dc = sub.add_parser("discover", help="list MCP servers from installed agent hosts")
     dc.add_argument("--host", action="append", dest="host", metavar="ID",

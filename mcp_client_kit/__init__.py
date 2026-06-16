@@ -3,7 +3,9 @@
 from mcp_client_kit._bridge import (
     McpBridgeCaller,
     ReauthenticationRequired,
+    delete_cred,
     ensure_login,
+    list_creds,
     login,
     migrate_creds,
 )
@@ -13,7 +15,9 @@ __all__ = [
     "McpBridgeCaller",
     "McpCaller",
     "ReauthenticationRequired",
+    "delete_cred",
     "ensure_login",
+    "list_creds",
     "login",
     "migrate_creds",
 ]

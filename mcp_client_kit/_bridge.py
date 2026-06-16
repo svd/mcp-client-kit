@@ -550,6 +550,88 @@ def migrate_creds(
     }
 
 
+def list_creds(
+    *,
+    backend: str | None = None,
+    credentials_path: Path = DEFAULT_CREDS_PATH,
+    expired_only: bool = False,
+) -> list[dict]:
+    """List stored credentials.
+
+    Returns a list of dicts — one per server, sorted by name — with the keys:
+
+    - ``name``:              server name
+    - ``expires_at``:        absolute Unix epoch (int) or ``None`` if no expiry
+    - ``expired``:           ``True`` when ``time.time() >= expires_at - _MARGIN``
+                             (same rule as :py:meth:`FileTokenStorage.get_tokens`)
+    - ``has_refresh_token``: ``True`` when a refresh_token is stored
+
+    Parameters
+    ----------
+    backend:
+        Credential backend to read.  Resolved via :func:`resolve_cred_backend`
+        when ``None`` (env → config → ``"file"``).
+    credentials_path:
+        Path to the file backend (default ``~/.mcp-client-kit/credentials.json``).
+    expired_only:
+        When ``True``, omit entries that are valid or have no expiry information.
+    """
+    resolved = resolve_cred_backend(backend)
+    resolved = _detect_keyring() if resolved == "auto" else resolved
+    data = _read_backend(resolved, credentials_path)
+    now = time.time()
+    out = []
+    for name, entry in sorted(data.items()):
+        tok = (entry or {}).get("tokens") or {}
+        exp = tok.get("expires_at")
+        expired = exp is not None and now >= exp - _MARGIN
+        if expired_only and not expired:
+            continue
+        out.append({
+            "name": name,
+            "expires_at": exp,
+            "expired": expired,
+            "has_refresh_token": bool(tok.get("refresh_token")),
+        })
+    return out
+
+
+def delete_cred(
+    name: str,
+    *,
+    backend: str | None = None,
+    credentials_path: Path = DEFAULT_CREDS_PATH,
+) -> bool:
+    """Delete the stored credential for *name*.
+
+    Returns ``True`` if the entry existed (and was removed), ``False`` if it
+    was not found. When the removed entry was the last one, the whole backend
+    store is cleared (file unlinked / keyring key cleared) to avoid leaving an
+    empty JSON object.
+
+    Parameters
+    ----------
+    name:
+        Server name whose credential to delete.
+    backend:
+        Credential backend to write.  Resolved via :func:`resolve_cred_backend`
+        when ``None``.
+    credentials_path:
+        Path to the file backend (default ``~/.mcp-client-kit/credentials.json``).
+    """
+    resolved = resolve_cred_backend(backend)
+    resolved = _detect_keyring() if resolved == "auto" else resolved
+    data = _read_backend(resolved, credentials_path)
+    if name not in data:
+        return False
+    data.pop(name)
+    if data:
+        _write_backend(resolved, credentials_path, data)
+    else:
+        _clear_backend(resolved, credentials_path)
+    return True
+
+
 async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> None:
     """Refresh access token if near/past expiry via plain httpx (no MCP SDK).
 

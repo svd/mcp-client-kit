@@ -631,6 +631,165 @@ def test_migrate_keyring_read_failure_propagates(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# list_creds / delete_cred
+# ---------------------------------------------------------------------------
+
+def _creds_data_with_expiry(past_name: str, future_name: str, noexp_name: str) -> dict:
+    """Build a credentials dict with varied expiry states."""
+    import time
+    now = int(time.time())
+    return {
+        past_name:   {"tokens": {"access_token": "tok_past",   "token_type": "bearer", "expires_at": now - 3600}},
+        future_name: {"tokens": {"access_token": "tok_future", "token_type": "bearer", "expires_at": now + 3600}},
+        noexp_name:  {"tokens": {"access_token": "tok_noexp",  "token_type": "bearer"}},
+    }
+
+
+def test_list_creds_all_file(tmp_path):
+    """list_creds returns all three entries with correct expired flag."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data_with_expiry("past", "future", "noexp")))
+    os.chmod(creds, 0o600)
+
+    rows = _bridge.list_creds(credentials_path=creds)
+    by_name = {r["name"]: r for r in rows}
+
+    assert set(by_name) == {"past", "future", "noexp"}
+    assert by_name["past"]["expired"] is True
+    assert by_name["future"]["expired"] is False
+    assert by_name["noexp"]["expired"] is False
+    assert by_name["noexp"]["expires_at"] is None
+
+
+def test_list_creds_expired_only_file(tmp_path):
+    """expired_only=True returns only the expired entry."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data_with_expiry("past", "future", "noexp")))
+    os.chmod(creds, 0o600)
+
+    rows = _bridge.list_creds(credentials_path=creds, expired_only=True)
+    assert [r["name"] for r in rows] == ["past"]
+    assert rows[0]["expired"] is True
+
+
+def test_list_creds_empty_backend(tmp_path):
+    """list_creds on an empty backend returns []."""
+    creds = tmp_path / "credentials.json"
+    rows = _bridge.list_creds(credentials_path=creds)
+    assert rows == []
+
+
+def test_list_creds_sorted(tmp_path):
+    """list_creds returns entries sorted by server name."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("zeta", "alpha", "mu")))
+    os.chmod(creds, 0o600)
+
+    rows = _bridge.list_creds(credentials_path=creds)
+    assert [r["name"] for r in rows] == ["alpha", "mu", "zeta"]
+
+
+def test_list_creds_has_refresh_token(tmp_path):
+    """has_refresh_token is True only when refresh_token key is present."""
+    import time
+    creds = tmp_path / "credentials.json"
+    data = {
+        "with_rt": {"tokens": {"access_token": "t", "token_type": "bearer",
+                                "refresh_token": "r", "expires_at": int(time.time()) + 7200}},
+        "without_rt": {"tokens": {"access_token": "t2", "token_type": "bearer"}},
+    }
+    creds.write_text(json.dumps(data))
+    os.chmod(creds, 0o600)
+
+    rows = _bridge.list_creds(credentials_path=creds)
+    by_name = {r["name"]: r for r in rows}
+    assert by_name["with_rt"]["has_refresh_token"] is True
+    assert by_name["without_rt"]["has_refresh_token"] is False
+
+
+def test_list_creds_keyring(tmp_path):
+    """list_creds works with the keyring backend."""
+    import time
+    fake_kr = _FakeKeyringMig()
+    now = int(time.time())
+    kr_data = {
+        "svcsA": {"tokens": {"access_token": "t", "token_type": "bearer", "expires_at": now - 100}},
+    }
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        _bridge._keyring_write_raw(kr_data)
+        rows = _bridge.list_creds(backend="keyring", credentials_path=tmp_path / "c.json")
+
+    assert len(rows) == 1
+    assert rows[0]["name"] == "svcsA"
+    assert rows[0]["expired"] is True
+
+
+def test_delete_cred_existing_file(tmp_path):
+    """delete_cred removes an existing entry and returns True."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("acme", "beta")))
+    os.chmod(creds, 0o600)
+
+    existed = _bridge.delete_cred("acme", credentials_path=creds)
+
+    assert existed is True
+    data = json.loads(creds.read_text())
+    assert "acme" not in data
+    assert "beta" in data
+
+
+def test_delete_cred_absent_file(tmp_path):
+    """delete_cred returns False when the entry does not exist."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("acme")))
+    os.chmod(creds, 0o600)
+
+    existed = _bridge.delete_cred("ghost", credentials_path=creds)
+
+    assert existed is False
+    assert json.loads(creds.read_text()) == _creds_data("acme")
+
+
+def test_delete_cred_last_entry_clears_file(tmp_path):
+    """delete_cred of the last entry unlinks the credentials file."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps(_creds_data("only")))
+    os.chmod(creds, 0o600)
+
+    existed = _bridge.delete_cred("only", credentials_path=creds)
+
+    assert existed is True
+    assert not creds.exists(), "file must be removed when no entries remain"
+
+
+def test_delete_cred_keyring(tmp_path):
+    """delete_cred works against the keyring backend."""
+    fake_kr = _FakeKeyringMig()
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        _bridge._keyring_write_raw(_creds_data("svcX", "svcY"))
+        existed = _bridge.delete_cred("svcX", backend="keyring",
+                                      credentials_path=tmp_path / "c.json")
+        remaining = _bridge._keyring_read_raw()
+
+    assert existed is True
+    assert "svcX" not in remaining
+    assert "svcY" in remaining
+
+
+def test_delete_cred_last_keyring_clears(tmp_path):
+    """delete_cred of last keyring entry calls _keyring_clear_raw (no residual key)."""
+    fake_kr = _FakeKeyringMig()
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        _bridge._keyring_write_raw(_creds_data("solo"))
+        existed = _bridge.delete_cred("solo", backend="keyring",
+                                      credentials_path=tmp_path / "c.json")
+        remaining = _bridge._keyring_read_raw()
+
+    assert existed is True
+    assert remaining == {}
+
+
+# ---------------------------------------------------------------------------
 # parse() — JSON, repr, and plain-text payloads  (#4)
 # ---------------------------------------------------------------------------
 
