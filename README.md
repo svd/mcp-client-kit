@@ -41,10 +41,25 @@ the full 15-server example set with comments explaining each field.
 
 ## Running an eval (single server)
 
-The framework is driven by a Workflow script (`workflows/run-eval.workflow.js`) that you launch from **Claude Code** (not a standalone script).
+The framework is driven by a named Claude Code workflow (`.claude/workflows/run-eval.js`).
+Use the slash command — do **not** pass free text describing what to run, as that may
+trigger the wrong skill.
 
-Open the workflow in Claude Code and follow the prompts. The workflow runs per-server stages
-(generate, analyze, verify), then synthesizes narratives and generates the aggregate report.
+```
+/run-eval time               # single server
+/run-eval time memory        # space-separated list
+/run-eval time,memory        # comma-separated list
+/run-eval all                # every server in servers.toml
+```
+
+To triage outputs after a multi-server run:
+
+```
+/triaging-eval-outputs
+```
+
+The workflow runs per-server stages (generate, analyze, verify), then synthesizes
+narratives and generates the aggregate report.
 
 ## CLI reference
 
@@ -66,7 +81,7 @@ for the verification results.
 ```
 servers/servers.toml
         │
-workflows/run-eval.workflow.js  (one pipeline per server)
+/run-eval <servers>   (.claude/workflows/run-eval.js — one pipeline per server)
         │
   ┌─────┴──────────────────────────────────────────────┐
   │ 1 Generate   agent runs generate-mcp-wrappers       │
@@ -104,8 +119,11 @@ servers/
   servers.toml          # live manifest (user-maintained)
   servers.example.toml  # all 15 servers documented, commented
 tests/
-workflows/
-  run-eval.workflow.js
+.claude/
+  workflows/
+    run-eval.js             # /run-eval slash command (launches eval pipeline)
+  skills/
+    triaging-eval-outputs/  # /triaging-eval-outputs slash command (invoke-only)
 ```
 
 ## Git-ignored files

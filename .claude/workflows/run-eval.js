@@ -18,10 +18,14 @@ if (args === undefined || args === null) {
   throw new Error('args is required: pass a server name array (e.g. ["github"]) or "all"')
 }
 
-// args may arrive as JSON string if the caller serialized it
+// args may arrive as JSON string if the caller serialized it,
+// or as a bare server name / space-/comma-separated list from a slash command.
 let resolvedArgs = args
 if (typeof resolvedArgs === 'string' && resolvedArgs !== 'all') {
   try { resolvedArgs = JSON.parse(resolvedArgs) } catch(e) {}
+  if (typeof resolvedArgs === 'string') {
+    resolvedArgs = resolvedArgs.trim().split(/[\s,]+/).filter(Boolean)
+  }
 }
 
 log('Generating .mcp.eval.json from servers.toml…')

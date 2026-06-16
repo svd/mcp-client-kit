@@ -69,7 +69,7 @@ Generated from: eval of <N> MCP servers, <DATE>.
 Scope: confirmed code bugs + recurring friction (2+ servers). Excludes one-off LLM lapses.
 
 Files referenced: `eval_harness/runner_gen.py`, `eval_harness/cli.py`,
-`agents/server-eval-agent.md`, `workflows/run-eval.workflow.js`, `servers/servers.toml`.
+`agents/server-eval-agent.md`, `.claude/workflows/run-eval.js`, `servers/servers.toml`.
 
 ---
 

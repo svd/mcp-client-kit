@@ -1,6 +1,7 @@
 ---
 name: triaging-eval-outputs
 description: Use when reviewing generated outputs of the generate-mcp-wrappers eval (per-server session-overview.md / .shapes.json / .py artifacts) to produce owner-split fix reports for mcp-client-kit and eval-kit.
+disable-model-invocation: true
 ---
 
 # Triaging eval outputs
@@ -37,7 +38,7 @@ Read framework source to confirm code bugs with exact `file:line`. Key files:
 | runner_gen call-expression | `eval_harness/runner_gen.py` |
 | CLI arg surface | `eval_harness/cli.py` |
 | Agent prompt template | `agents/server-eval-agent.md` |
-| Workflow pipeline | `workflows/run-eval.workflow.js` |
+| Workflow pipeline | `.claude/workflows/run-eval.js` |
 | Server manifest | `servers/servers.toml` |
 
 **Step 4 — Cluster + split**
@@ -65,7 +66,7 @@ Use skeletons in `report-templates.md` (this directory).
 | `mcp-kit codegen / list / probe / merge` CLI | **mcp-client-kit** |
 | `generate-mcp-wrappers` SKILL.md guidance | **mcp-client-kit** |
 | `eval-kit runner / verify / report` | **eval-kit** |
-| `workflows/run-eval.workflow.js` | **eval-kit** |
+| `.claude/workflows/run-eval.js` | **eval-kit** |
 | `agents/server-eval-agent.md` | **eval-kit** |
 | `servers/servers.toml` | **eval-kit** |
 | session-analyzer skill | **agent-skills** (flag separately) |
