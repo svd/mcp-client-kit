@@ -7,3 +7,4 @@ __pycache__/
 .mcp.json
 eval_preflight.py
 eval/
+.codegraph/
