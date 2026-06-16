@@ -35,7 +35,7 @@ Read framework source to confirm code bugs with exact `file:line`. Key files:
 
 | Area | File |
 |---|---|
-| runner_gen call-expression | `eval_harness/runner_gen.py` |
+| Deterministic verifier (5 checks) | `eval_harness/verify.py` |
 | CLI arg surface | `eval_harness/cli.py` |
 | Agent prompt template | `agents/server-eval-agent.md` |
 | Workflow pipeline | `.claude/workflows/run-eval.js` |
@@ -65,7 +65,8 @@ Use skeletons in `report-templates.md` (this directory).
 |---|---|
 | `mcp-kit codegen / list / probe / merge` CLI | **mcp-client-kit** |
 | `generate-mcp-wrappers` SKILL.md guidance | **mcp-client-kit** |
-| `eval-kit runner / verify / report` | **eval-kit** |
+| `generate-mcp-runner` SKILL.md guidance (run.py quality) | **mcp-client-kit** |
+| `eval-kit verify / report / gen-config` | **eval-kit** |
 | `.claude/workflows/run-eval.js` | **eval-kit** |
 | `agents/server-eval-agent.md` | **eval-kit** |
 | `servers/servers.toml` | **eval-kit** |

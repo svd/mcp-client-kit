@@ -162,15 +162,24 @@ When done, return "DONE: eval/${server.name}/session-analyzer.md written"`
     log(`[${server.name}] Starting verify/runner stage…`)
 
     const verifyRunner = await agent(
-      `Run these commands in sequence in the project root (your current working directory):
+      `Do these two steps in the project root (your current working directory):
 
-1. uv run eval-kit verify ${server.name}
-2. uv run eval-kit runner ${server.name}
+1. Run: uv run eval-kit verify ${server.name}
+   Capture its stdout and exit code.
 
-Report what each command printed to stdout and whether it succeeded (exit code 0).
+2. Generate the sample runner by invoking the **mcp-client-kit:generate-mcp-runner** skill
+   via the Skill tool. Tell the skill:
+   - Artifacts are in eval/${server.name}/ (${server.name}.py, ${server.name}.shapes.json,
+     ${server.name}.verify.json).
+   - Write the runner to eval/${server.name}/run.py.
+   - Transport ${server.transport}, auth ${server.auth}, launch/URL: ${server.launch}.
+   - Read-only tools only; do NOT auto-run the generated script.
+   Let the skill select tools, pick real args from verify.json, emit one call per probed
+   discriminator variant, and validate the output statically (ast/py_compile).
+
 Return a JSON object with these fields:
 - verified: true if verify exited 0, false otherwise
-- runner_generated: true if runner exited 0, false otherwise
+- runner_generated: true if eval/${server.name}/run.py was written and statically valid, false otherwise
 - verify_output: the stdout from the verify command (first 500 chars)`,
       {
         label: `verify:${server.name}`,

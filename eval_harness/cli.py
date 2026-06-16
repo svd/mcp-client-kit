@@ -1,8 +1,7 @@
-"""eval-kit CLI — ties together verify, runner_gen, and report."""
+"""eval-kit CLI — ties together verify, report, and gen-config."""
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -75,44 +74,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 1
 
 
-def cmd_runner(args: argparse.Namespace) -> int:
-    """eval-kit runner <server>"""
-    try:
-        from eval_harness.manifest import get_server
-        from eval_harness.runner_gen import generate_runner
-    except ImportError as exc:
-        print(f"ImportError: {exc}\nInstall the package first.", file=sys.stderr)
-        return 1
-
-    base_dir = Path(args.base_dir)
-    manifest_path = Path(args.manifest)
-
-    try:
-        spec = get_server(args.server, path=manifest_path)
-    except KeyError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-
-    server_dir = base_dir / spec.name
-    shapes_path = server_dir / f"{spec.name}.shapes.json"
-
-    shapes: dict = {}
-    if shapes_path.exists():
-        try:
-            shapes = json.loads(shapes_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"Warning: could not load {shapes_path}: {exc}", file=sys.stderr)
-    else:
-        print(
-            f"Warning: {shapes_path} not found — generating minimal runner.",
-            file=sys.stderr,
-        )
-
-    generate_runner(spec, server_dir, shapes)
-    print(f"Runner written: eval/{spec.name}/run.py")
-    return 0
-
-
 def cmd_gen_config(args: argparse.Namespace) -> int:
     """eval-kit gen-config"""
     try:
@@ -173,18 +134,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to servers.toml manifest (default: servers/servers.toml).",
     )
 
-    # --- runner ---
-    p_runner = sub.add_parser("runner", help="Generate a sample runner script for a server.")
-    p_runner.add_argument("server", help="Server name (must appear in manifest).")
-    p_runner.add_argument(
-        "--base-dir", default="eval", metavar="DIR",
-        help="Directory where <server>/ folders live (default: eval).",
-    )
-    p_runner.add_argument(
-        "--manifest", default="servers/servers.toml", metavar="PATH",
-        help="Path to servers.toml manifest (default: servers/servers.toml).",
-    )
-
     # --- gen-config ---
     p_gen = sub.add_parser(
         "gen-config",
@@ -228,7 +177,6 @@ def main(argv: list[str] | None = None) -> None:
 
     dispatch = {
         "verify": cmd_verify,
-        "runner": cmd_runner,
         "report": cmd_report,
         "gen-config": cmd_gen_config,
     }
