@@ -216,6 +216,24 @@ _stdio_cache: dict[str, dict] = {}
 _headers_cache: dict[str, dict[str, str]] = {}
 
 
+def _filter_str_dict(raw: dict, *, require_nonempty_key: bool = False) -> dict[str, str]:
+    """Filter a raw config dict to {str: str} keeping only scalar (non-bool) values.
+
+    Values have ``${VAR}`` references expanded against the host environment.
+    Entries with non-scalar values are dropped silently.  When
+    ``require_nonempty_key`` is True, entries with empty-string keys are also
+    dropped (used for HTTP headers where RFC 9110 forbids empty field names).
+    """
+    result = {}
+    for k, v in raw.items():
+        if isinstance(v, (str, int, float)) and not isinstance(v, bool):
+            sk = str(k)
+            if require_nonempty_key and not sk:
+                continue
+            result[sk] = os.path.expandvars(str(v))
+    return result
+
+
 def _parse_servers(
     raw: dict,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, dict], dict[str, dict[str, str]]]:
@@ -250,26 +268,18 @@ def _parse_servers(
                 names[name] = override
             raw_headers = val.get("headers") or {}
             if isinstance(raw_headers, dict):
-                filtered_h = {
-                    str(k): str(v)
-                    for k, v in raw_headers.items()
-                    if isinstance(v, (str, int, float)) and not isinstance(v, bool)
-                }
-                if filtered_h:
-                    hdrs[name] = {k: os.path.expandvars(v) for k, v in filtered_h.items()}
+                parsed_h = _filter_str_dict(raw_headers, require_nonempty_key=True)
+                if parsed_h:
+                    hdrs[name] = parsed_h
         elif isinstance(val, dict) and val.get("command"):
             raw_args = val.get("args") or []
             args = [str(a) for a in raw_args] if isinstance(raw_args, list) else []
             raw_env = val.get("env") or {}
             env: dict[str, str] | None = None
             if isinstance(raw_env, dict):
-                filtered = {
-                    str(k): str(v)
-                    for k, v in raw_env.items()
-                    if isinstance(v, (str, int, float)) and not isinstance(v, bool)
-                }
-                if filtered:
-                    env = {k: os.path.expandvars(v) for k, v in filtered.items()}
+                parsed_e = _filter_str_dict(raw_env)
+                if parsed_e:
+                    env = parsed_e
             cmds[name] = {"command": str(val["command"]), "args": args, "env": env}
     return urls, names, cmds, hdrs
 
@@ -830,20 +840,6 @@ async def _stdio_session(command: str, args: list[str], env: dict[str, str] | No
 
 
 @asynccontextmanager
-async def _bearer_session(url: str, bearer: str):
-    """HTTP MCP session authenticated with a static Bearer token (e.g. a GitHub PAT).
-
-    Bypasses OAuth entirely — the caller is responsible for providing a valid token.
-    The token is held only in memory and never written to disk.
-    """
-    headers = {"Authorization": f"Bearer {bearer}"}
-    async with _open_http(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as s:
-            await s.initialize()
-            yield s
-
-
-@asynccontextmanager
 async def _static_headers_session(url: str, headers: dict[str, str]):
     """HTTP MCP session with arbitrary static headers (e.g. from a config ``headers`` block).
 
@@ -853,6 +849,17 @@ async def _static_headers_session(url: str, headers: dict[str, str]):
         async with ClientSession(read, write) as s:
             await s.initialize()
             yield s
+
+
+@asynccontextmanager
+async def _bearer_session(url: str, bearer: str):
+    """HTTP MCP session authenticated with a static Bearer token (e.g. a GitHub PAT).
+
+    Bypasses OAuth entirely — the caller is responsible for providing a valid token.
+    The token is held only in memory and never written to disk.
+    """
+    async with _static_headers_session(url, {"Authorization": f"Bearer {bearer}"}) as s:
+        yield s
 
 
 @asynccontextmanager
@@ -907,7 +914,7 @@ async def session(
     elif resolved_url is not None:
         async with _http_session(server, resolved_url, client_name=client_name, cred_backend=cred_backend) as s:
             yield s
-    elif not server.startswith(("http://", "https://")):
+    elif "://" not in server:
         raise ValueError(
             f"server {server!r} not found in config and is not a URL"
         )

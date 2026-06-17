@@ -116,6 +116,9 @@ def _parse_env(ns: argparse.Namespace) -> dict[str, str] | None:
     for item in items:
         if "=" in item:
             k, v = item.split("=", 1)
+            if not k:
+                print(f"[mcp-kit] ⚠  --env {item!r}: empty key name; skipped", file=sys.stderr)
+                continue
             result[k] = v
         elif item in os.environ:
             result[item] = os.environ[item]
@@ -242,7 +245,11 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
     conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
                 cred_backend=ns.cred_backend, env=_parse_env(ns))
-    tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
+    try:
+        tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[codegen] error: {exc}", file=sys.stderr)
+        return 1
     print(f"[codegen] {ns.server}: {len(tools)} tools", file=sys.stderr)
 
     shapes = _load_shapes(ns)
@@ -251,7 +258,11 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
     if ns.probe:
         args = json.loads(ns.probe_args) if ns.probe_args else {}
         print(f"[codegen] probing {ns.probe}({args}) …", file=sys.stderr)
-        shape = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, **conn))
+        try:
+            shape = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, **conn))
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"[codegen] error: {exc}", file=sys.stderr)
+            return 1
         shape_json = json.dumps(shape, indent=2)
         probe_note = (
             f"\nObserved response shape of {ns.probe!r} (keys/types/nesting only):\n"
@@ -290,7 +301,11 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     for i, args in enumerate(args_list):
         print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
         # one session per probe (prototype); pooling is out of scope
-        shape = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
+        try:
+            shape = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"[probe] error: {exc}", file=sys.stderr)
+            return 1
         shapes.append(shape)
 
     skeleton = codegen.probe_skeleton(ns.tool, args_list, shapes)
@@ -511,7 +526,11 @@ def _cmd_list(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
     conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
                 cred_backend=ns.cred_backend, env=_parse_env(ns))
-    tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
+    try:
+        tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[list] error: {exc}", file=sys.stderr)
+        return 1
     out = [{"name": t["name"], "description": t.get("description") or ""} for t in tools]
     sys.stdout.write(json.dumps(out, indent=2) + "\n")
 

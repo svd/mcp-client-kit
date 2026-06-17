@@ -78,6 +78,13 @@ def test_parse_env_mix_present_and_missing(monkeypatch, capsys):
     assert "ABSENT" in capsys.readouterr().err
 
 
+def test_parse_env_empty_key_skipped(capsys):
+    """--env =VALUE has empty key — must be skipped with a warning, not added."""
+    result = _parse_env(_ns(["=VALUE"]))
+    assert result is None
+    assert "empty key" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # session() wiring tests — ensure env reaches _stdio_session
 # ---------------------------------------------------------------------------

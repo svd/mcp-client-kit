@@ -142,3 +142,21 @@ def test_parse_servers_no_headers_absent():
         {"mcpServers": {"plain": {"url": "https://x/mcp"}}}
     )
     assert hdrs == {}
+
+
+def test_parse_servers_empty_header_key_dropped():
+    """Headers entry with empty string key is silently dropped (RFC 9110)."""
+    _, _, _, hdrs = _bridge._parse_servers(
+        {"mcpServers": {"srv": {
+            "url": "https://x/mcp",
+            "headers": {"": "should-drop", "X-Valid": "keep"},
+        }}}
+    )
+    assert hdrs == {"srv": {"X-Valid": "keep"}}
+
+
+def test_filter_str_dict_expands_vars(monkeypatch):
+    """_filter_str_dict expands ${VAR} and filters non-scalar values."""
+    monkeypatch.setenv("MY_VAR", "hello")
+    result = _bridge._filter_str_dict({"k": "${MY_VAR}", "bad": None, "n": 42})
+    assert result == {"k": "hello", "n": "42"}
