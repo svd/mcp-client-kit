@@ -67,23 +67,23 @@ from mcp.shared.auth import (
     OAuthToken,
 )
 
-DEFAULT_CREDS_PATH = Path.home() / ".mcp-client-kit" / "credentials.json"
-DEFAULT_CONFIG_PATH = Path.home() / ".mcp-client-kit" / "config.json"
+DEFAULT_CREDS_PATH = Path.home() / ".mcpgen" / "credentials.json"
+DEFAULT_CONFIG_PATH = Path.home() / ".mcpgen" / "config.json"
 
 # Credential backend — selects where OAuth tokens are stored.
 # Resolution order (first wins):
 #   1. CLI --cred-backend flag (passed through to FileTokenStorage)
-#   2. MCP_KIT_CRED_BACKEND env var
-#   3. ~/.mcp-client-kit/config.json  "cred_backend" key
+#   2. MCPGEN_CRED_BACKEND env var
+#   3. ~/.mcpgen/config.json  "cred_backend" key
 #   4. default: "file"
-_CRED_BACKEND_ENV = "MCP_KIT_CRED_BACKEND"
+_CRED_BACKEND_ENV = "MCPGEN_CRED_BACKEND"
 _VALID_BACKENDS: frozenset[str] = frozenset({"file", "keyring", "auto"})
-_KEYRING_SERVICE: str = "mcp-client-kit"
+_KEYRING_SERVICE: str = "mcpgen"
 _KEYRING_USER: str = "credentials"
 
 
 def _load_client_config(path: Path | None = None) -> dict:
-    """Load ~/.mcp-client-kit/config.json (or override path). Returns {} if absent/invalid."""
+    """Load ~/.mcpgen/config.json (or override path). Returns {} if absent/invalid."""
     target = path or DEFAULT_CONFIG_PATH
     if not target.exists():
         return {}
@@ -121,7 +121,7 @@ def _save_client_config(updates: dict, path: Path | None = None) -> None:
 def resolve_cred_backend(cli_value: str | None = None) -> str:
     """Return the resolved credential backend name.
 
-    Resolution order: CLI arg → MCP_KIT_CRED_BACKEND env → config file → "file".
+    Resolution order: CLI arg → MCPGEN_CRED_BACKEND env → config file → "file".
     Raises ValueError for unknown values at any level.
     """
     if cli_value is not None:
@@ -192,13 +192,13 @@ def _keyring_clear_raw() -> None:
 
 # Named HTTP+OAuth servers are loaded from a user config — never hardcoded, so no
 # org-specific endpoints land in this repo. Search order:
-#   1. $MCP_KIT_SERVERS                       (explicit path)
-#   2. ~/.mcp-client-kit/servers.json         ({"name": "url", ...} or mcpServers)
+#   1. $MCPGEN_SERVERS                        (explicit path)
+#   2. ~/.mcpgen/servers.json                 ({"name": "url", ...} or mcpServers)
 #   3. ./.mcp.json                            (Claude Code format: {"mcpServers": {...}})
 # Any name not found here is treated as a raw URL (no auth). See servers.example.json.
-_SERVERS_CONFIG_ENV = "MCP_KIT_SERVERS"
+_SERVERS_CONFIG_ENV = "MCPGEN_SERVERS"
 _SERVERS_SEARCH = [
-    Path.home() / ".mcp-client-kit" / "servers.json",
+    Path.home() / ".mcpgen" / "servers.json",
     Path.cwd() / ".mcp.json",
 ]
 _servers_cache: dict[str, str] | None = None
@@ -327,7 +327,7 @@ def _resolve_client_name(server_name: str) -> str:
     """OAuth client_name for a server: config override, else default template."""
     if _servers_cache is None:
         servers()
-    return _client_names_cache.get(server_name) or f"mcp-client-kit ({server_name})"
+    return _client_names_cache.get(server_name) or f"mcpgen ({server_name})"
 
 
 # Treat a cached token as expired this many seconds before its real expiry.
@@ -335,7 +335,7 @@ _MARGIN = 120
 
 
 class ReauthenticationRequired(Exception):
-    """Tokens absent or refresh failed. Run: mcp-kit login <server>"""
+    """Tokens absent or refresh failed. Run: mcpgen login <server>"""
 
 
 class FileTokenStorage(TokenStorage):
@@ -375,7 +375,7 @@ class FileTokenStorage(TokenStorage):
         if mode != 0o600:
             os.chmod(self._path, 0o600)
             warnings.warn(
-                f"[mcp-client-kit] {self._path} had permissions {oct(mode)}; "
+                f"[mcpgen] {self._path} had permissions {oct(mode)}; "
                 "fixed to 0600.",
                 stacklevel=3,
             )
@@ -424,7 +424,7 @@ class FileTokenStorage(TokenStorage):
         warnings within the same process lifetime.
         """
         warnings.warn(
-            f"[mcp-client-kit] keyring unavailable ({reason}); "
+            f"[mcpgen] keyring unavailable ({reason}); "
             f"falling back to hardened file at {self._path}.",
             stacklevel=3,
         )
@@ -525,7 +525,7 @@ def migrate_creds(
         Raises ``ValueError`` if a requested name is absent in the source.
     credentials_path:
         Path to the file backend's credentials JSON (default:
-        ``~/.mcp-client-kit/credentials.json``).
+        ``~/.mcpgen/credentials.json``).
     purge:
         When ``True``, remove only the migrated entries from the source backend
         after a verified write. When ``False`` (default), the source is kept.
@@ -534,7 +534,7 @@ def migrate_creds(
         config file so future commands default to the new backend.
     config_path:
         Override path for the client config (default:
-        ``~/.mcp-client-kit/config.json``).
+        ``~/.mcpgen/config.json``).
 
     Returns
     -------
@@ -642,7 +642,7 @@ def list_creds(
         Credential backend to read.  Resolved via :func:`resolve_cred_backend`
         when ``None`` (env → config → ``"file"``).
     credentials_path:
-        Path to the file backend (default ``~/.mcp-client-kit/credentials.json``).
+        Path to the file backend (default ``~/.mcpgen/credentials.json``).
     expired_only:
         When ``True``, omit entries that are valid or have no expiry information.
     """
@@ -687,7 +687,7 @@ def delete_cred(
         Credential backend to write.  Resolved via :func:`resolve_cred_backend`
         when ``None``.
     credentials_path:
-        Path to the file backend (default ``~/.mcp-client-kit/credentials.json``).
+        Path to the file backend (default ``~/.mcpgen/credentials.json``).
     """
     resolved = resolve_cred_backend(backend)
     resolved = _detect_keyring() if resolved == "auto" else resolved
@@ -709,7 +709,7 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     get_tokens() returns a live credential instead of None. Load-bearing: the
     official `mcp` SDK's silent refresh branch is unreachable at cold start, so
     without this the SDK sends the stale token blind → 401 → browser re-auth.
-    Mirrors the mcp_client pre-flight. See the module docstring
+    Mirrors the mcpgen pre-flight. See the module docstring
     for the verified mechanism and version caveat.
     """
     data = storage._load()
@@ -723,20 +723,20 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     refresh_token = tokens_raw.get("refresh_token")
     if not refresh_token:
         raise ReauthenticationRequired(
-            f"No refresh_token for '{server_name}'. Run: mcp-kit login {server_name}"
+            f"No refresh_token for '{server_name}'. Run: mcpgen login {server_name}"
         )
 
     client_id = entry.get("client_info", {}).get("client_id")
     if not client_id:
         raise ReauthenticationRequired(
-            f"No client_id cached for '{server_name}'. Run: mcp-kit login {server_name}"
+            f"No client_id cached for '{server_name}'. Run: mcpgen login {server_name}"
         )
 
     token_endpoint = entry.get("token_endpoint")
     if not token_endpoint:
         raise ReauthenticationRequired(
             f"No token_endpoint cached for '{server_name}' (credentials pre-date this version). "
-            f"Run: mcp-kit login {server_name}"
+            f"Run: mcpgen login {server_name}"
         )
 
     payload: dict[str, str] = {
@@ -754,7 +754,7 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     if resp.status_code != 200:
         raise ReauthenticationRequired(
             f"Token refresh failed ({resp.status_code}): {resp.text[:200]}. "
-            f"Run: mcp-kit login {server_name}"
+            f"Run: mcpgen login {server_name}"
         )
 
     await storage.set_tokens(OAuthToken(**resp.json()))
@@ -791,12 +791,12 @@ async def _http_session(
 
     async def _no_browser(url: str) -> None:
         raise ReauthenticationRequired(
-            f"OAuth re-auth needed for '{server_name}'. Run: mcp-kit login {server_name}"
+            f"OAuth re-auth needed for '{server_name}'. Run: mcpgen login {server_name}"
         )
 
     async def _no_callback() -> tuple[str, str | None]:
         raise ReauthenticationRequired(
-            f"OAuth re-auth needed for '{server_name}'. Run: mcp-kit login {server_name}"
+            f"OAuth re-auth needed for '{server_name}'. Run: mcpgen login {server_name}"
         )
 
     provider = OAuthClientProvider(

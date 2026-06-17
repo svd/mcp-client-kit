@@ -6,12 +6,12 @@ protocol, and :class:`ClaudeCodeProvider` (reads the Claude Code CLI or
 
 Usage::
 
-    from mcp_client_kit.discovery import discover_all
+    from mcpgen.discovery import discover_all
     servers = discover_all()                   # all available hosts
     servers = discover_all(hosts=["claude-code"])  # specific host
 
 This module is purely enumerative — it does NOT connect to or probe servers.
-No async. No dependency on :mod:`mcp_client_kit._bridge`.
+No async. No dependency on :mod:`mcpgen._bridge`.
 """
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ class DiscoveredServer:
     """Connection status string (e.g. ``"Connected"``, ``"Needs authentication"``)."""
 
     probeable: bool = True
-    """Whether mcp-kit can open a session to this server."""
+    """Whether mcpgen can open a session to this server."""
 
     note: str | None = None
     """Human-readable annotation explaining any special handling."""
@@ -120,7 +120,7 @@ def _default_run(cmd: list[str]) -> str | None:
 # ---------------------------------------------------------------------------
 
 _CLAUDE_AI_CONNECTOR_NOTE = (
-    "claude.ai connector — managed OAuth, not probeable by mcp-kit"
+    "claude.ai connector — managed OAuth, not probeable by mcpgen"
 )
 
 # Match "<name>: <rest> - <status_part>" with the status being everything

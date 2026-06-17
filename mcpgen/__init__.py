@@ -1,6 +1,6 @@
-"""mcp-client-kit: typed Python wrapper generator for MCP servers."""
+"""mcpgen: typed Python wrapper generator for MCP servers."""
 
-from mcp_client_kit._bridge import (
+from mcpgen._bridge import (
     McpBridgeCaller,
     ReauthenticationRequired,
     delete_cred,
@@ -9,7 +9,7 @@ from mcp_client_kit._bridge import (
     login,
     migrate_creds,
 )
-from mcp_client_kit.seam import McpCaller
+from mcpgen.seam import McpCaller
 
 __all__ = [
     "McpBridgeCaller",

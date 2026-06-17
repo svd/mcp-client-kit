@@ -1,7 +1,7 @@
-"""mcp-kit CLI: generate typed wrappers from a live MCP server.
+"""mcpgen CLI: generate typed wrappers from a live MCP server.
 
-    mcp-kit codegen acme --out acme.py
-    mcp-kit codegen acme --probe whoami --probe-args '{}'
+    mcpgen codegen acme --out acme.py
+    mcpgen codegen acme --probe whoami --probe-args '{}'
 
 Deterministic stub generation is the 80%; the optional --probe adds one live call
 and records the observed response *shape* (not payload) — the empirical step that
@@ -117,14 +117,14 @@ def _parse_env(ns: argparse.Namespace) -> dict[str, str] | None:
         if "=" in item:
             k, v = item.split("=", 1)
             if not k:
-                print(f"[mcp-kit] ⚠  --env {item!r}: empty key name; skipped", file=sys.stderr)
+                print(f"[mcpgen] ⚠  --env {item!r}: empty key name; skipped", file=sys.stderr)
                 continue
             result[k] = v
         elif item in os.environ:
             result[item] = os.environ[item]
         else:
             print(
-                f"[mcp-kit] ⚠  --env {item}: not set in environment; skipped",
+                f"[mcpgen] ⚠  --env {item}: not set in environment; skipped",
                 file=sys.stderr,
             )
     return result or None
@@ -196,7 +196,7 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
     """Load the shape-spec sidecar: explicit --shapes, else <server>.shapes.json beside --out.
 
     Fallback: if the shapes file is absent but its .parts/ directory exists (i.e.
-    probes ran but `mcp-kit merge` was not yet called), merge the parts in-memory
+    probes ran but `mcpgen merge` was not yet called), merge the parts in-memory
     so `codegen` still works without requiring an explicit merge step.
     """
     path = None
@@ -217,7 +217,7 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
                     changes = _normalize_shapes(shapes)
                     print(
                         f"[codegen] shapes: {parts_d}/ ({len(shapes)} tool(s), "
-                        "in-memory merge — run `mcp-kit merge` to persist)",
+                        "in-memory merge — run `mcpgen merge` to persist)",
                         file=sys.stderr,
                     )
                     if changes:
@@ -316,7 +316,7 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         part = parts_d / (_url_quote(ns.tool, safe="") + ".json")
         _atomic_write_text(part, out + "\n")
         print(f"[probe] wrote part {part}", file=sys.stderr)
-        print(f"[probe] run `mcp-kit merge {ns.server}` to consolidate into {target}", file=sys.stderr)
+        print(f"[probe] run `mcpgen merge {ns.server}` to consolidate into {target}", file=sys.stderr)
     else:
         sys.stdout.write(out + "\n")
 
@@ -507,9 +507,9 @@ def _cmd_discover(ns: argparse.Namespace) -> int:
             if s.probeable:
                 if s.transport == "stdio" and s.command:
                     cmd_str = s.command + (" " + " ".join(s.args) if s.args else "")
-                    print(f'    → mcp-kit list {s.name} --stdio "{cmd_str}"')
+                    print(f'    → mcpgen list {s.name} --stdio "{cmd_str}"')
                 elif s.transport in ("http", "sse") and s.url:
-                    print(f"    → mcp-kit list {s.name} --url {s.url}")
+                    print(f"    → mcpgen list {s.name} --url {s.url}")
                 else:
                     print(f"    (hint unavailable — transport: {s.transport})")
             else:
@@ -654,12 +654,12 @@ def _add_conn_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--client-name", dest="client_name",
                    help="OAuth client_name override (shown on the server consent screen)")
     p.add_argument("--config", dest="config",
-                   help="servers config path; overrides $MCP_KIT_SERVERS and the default search")
+                   help="servers config path; overrides $MCPGEN_SERVERS and the default search")
     p.add_argument("--cred-backend", dest="cred_backend", choices=["file", "keyring", "auto"],
                    help="credential storage backend: file (default, hardened 0600), "
                         "keyring (OS keychain; falls back to file if unavailable), "
                         "or auto (keyring if detected, else file). "
-                        "Also: MCP_KIT_CRED_BACKEND env or ~/.mcp-client-kit/config.json 'cred_backend'.")
+                        "Also: MCPGEN_CRED_BACKEND env or ~/.mcpgen/config.json 'cred_backend'.")
     p.add_argument("--env", dest="env", action="append", metavar="KEY[=VAL]",
                    help="forward an env var to a --stdio server: 'KEY' reads $KEY from "
                         "the shell; 'KEY=VAL' sets it inline. Repeat for multiple vars. "
@@ -669,12 +669,12 @@ def _add_conn_args(p: argparse.ArgumentParser) -> None:
 def main(argv: list[str] | None = None) -> int:
     from importlib.metadata import version as _pkg_version
     try:
-        _version = _pkg_version("mcp-client-kit")
+        _version = _pkg_version("mcpgen")
     except Exception:
         _version = "unknown"
 
-    parser = argparse.ArgumentParser(prog="mcp-kit")
-    parser.add_argument("--version", action="version", version=f"mcp-kit {_version}")
+    parser = argparse.ArgumentParser(prog="mcpgen")
+    parser.add_argument("--version", action="version", version=f"mcpgen {_version}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     cg = sub.add_parser("codegen", help="generate typed wrappers for a server")
@@ -758,7 +758,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     mc.add_argument(
         "--set-default", dest="set_default", action="store_true",
-        help="write cred_backend=<to> into ~/.mcp-client-kit/config.json so future "
+        help="write cred_backend=<to> into ~/.mcpgen/config.json so future "
              "commands default to the target backend (default: leave config untouched)",
     )
     mc.set_defaults(func=_cmd_migrate_creds)
