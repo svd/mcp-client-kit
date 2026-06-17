@@ -26,9 +26,13 @@ def _spec_to_entry(spec: ServerSpec) -> dict:
     """Convert one ServerSpec to a mcpServers JSON entry."""
     if spec.transport == "stdio":
         parts = shlex.split(spec.launch)
-        return {"command": parts[0], "args": parts[1:]}
-    # http or sse — bearer/oauth tokens intentionally omitted
-    return {"type": spec.transport, "url": spec.launch}
+        entry: dict = {"command": parts[0], "args": parts[1:]}
+    else:
+        # http or sse — bearer/oauth tokens intentionally omitted
+        entry = {"type": spec.transport, "url": spec.launch}
+    if spec.env:
+        entry["env"] = spec.env
+    return entry
 
 
 def build_mcp_config(specs: list[ServerSpec]) -> dict:

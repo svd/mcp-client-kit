@@ -40,6 +40,7 @@ name = "context7"
 transport = "stdio"
 launch = "npx -y @upstash/context7-mcp"
 auth = "none"
+env = { CONTEXT7_API_KEY = "${CONTEXT7_API_KEY}" }
 notes = "Upstash Context7 — library documentation lookup. Requires CONTEXT7_API_KEY env var for reliable operation; anonymous quota is shared and may exhaust mid-eval. Free key at https://context7.com/dashboard."
 
 # --- codegraph ---

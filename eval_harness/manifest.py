@@ -17,6 +17,7 @@ class ServerSpec:
     auth: str    # "none" | "oauth" | "bearer:ENV_VAR"
     expected_modes: list[str] = field(default_factory=list)
     notes: str = ""
+    env: dict[str, str] = field(default_factory=dict)
 
     # Convenience properties:
     @property
@@ -56,6 +57,7 @@ def load_manifest(path: Path | str = Path("servers/servers.toml")) -> list[Serve
             auth=entry.get("auth", "none"),
             expected_modes=entry.get("expected_modes", []),
             notes=entry.get("notes", ""),
+            env=entry.get("env", {}),
         ))
     return specs
 
