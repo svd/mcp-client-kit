@@ -1,13 +1,18 @@
 """Generate a Claude Code-style mcpServers JSON config from servers.toml.
 
-The generated file (.mcp.eval.json by default) lets `mcp-kit` resolve HTTP/SSE
-servers by name via $MCP_KIT_SERVERS or `--config`.  Stdio entries are included
-for completeness but are inert in mcp-kit's name-resolution (it only resolves
-entries that carry a `url`).  Bearer tokens are NOT embedded — they stay in env
-vars and must be passed via `--bearer` as usual.
+The generated file (.mcp.eval.json by default) lets `mcp-kit` resolve servers
+by name via $MCP_KIT_SERVERS or `--config`.  Both stdio and HTTP/SSE entries
+resolve by name; stdio entries additionally carry their `env` block (if any) to
+the spawned child process — `${VAR}` references are expanded from the host
+environment at parse time.  This is the mechanism that forwards keys like
+`CONTEXT7_API_KEY` to stdio servers without having to pass `--env` on every
+command.  Bearer tokens for HTTP/SSE servers are written as a literal
+``${VAR}`` placeholder in a ``headers.Authorization`` block; the consumer
+(Claude Code / mcp-kit) expands the variable at connection time.
 
 Typical use:
     uv run eval-kit gen-config
+    MCP_KIT_SERVERS=.mcp.eval.json mcp-kit list context7
     MCP_KIT_SERVERS=.mcp.eval.json mcp-kit list deepwiki
 """
 from __future__ import annotations
@@ -28,8 +33,12 @@ def _spec_to_entry(spec: ServerSpec) -> dict:
         parts = shlex.split(spec.launch)
         entry: dict = {"command": parts[0], "args": parts[1:]}
     else:
-        # http or sse — bearer/oauth tokens intentionally omitted
+        # http or sse
         entry = {"type": spec.transport, "url": spec.launch}
+        if spec.auth_kind == "bearer" and spec.bearer_env_var:
+            entry["headers"] = {
+                "Authorization": f"Bearer ${{{spec.bearer_env_var}}}"
+            }
     if spec.env:
         entry["env"] = spec.env
     return entry

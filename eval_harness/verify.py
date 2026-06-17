@@ -89,6 +89,13 @@ def check_signatures(server_py: Path, shapes_json: Path) -> CheckResult:
     except (OSError, json.JSONDecodeError) as e:
         return skip_("signatures", f"Could not load shapes.json: {e}")
 
+    inconclusive = [t for t, s in shapes.items() if s.get("_probe_status") == "inconclusive"]
+    if inconclusive:
+        return skip_(
+            "signatures",
+            f"probe_inconclusive: {len(inconclusive)} tool(s) returned quota/auth errors — shapes unknown: {', '.join(inconclusive)}",
+        )
+
     failures: list[str] = []
     has_any_return_model = False
 
@@ -276,11 +283,22 @@ def check_roundtrip(
     if spec.auth_kind == "bearer" and spec.bearer_env_var:
         bearer_token = os.environ.get(spec.bearer_env_var)
 
+    # Expand manifest env vars (e.g. CONTEXT7_API_KEY) from the host environment.
+    # The MCP SDK only auto-inherits a narrow allowlist to stdio children; keys like
+    # API tokens must be passed explicitly.  Drop any key whose ${VAR} reference
+    # stayed unresolved (var absent from os.environ) so we never forward a literal
+    # placeholder string.  This is a no-op for servers with no env block.
+    resolved_env: dict[str, str] | None = None
+    if spec.env:
+        expanded = {k: os.path.expandvars(v) for k, v in spec.env.items()}
+        resolved = {k: v for k, v in expanded.items() if "${" not in v}
+        resolved_env = resolved or None
+
     try:
         if spec.transport == "stdio":
-            caller = McpBridgeCaller(cmd=spec.launch, bearer=bearer_token)
+            caller = McpBridgeCaller(cmd=spec.launch, bearer=bearer_token, env=resolved_env)
         else:
-            caller = McpBridgeCaller(url=spec.launch, bearer=bearer_token)
+            caller = McpBridgeCaller(url=spec.launch, bearer=bearer_token, env=resolved_env)
     except Exception as e:
         return fail_("roundtrip", f"Failed to construct caller: {e}")
 
@@ -392,7 +410,7 @@ def _compute_modes_hit(shapes: dict | None) -> list[str]:
 
     modes: set[str] = set()
 
-    if shapes:  # any tool exists
+    if any(s.get("return_model") is None for s in shapes.values()):
         modes.add("A")
 
     for shape in shapes.values():

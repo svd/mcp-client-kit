@@ -38,7 +38,7 @@ Use these path conventions so artifacts land where the harness expects:
 
 ### Quick-start commands
 
-Working directory for all commands: project root (your current working directory)
+Working directory for ALL commands: {{PROJECT_ROOT}} — **never** run `cd` before any command. You are already in the correct directory.
 Manifest: `servers/servers.toml`
 
 **Before any `mcp-kit` command**, ensure the server config is available and set the env var so mcp-kit resolves servers by name:
@@ -48,28 +48,34 @@ uv run eval-kit gen-config           # generates .mcp.eval.json (idempotent, fas
 export MCP_KIT_SERVERS=.mcp.eval.json
 ```
 
-Use these exact commands for the transport this server uses:
+Use these exact commands for the transport this server uses.
+Servers are resolved by name from `MCP_KIT_SERVERS` — do **not** pass `--stdio` or `--url`; that
+would bypass name-resolution and lose the manifest `env` block (e.g. `CONTEXT7_API_KEY`).
 
 **stdio (`{{TRANSPORT}}` = stdio):**
 ```bash
-mcp-kit codegen {{SERVER_NAME}} --stdio "{{LAUNCH}}" --out eval/{{SERVER_NAME}}/{{SERVER_NAME}}.py
-mcp-kit list {{SERVER_NAME}} --stdio "{{LAUNCH}}"
-mcp-kit probe {{SERVER_NAME}} <tool> --stdio "{{LAUNCH}}" --emit-shape eval/{{SERVER_NAME}}/{{SERVER_NAME}}.shapes.json
+mcp-kit codegen {{SERVER_NAME}} --out eval/{{SERVER_NAME}}/{{SERVER_NAME}}.py
+mcp-kit list {{SERVER_NAME}}
+mcp-kit probe {{SERVER_NAME}} <tool> --emit-shape eval/{{SERVER_NAME}}/{{SERVER_NAME}}.shapes.json
 ```
 
 **HTTP no-auth (`{{TRANSPORT}}` = http, `{{AUTH}}` = none):**
 ```bash
-mcp-kit codegen {{SERVER_NAME}} --url "{{LAUNCH}}" --out eval/{{SERVER_NAME}}/{{SERVER_NAME}}.py
-mcp-kit list {{SERVER_NAME}} --url "{{LAUNCH}}"
+mcp-kit codegen {{SERVER_NAME}} --out eval/{{SERVER_NAME}}/{{SERVER_NAME}}.py
+mcp-kit list {{SERVER_NAME}}
 ```
 
 **HTTP Bearer (`{{TRANSPORT}}` = http, `{{AUTH}}` = bearer:*):**
 ```bash
-mcp-kit codegen {{SERVER_NAME}} --url "{{LAUNCH}}" --bearer "$<ENV_VAR>" --out eval/{{SERVER_NAME}}/{{SERVER_NAME}}.py
-mcp-kit list {{SERVER_NAME}} --url "{{LAUNCH}}" --bearer "$<ENV_VAR>"
+mcp-kit codegen {{SERVER_NAME}} --bearer "$<ENV_VAR>" --out eval/{{SERVER_NAME}}/{{SERVER_NAME}}.py
+mcp-kit list {{SERVER_NAME}} --bearer "$<ENV_VAR>"
 ```
 
-`MCP_KIT_SERVERS` is the authoritative config for all mcp-kit subcommands — it applies to `codegen`, `list`, `probe`, and `call` alike.
+`MCP_KIT_SERVERS` is the authoritative config for all mcp-kit subcommands — it applies to `codegen`,
+`list`, `probe`, and `call` alike. For stdio servers with an `env` block in the manifest (e.g.
+context7), the `${VAR}` references in that block are expanded from the host environment at
+parse time, so the key reaches the child process automatically via name-resolution.
+`{{LAUNCH}}` is informational (recorded in the manifest); mcp-kit resolves the server by name.
 
 ### Non-interactive gate overrides
 
@@ -79,6 +85,9 @@ mcp-kit list {{SERVER_NAME}} --url "{{LAUNCH}}" --bearer "$<ENV_VAR>"
 2. **Discriminator gate (skill Step 4):** choose the **generic base model** option (or unwrap-only `Any` if no stable shared base exists). Never emit a variant-specific `return_model` from a single-variant probe. A parameter is a discriminator candidate only if its values correspond to **structurally different response shapes** — disqualify immediately if the parameter is a plain filesystem path, a repo identifier, or a pagination hint (e.g. `head`, `tail`, `page`, `limit`, `repoName`, `projectPath`). No need to probe variants for these.
 3. **>20-variant cap:** fall back to unwrap-only `Any`.
 4. **Sample ids / probe args:** Before probing a tool, check its `inputSchema.required` array. If it is non-empty, do NOT probe with `{}` — call the tool directly with minimal but valid required args on the first attempt and declare those args as `probed_args`. Pass `'{}'` only when `required` is absent or empty. Invent realistic-looking but fake values for required string/ID args.
+   - **GitHub:** prefer `owner: "microsoft", repo: "vscode"` as default probe repo. `octocat/Hello-World` has no releases, tags, or issue fields and will produce `[<empty>]` for those tools.
+   - **Stateful empty servers (e.g. memory, sqlite):** call a mutating tool once to insert a seed record before probing read-only tools. Record the seed in `session-overview.md` under "Probe setup". This is the ONLY permitted mutating call for seeding purposes.
+   - **Quota/auth error responses:** if **every** non-empty tool response is a quota/auth error string (e.g. "Monthly quota exceeded", "Unauthorized"), add `"_probe_status": "inconclusive"` to each affected shape entry. Do NOT leave it as plain `"_observed_shape": "str"` — that looks identical to a genuine text-returning tool.
 5. **Run as a single driver thread — do NOT dispatch sub-subagents.**
 
 **PII scrub (mandatory before finishing):** replace all real IDs, emails, usernames, and names in `probed_args` with `<example-*>` placeholders (e.g. `<example-user-id>`, `<example-email>`). Never commit real personal data.
@@ -117,7 +126,6 @@ When done, output this exact JSON block (the Workflow parser looks for it):
   "session_id": "<your Claude session ID>",
   "tool_count": 0,
   "shaped_tools": ["tool1", "tool2"],
-  "modes_hit": ["A", "B"],
   "verdict_hint": "pass",
   "notes": "..."
 }
