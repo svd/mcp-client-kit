@@ -62,6 +62,17 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 ## Procedure
 
 1. **Mechanical stubs.**
+
+   `mcp-kit` resolves a server **by name** from a config file — pointed to by the
+   `MCP_KIT_SERVERS` env var or the `--config` flag. This is the primary form: the bare
+   `<server>` name maps to its transport and forwards the server's `env` block (API keys,
+   etc.) to the launched process. `MCP_KIT_SERVERS` must prefix the command in the **same
+   shell invocation** — it does not persist across calls.
+   ```bash
+   MCP_KIT_SERVERS=servers.json mcp-kit codegen <server> --out <server>/<server>.py
+   ```
+
+   **Alternative — pass transport values directly, without a config file:**
    ```bash
    # stdio (pass the full launch command):
    mcp-kit codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py
