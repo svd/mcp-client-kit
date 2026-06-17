@@ -51,7 +51,7 @@ def test_check_ast_fail(tmp_path: Path) -> None:
 _MODULE_B = """\
 from __future__ import annotations
 from typing import Any, TypedDict, cast
-from mcp_client_kit.seam import McpCaller
+from mcpgen.seam import McpCaller
 
 class User(TypedDict, total=False):
     login: str
@@ -75,7 +75,7 @@ _SHAPES_B = {
 _MODULE_C = """\
 from __future__ import annotations
 from typing import Any, TypedDict, cast
-from mcp_client_kit.seam import McpCaller
+from mcpgen.seam import McpCaller
 
 class Branch(TypedDict, total=False):
     name: str
@@ -104,7 +104,7 @@ _SHAPES_C = {
 _MODULE_WRONG = """\
 from __future__ import annotations
 from typing import Any, TypedDict
-from mcp_client_kit.seam import McpCaller
+from mcpgen.seam import McpCaller
 
 class User(TypedDict, total=False):
     login: str
@@ -211,7 +211,7 @@ def test_check_pii_fail_long_id(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 # Minimal module whose function ignores the caller and returns a stable dict.
-# No mcp_client_kit import needed in the module itself — the test only needs
+# No mcpgen import needed in the module itself — the test only needs
 # the package importable (it's a project dep), not used inside the function.
 _MODULE_ROUNDTRIP = """\
 async def get_me(caller, **kwargs):

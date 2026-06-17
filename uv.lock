@@ -21,7 +21,7 @@ wheels = [
 ]
 
 [[package]]
-name = "mcp-client-kit-eval"
+name = "mcpgen-eval"
 version = "0.1.0"
 source = { editable = "." }
 

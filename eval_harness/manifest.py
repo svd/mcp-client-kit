@@ -1,4 +1,4 @@
-"""Manifest loader for mcp-client-kit-eval server specs."""
+"""Manifest loader for mcpgen-eval server specs."""
 from __future__ import annotations
 import tomllib
 from dataclasses import dataclass, field

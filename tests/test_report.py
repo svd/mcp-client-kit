@@ -145,12 +145,12 @@ def test_humanize_skip_no_shapes_found() -> None:
     assert "shapes" in prose
 
 
-def test_humanize_skip_mcp_client_kit_not_installed() -> None:
+def test_humanize_skip_mcpgen_not_installed() -> None:
     icon, label, prose = _humanize_skip(  # type: ignore[misc]
-        "mcp_client_kit not installed — check DISABLED (install to enable)"
+        "mcpgen not installed — check DISABLED (install to enable)"
     )
     assert label == "not run"
-    assert "mcp_client_kit" in prose
+    assert "mcpgen" in prose
 
 
 def test_humanize_skip_unresolvable_imports() -> None:

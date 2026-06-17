@@ -22,8 +22,8 @@ _VERDICT_ICON = {
     "error": "⚠️",
 }
 
-# Prefix used by verify.py when mcp_client_kit is absent — rendered with ⚠️ not ⏭
-_DISABLED_SKIP_PREFIX = "mcp_client_kit not installed"
+# Prefix used by verify.py when mcpgen is absent — rendered with ⚠️ not ⏭
+_DISABLED_SKIP_PREFIX = "mcpgen not installed"
 
 
 # ── Subcommand implementations ────────────────────────────────────────────────
@@ -123,7 +123,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="eval-kit",
-        description="Evaluation harness CLI for mcp-client-kit.",
+        description="Evaluation harness CLI for mcpgen.",
     )
     sub = parser.add_subparsers(dest="command", metavar="<subcommand>")
     sub.required = True
@@ -143,7 +143,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # --- gen-config ---
     p_gen = sub.add_parser(
         "gen-config",
-        help="Generate .mcp.eval.json from servers.toml (for mcp-kit name resolution).",
+        help="Generate .mcp.eval.json from servers.toml (for mcpgen name resolution).",
     )
     p_gen.add_argument(
         "--manifest", default="servers/servers.toml", metavar="PATH",

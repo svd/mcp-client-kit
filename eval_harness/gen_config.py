@@ -1,19 +1,19 @@
 """Generate a Claude Code-style mcpServers JSON config from servers.toml.
 
-The generated file (.mcp.eval.json by default) lets `mcp-kit` resolve servers
-by name via $MCP_KIT_SERVERS or `--config`.  Both stdio and HTTP/SSE entries
+The generated file (.mcp.eval.json by default) lets `mcpgen` resolve servers
+by name via $MCPGEN_SERVERS or `--config`.  Both stdio and HTTP/SSE entries
 resolve by name; stdio entries additionally carry their `env` block (if any) to
 the spawned child process — `${VAR}` references are expanded from the host
 environment at parse time.  This is the mechanism that forwards keys like
 `CONTEXT7_API_KEY` to stdio servers without having to pass `--env` on every
 command.  Bearer tokens for HTTP/SSE servers are written as a literal
 ``${VAR}`` placeholder in a ``headers.Authorization`` block; the consumer
-(Claude Code / mcp-kit) expands the variable at connection time.
+(Claude Code / mcpgen) expands the variable at connection time.
 
 Typical use:
     uv run eval-kit gen-config
-    MCP_KIT_SERVERS=.mcp.eval.json mcp-kit list context7
-    MCP_KIT_SERVERS=.mcp.eval.json mcp-kit list deepwiki
+    MCPGEN_SERVERS=.mcp.eval.json mcpgen list context7
+    MCPGEN_SERVERS=.mcp.eval.json mcpgen list deepwiki
 """
 from __future__ import annotations
 

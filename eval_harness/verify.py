@@ -1,4 +1,4 @@
-"""Deterministic verifier for mcp-client-kit-eval: runs 5 checks on a server's
+"""Deterministic verifier for mcpgen-eval: runs 5 checks on a server's
 generated artifacts and writes result.json.
 
 Checks:
@@ -142,9 +142,9 @@ def check_signatures(server_py: Path, shapes_json: Path) -> CheckResult:
 def check_idempotency(server: str, shapes_json: Path) -> CheckResult:
     """Call render_module() twice with stub schemas and assert identical output."""
     try:
-        import mcp_client_kit.codegen as codegen  # noqa: PLC0415
+        import mcpgen.codegen as codegen  # noqa: PLC0415
     except ImportError:
-        return skip_("idempotency", "mcp_client_kit not installed — check DISABLED (install to enable)")
+        return skip_("idempotency", "mcpgen not installed — check DISABLED (install to enable)")
 
     try:
         shapes_data: dict = json.loads(shapes_json.read_text(encoding="utf-8"))
@@ -274,9 +274,9 @@ def check_roundtrip(
         return fail_("roundtrip", f"Could not read generated module: {e}")
 
     try:
-        from mcp_client_kit._bridge import McpBridgeCaller  # noqa: PLC0415
+        from mcpgen._bridge import McpBridgeCaller  # noqa: PLC0415
     except ImportError:
-        return skip_("roundtrip", "mcp_client_kit not installed — check DISABLED (install to enable)")
+        return skip_("roundtrip", "mcpgen not installed — check DISABLED (install to enable)")
 
     # Build the caller
     bearer_token: str | None = None
