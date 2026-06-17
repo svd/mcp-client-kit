@@ -134,12 +134,22 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
       *polymorphic-suspect* and must be resolved in step 4 before the shape-spec is
       considered complete.
 
-      **Filter before probing:** before treating a candidate as a real discriminator,
-      confirm the field appears in the *response* payload of at least one probed call
-      (i.e. it is a key in `_observed_shape`). A parameter that appears only in
-      `inputSchema.properties` but never in any observed response dict is an *input*
-      parameter, not a response discriminator — discard it immediately regardless of how
-      many tools share it.
+      **Filter before probing — two-pass disqualification:**
+
+      *Pass 1 — auto-disqualify without probing.* Drop any candidate whose name matches
+      a known input-only pattern. No reasoning required; these are never response keys:
+      - **Pagination / window:** `page`, `limit`, `perPage`, `per_page`, `head`, `tail`,
+        `since`, `after`, `before`, `offset`, `cursor`, `maxResults`, `count`
+      - **Sort / order:** `sort`, `order`, `direction`, `orderBy`, `order_by`
+      - **Path / repo identity:** `path`, `filePath`, `file_path`, `repoPath`, `repo_path`,
+        `projectPath`, `repoName`, `repositoryName`, `workspacePath`
+      - **Spans all tools in the selected set** — a global context arg, not a shape switch.
+
+      *Pass 2 — post-probe confirm.* For any candidate that survived Pass 1, confirm the
+      field appears in the *response* payload of at least one probed call (i.e. it is a
+      key in `_observed_shape`). A parameter that appears only in `inputSchema.properties`
+      but never in any observed response dict is an *input* parameter, not a response
+      discriminator — discard it regardless of how many tools share it.
 
 3. **Probe each selected tool → skeleton (parallel-safe).**
 
@@ -178,6 +188,17 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      --args '{"entityId":"<id2>","entityType":1}' \
      --emit-shape <shapes-path>
    ```
+   **Quota / rate-limit errors during probing.** If a probe returns an HTTP 429, a
+   quota-exceeded message, or a rate-limit string (detectable by phrases like
+   `"quota exceeded"`, `"rate limit"`, `"try again later"`):
+   - Set `_observed_shape: "str"` — the error payload is a `str`, which is honest.
+   - Leave `return_model: null`.
+   - Note in `session-overview.md` that the shape is an error string, not a success payload.
+   - Do **not** retry more than once.
+
+   The generated `-> Any` return type is correct; callers must handle the error string
+   at runtime. Do not probe again hoping for a different result.
+
    Part files land at `<shapes-path>.parts/<tool>.json` (git-ignored).
    You may probe multiple tools in parallel; all parts will be preserved.
    After probing is done, run step 3b to consolidate.
@@ -203,6 +224,29 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    (b) discovery tools / glossary / tool descriptions (e.g. `get_filters` /
    `get_entity_fields` per `entityType`, `get_acme_glossary`); (c) `AskUserQuestion`
    if not discoverable from available tools.
+
+   **Inspect `inputSchema` for enum constraints before constructing probe args.** For each
+   required param, check `inputSchema.properties[param].enum`. If an `enum` array is
+   present, use its **first listed value** as the probe arg instead of inventing a value —
+   invented values will be rejected with an MCP validation error. Record the chosen value
+   in `probed_args`.
+
+   Example: `"city": {"type": "string", "enum": ["New York", "Chicago", "Los Angeles"]}`
+   → probe with `city="New York"`.
+
+   **JSON-in-string detection.** Some servers serialize structured data as a JSON string
+   inside the MCP envelope (e.g. `directory_tree` returns a JSON string, not a parsed
+   dict). If `_observed_shape == "str"` and the raw probe value successfully parses with
+   `json.loads()` into a dict or list, annotate the shape entry with `"_json_unwrap": true`
+   and re-enter shape analysis on the parsed object — the tool may qualify for a `TypedDict`
+   model after unwrapping. If `json.loads()` fails, `_observed_shape: "str"` stands.
+
+   **Empty-store probes produce under-typed list fields.** If a read tool returns an
+   empty list (`[]`), the inner element shape is unobservable. Do not fabricate a schema
+   from zero samples — leave the field typed as `list`. Note in `session-overview.md`
+   that the inner model is unobservable at probe time, and recommend re-running
+   `mcp-kit probe` after seeding the server with representative data (e.g. via
+   `mcp-kit call <mutating-tool>`) to capture inner field shapes.
 
    Sample args may need bootstrapping (e.g. a real id before probing `get_entity`).
    Find a no-arg / discovery tool on *this* server that returns user or entity ids (there
