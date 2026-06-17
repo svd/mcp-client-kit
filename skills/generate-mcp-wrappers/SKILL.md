@@ -41,6 +41,10 @@ from subagent:
 | 5 regenerate | **main** | deterministic barrier |
 | 6 verify | **1 subagent / inline** | isolates generated-module read |
 
+> **When this skill itself runs as a subagent** (dispatched by a parent agent or workflow),
+> execute as a **single driver thread — do NOT dispatch sub-subagents.** The recon + batched
+> parallel probe model above is for main-thread execution only. All phases run inline.
+
 **Batching rule for step 3:** every discriminator-sibling set lands in the **same** batch
 so variant consistency is resolved inside one agent's context, not across blind agents.
 Independent tools are bucketed by relatedness and size. Dispatch only user-approved
@@ -106,8 +110,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
       > **Subagent fallback (when `AskUserQuestion` is unavailable):** Probe all
       > non-mutating tools. Treat a tool as mutating if its name or description
       > contains any of the keywords from the heuristic list below (step 2b). Skip
-      > mutating tools entirely. Log skipped tool names and reason in
-      > `session-overview.draft.md`.
+      > mutating tools entirely.
 
    d. If **"Confirm in batches"**: emit `AskUserQuestion` multi-select questions,
       **≤4 options per question**, each option `label = tool name` and
@@ -225,10 +228,21 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    a generic base model (step 4 option 2). Each probe is a live call, so 20 is a
    cost/blast-radius ceiling.
 
+   > **Subagent fallback (when `AskUserQuestion` is unavailable):** Fall back to a
+   > generic base model of common fields (step 4 option 2); use unwrap-only `Any` if
+   > no stable shared base exists. Do not probe all N variants.
+
    Enumerate discriminator values from: (a) the param's `enum` in `inputSchema`;
    (b) discovery tools / glossary / tool descriptions (e.g. `get_filters` /
    `get_entity_fields` per `entityType`, `get_acme_glossary`); (c) `AskUserQuestion`
    if not discoverable from available tools.
+
+   **Check `inputSchema.required` before constructing probe args.** If the array is
+   non-empty, never probe with `'{}'` — call the tool with minimal valid args on the first
+   attempt. Invent realistic-looking but fake values for required string/ID args that carry
+   no `enum`. For GitHub servers, prefer `owner: "microsoft", repo: "vscode"` as the default
+   probe repo (`octocat/Hello-World` lacks releases/tags/issue fields and produces `[<empty>]`
+   for those tools).
 
    **Inspect `inputSchema` for enum constraints before constructing probe args.** For each
    required param, check `inputSchema.properties[param].enum`. If an `enum` array is
@@ -357,6 +371,11 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      3. **Unwrap-only / `Any`** — when values can't be enumerated and a base model
         isn't justified.
      Use `AskUserQuestion` when unsure which applies.
+
+     > **Subagent fallback (when `AskUserQuestion` is unavailable):** Default to a
+     > **generic base model** (option 2) — never emit a variant-specific `return_model`
+     > from a single-variant probe alone. Fall back to unwrap-only `Any` only when
+     > variants are too diverse or structurally incompatible.
    - **`input_overrides`**: fix types the schema lied about. JSON Schema `number` is
      `float`, but some servers use `int` for id/type fields → `{"entityType": "int"}`.
    - **`fields`**: keep **only top-level stable scalars the probe actually saw**. Mark
