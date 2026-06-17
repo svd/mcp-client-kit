@@ -22,6 +22,9 @@ _VERDICT_ICON = {
     "error": "⚠️",
 }
 
+# Prefix used by verify.py when mcp_client_kit is absent — rendered with ⚠️ not ⏭
+_DISABLED_SKIP_PREFIX = "mcp_client_kit not installed"
+
 
 # ── Subcommand implementations ────────────────────────────────────────────────
 
@@ -52,8 +55,11 @@ def cmd_verify(args: argparse.Namespace) -> int:
     details: dict[str, str] = result.get("check_details", {})
 
     for check_name, status in checks.items():
-        icon = _STATUS_ICON.get(status, "?")
         detail = details.get(check_name, "")
+        if status == "skip" and detail.startswith(_DISABLED_SKIP_PREFIX):
+            icon = "⚠️"
+        else:
+            icon = _STATUS_ICON.get(status, "?")
         suffix = f"  {detail}" if detail else ""
         print(f"{icon} {check_name:<14} {status}{suffix}")
 

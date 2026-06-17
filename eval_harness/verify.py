@@ -49,6 +49,7 @@ def skip_(name: str, reason: str) -> CheckResult:
 _RE_EMAIL = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 _RE_LONG_NUM = re.compile(r"\b\d{8,}\b")
 _RE_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+_RE_HOME_PATH = re.compile(r"/(?:Users|home)/[^/\s]+")
 
 # Mutating verbs — tool names containing any of these are considered mutating
 _MUTATING_VERBS = {
@@ -136,7 +137,7 @@ def check_idempotency(server: str, shapes_json: Path) -> CheckResult:
     try:
         import mcp_client_kit.codegen as codegen  # noqa: PLC0415
     except ImportError:
-        return skip_("idempotency", "mcp_client_kit not installed")
+        return skip_("idempotency", "mcp_client_kit not installed — check DISABLED (install to enable)")
 
     try:
         shapes_data: dict = json.loads(shapes_json.read_text(encoding="utf-8"))
@@ -180,7 +181,7 @@ def _scan_for_pii(
     if isinstance(obj, str):
         if _is_placeholder(obj):
             return
-        for pattern in (_RE_EMAIL, _RE_LONG_NUM, _RE_UUID):
+        for pattern in (_RE_EMAIL, _RE_LONG_NUM, _RE_UUID, _RE_HOME_PATH):
             m = pattern.search(obj)
             if m:
                 preview = obj[:80] + ("..." if len(obj) > 80 else "")
@@ -268,7 +269,7 @@ def check_roundtrip(
     try:
         from mcp_client_kit._bridge import McpBridgeCaller  # noqa: PLC0415
     except ImportError:
-        return skip_("roundtrip", "mcp_client_kit not installed")
+        return skip_("roundtrip", "mcp_client_kit not installed — check DISABLED (install to enable)")
 
     # Build the caller
     bearer_token: str | None = None

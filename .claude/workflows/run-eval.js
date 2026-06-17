@@ -148,7 +148,7 @@ The analysis should cover: tool calls made, stages executed, decisions made, any
 When done, return "DONE: eval/${server.name}/session-analyzer.md written"`
 
     let analyzeResult = await agent(analyzePrompt, { label: `analyze:${server.name}`, phase: 'Analyze' })
-    if (!analyzeResult || analyzeResult.includes('API Error') || analyzeResult.includes('Please run /login')) {
+    if (!analyzeResult || analyzeResult.includes('API Error') || analyzeResult.includes('Please run /login') || !analyzeResult.includes('DONE:')) {
       log(`[${server.name}] Analyze failed — retrying once…`)
       analyzeResult = await agent(analyzePrompt, { label: `analyze:${server.name}:retry`, phase: 'Analyze' })
     }
