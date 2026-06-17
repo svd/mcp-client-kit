@@ -20,7 +20,7 @@ Given an MCP server (URL or local command), the skill:
 Two-phase reality:
 
 - **Deterministic part** (tools/list → function stubs) could be a plain
-  `mcp-kit codegen` CLI command — no LLM needed. This should live in the
+  `mcpgen codegen` CLI command — no LLM needed. This should live in the
   library, not the skill.
 - **Judgment part** (which fields to project, how to unwrap vendor envelopes,
   which tools matter for the user's pipeline, sample-call validation) needs an
@@ -56,14 +56,14 @@ class McpCaller(Protocol):
 ```
 
 Each generated `async def` takes the caller as its first argument and forwards to
-`caller.call(SERVER, "<tool>", {...})`. Behind the seam today sits `mcp_client_kit/_bridge.py` over the official `mcp`
+`caller.call(SERVER, "<tool>", {...})`. Behind the seam today sits `mcpgen/_bridge.py` over the official `mcp`
 SDK (`ClientSession` + `streamablehttp_client`). FastMCP was evaluated and
 rejected as the backend. Wrappers don't change. See VERDICT.md §Correction.
 
 ## Risks specific to the skill
 
 - **Schema drift**: generated wrappers go stale when the server changes.
-  Mitigation: `mcp-kit codegen --check` mode that re-lists tools and diffs
+  Mitigation: `mcpgen codegen --check` mode that re-lists tools and diffs
   against generated code; CI-able.
 - **Response-shape assumptions**: generation from inputSchema alone produces
   wrappers that lie about outputs. Mitigation: validation pass is mandatory in

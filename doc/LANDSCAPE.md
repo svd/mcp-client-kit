@@ -72,7 +72,7 @@ uv/astral primary docs that were fetched (distribution angle) + standard practic
 not adversarially verified. Treat as advisory.
 
 - **git+https dependency via uv/pip** — lowest friction for a few colleagues.
-  `uv add "git+https://git.example.com/…/mcp-client-kit.git@v0.1.0"`; uv supports git
+  `uv add "git+https://git.example.com/…/mcpgen.git@v0.1.0"`; uv supports git
   auth + tag/branch/rev pinning (docs.astral.sh/uv git auth). Good first step.
 - **Private index** (internal PyPI / Artifactory / GitLab package registry) — when
   audience grows beyond a handful; `uv` supports extra indexes w/ auth.

@@ -1,7 +1,7 @@
 # Extraction analysis: what to pull out of the origin project
 
 Origin: `mcp_client.py` from the origin project (reviewed 2026-06-12). The generic
-layer has since been extracted to `mcp_client_kit/_bridge.py` (official `mcp` SDK backend).
+layer has since been extracted to `mcpgen/_bridge.py` (official `mcp` SDK backend).
 
 ## Layered view of the existing code
 
@@ -12,14 +12,14 @@ layer is worth extracting; the upper two stay project-specific by design.
 
 | Piece | Generic? | Notes for extraction |
 |---|---|---|
-| `FileTokenStorage` | ✅ | Already keyed by server name. Parameterize the credentials path (now defaults to `~/.mcp-client-kit/credentials.json`). Consider OS keyring as optional backend — plaintext JSON is the main security objection colleagues will raise. |
+| `FileTokenStorage` | ✅ | Already keyed by server name. Parameterize the credentials path (now defaults to `~/.mcpgen/credentials.json`). Consider OS keyring as optional backend — plaintext JSON is the main security objection colleagues will raise. |
 | `_refresh_token_if_needed` | ✅ | Pre-flight refresh via cached `token_endpoint` — this is the part the official SDK does *not* give you out of the box across process restarts. Core value. |
 | `_authenticated_session` | ✅ | Needs `SERVERS` dict injected instead of module-level constant. |
 | `call_tool` | ✅ | One-session-per-call is simple but slow for N calls; extracted lib should also expose a session-reuse variant (`async with McpClient(...) as c: await c.call(...)`). |
 | `login` + `_local_callback_server` | ✅ | Generic OAuth 2.1 PKCE browser flow. `_LOGIN_VERIFY_TOOL` (whoami/get-current-user) must become a config parameter — it's the only org-specific bit inside. |
 | `ensure_authenticated` | ✅ | Generic given injected server registry. |
 | `parse_tool_result` | ✅ | Generic MCP envelope unwrap. |
-| `ReauthenticationRequired` error messages | ⚠️ | Hardcode `uv run mcp-kit login` — must become a configurable "remediation hint" string. |
+| `ReauthenticationRequired` error messages | ⚠️ | Hardcode `uv run mcpgen login` — must become a configurable "remediation hint" string. |
 | `EARLY_REFRESH_MARGIN_SECONDS`, verbose logging | ✅ | Trivial. |
 
 ### Layer 2 — per-server typed wrappers
@@ -42,18 +42,18 @@ it consumes plain dicts. Good: extraction won't touch it.
 ## API sketch for the extracted library
 
 ```python
-from mcp_client_kit import McpClient, ServerConfig
+from mcpgen import McpClient, ServerConfig
 
 acme = ServerConfig(
     name="acme",
     url="https://mcp.example.com/mcp/acme",   # real endpoints live in user config, never in repo
     verify_tool="whoami",                      # called after login to confirm identity
-    login_hint="uv run mcp-kit login acme",   # shown in ReauthenticationRequired
+    login_hint="uv run mcpgen login acme",   # shown in ReauthenticationRequired
 )
 
 client = McpClient(
     servers=[acme],
-    credentials_path="~/.mcp-client-kit/credentials.json",  # default
+    credentials_path="~/.mcpgen/credentials.json",  # default
 )
 
 # one-shot (current call_tool semantics)
@@ -65,7 +65,7 @@ async with client.session("acme") as s:
     b = await s.call("query_acme", {...})
 
 # CLI surface (console_scripts entry point)
-#   mcp-kit login --server acme --config ./servers.toml
+#   mcpgen login --server acme --config ./servers.toml
 ```
 
 Auth-optional mode: `ServerConfig(auth=None)` skips OAuth entirely and just
@@ -77,7 +77,7 @@ parsing, session mgmt). See VERDICT.md.
 
 - Per-server typed wrappers in the origin project imported from the old
   `mcp_client` module. The extraction is done: the generic layer now lives in
-  `mcp_client_kit/_bridge.py` (official `mcp` SDK). A shim keeps the old import
+  `mcpgen/_bridge.py` (official `mcp` SDK). A shim keeps the old import
   path working for backward compat.
 - `__main__.py` `login` command delegates to the lib.
 - Tests: mcp_client has its own behaviors (early-refresh margin, redirect_uri

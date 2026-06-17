@@ -1,4 +1,4 @@
-# mcp-client-kit usage
+# mcpgen usage
 
 > **Availability:** this doc describes the published flow (PyPI + marketplace). Not yet
 > live — for now use [RUNNING_LOCALLY.md](RUNNING_LOCALLY.md).
@@ -20,7 +20,7 @@ automatically via `uvx` — no separate engine install needed.
 **Install the plugin:**
 
 ```
-/plugin marketplace add svd/mcp-client-kit
+/plugin marketplace add svd/mcpgen
 ```
 
 Or via the `svd-agent-skills` aggregator if it's listed there.
@@ -28,12 +28,12 @@ Or via the `svd-agent-skills` aggregator if it's listed there.
 **Invoke the skill** in any Claude Code session:
 
 ```
-/mcp-client-kit:generate-mcp-wrappers
+/mcpgen:generate-mcp-wrappers
 ```
 
 The skill:
-1. Generates mechanical stubs (`mcp-kit codegen`) for the target server.
-2. Probes chosen tools live (`mcp-kit probe`) to capture actual response shapes.
+1. Generates mechanical stubs (`mcpgen codegen`) for the target server.
+2. Probes chosen tools live (`mcpgen probe`) to capture actual response shapes.
 3. Regenerates wrappers with real return types.
 
 Before the skill can reach your server, complete [§ Configure a server](#configure-a-server)
@@ -45,28 +45,27 @@ For the full 6-step procedure see [§ The skill procedure](#the-skill-procedure)
 
 ## Path B — CLI only
 
-Use `mcp-kit` directly to generate wrappers or probe tools without the skill layer.
+Use `mcpgen` directly to generate wrappers or probe tools without the skill layer.
 
 ### One-off (no install)
 
 ```bash
-# Note: package = mcp-client-kit, script = mcp-kit — they differ
-uvx --from "mcp-client-kit" mcp-kit codegen <server> --out <server>.py
-uvx --from "mcp-client-kit" mcp-kit probe <server> <tool> --args '{}' --emit-shape <server>.shapes.json
-uvx --from "mcp-client-kit" mcp-kit login <server>
+uvx mcpgen codegen <server> --out <server>.py
+uvx mcpgen probe <server> <tool> --args '{}' --emit-shape <server>.shapes.json
+uvx mcpgen login <server>
 ```
 
 ### Persistent (on PATH)
 
 ```bash
-uv tool install mcp-client-kit   # installs mcp-kit on PATH
-mcp-kit codegen <server> --out <server>.py
+uv tool install mcpgen   # installs mcpgen on PATH
+mcpgen codegen <server> --out <server>.py
 ```
 
 ### Project dependency
 
 ```bash
-uv add mcp-client-kit            # or: pip install mcp-client-kit
+uv add mcpgen            # or: pip install mcpgen
 ```
 
 ### Command reference
@@ -96,15 +95,15 @@ Connection flags shared by `codegen`/`list`/`probe`/`call`/`login`: `--url`,
 Config resolves relative to your **current working directory**. Search order (first match wins):
 
 1. `--config <path>` — explicit override
-2. `$MCP_KIT_SERVERS` env var — path to a JSON file
-3. `~/.mcp-client-kit/servers.json` — user-global fallback
+2. `$MCPGEN_SERVERS` env var — path to a JSON file
+3. `~/.mcpgen/servers.json` — user-global fallback
 4. `./.mcp.json` in cwd — Claude Code format
 
 Copy the bundled template and edit:
 
 ```bash
 cp <kit-root>/servers.example.json .mcp-servers.json
-export MCP_KIT_SERVERS=.mcp-servers.json
+export MCPGEN_SERVERS=.mcp-servers.json
 ```
 
 Both formats are accepted:
@@ -132,7 +131,7 @@ Both formats are accepted:
 **OAuth (most servers):**
 
 ```bash
-mcp-kit login myserver   # opens browser; token stored at ~/.mcp-client-kit/credentials.json
+mcpgen login myserver   # opens browser; token stored at ~/.mcpgen/credentials.json
 ```
 
 Re-run when you see `ReauthenticationRequired`.
@@ -141,7 +140,7 @@ Re-run when you see `ReauthenticationRequired`.
 
 ```bash
 export MYSERVER_TOKEN="pat_..."
-mcp-kit codegen myserver --bearer "$MYSERVER_TOKEN" --out myserver.py
+mcpgen codegen myserver --bearer "$MYSERVER_TOKEN" --out myserver.py
 ```
 
 Never pass a literal token on the command line; always read from an env var.
@@ -149,65 +148,65 @@ Never pass a literal token on the command line; always read from an env var.
 **Local stdio server (no auth):**
 
 ```bash
-mcp-kit codegen myserver --stdio "python path/to/server.py" --out myserver.py
+mcpgen codegen myserver --stdio "python path/to/server.py" --out myserver.py
 ```
 
 **Credential storage backend:**
 
 OAuth tokens are stored via one of three backends, selected (highest priority first)
-by `--cred-backend`, then `$MCP_KIT_CRED_BACKEND`, then `~/.mcp-client-kit/config.json`
+by `--cred-backend`, then `$MCPGEN_CRED_BACKEND`, then `~/.mcpgen/config.json`
 (`{"cred_backend": "..."}`), defaulting to `auto`.
 
 | Backend | Storage |
 |---------|---------|
-| `file` | `~/.mcp-client-kit/credentials.json` (chmod 0600) — works everywhere |
+| `file` | `~/.mcpgen/credentials.json` (chmod 0600) — works everywhere |
 | `keyring` | OS native keystore (Keychain / Credential Locker / Secret Service); falls back to `file` with a warning if the keystore is unavailable |
 | `auto` | Try `keyring`; if keystore is unavailable fall back to `file` silently — no warning (default) |
 
 ```bash
-mcp-kit login myserver --cred-backend keyring
+mcpgen login myserver --cred-backend keyring
 ```
 
 **Validate keyring storage** — confirm the token landed in the OS keystore, not the
-fallback file (service `mcp-client-kit`, username `credentials`):
+fallback file (service `mcpgen`, username `credentials`):
 
 ```bash
-python3 -c "import keyring; print(keyring.get_password('mcp-client-kit', 'credentials'))"
+python3 -c "import keyring; print(keyring.get_password('mcpgen', 'credentials'))"
 ```
 
 If this prints JSON, the keyring backend succeeded.
 If it prints `None` (or errors), the fallback file was used instead — check for a
-`[mcp-client-kit] keyring unavailable` warning in the `mcp-kit login` output.
+`[mcpgen] keyring unavailable` warning in the `mcpgen login` output.
 
 > **macOS note:** `security find-generic-password -w` prints raw binary, not JSON —
 > use the Python command above instead.
 
-**Set keyring as the permanent default** — so every `mcp-kit` invocation uses it
+**Set keyring as the permanent default** — so every `mcpgen` invocation uses it
 without `--cred-backend`:
 
 ```bash
 # Option A: config file (persists across shells)
-echo '{"cred_backend": "keyring"}' > ~/.mcp-client-kit/config.json
+echo '{"cred_backend": "keyring"}' > ~/.mcpgen/config.json
 
 # Option B: env var (add to your shell profile, e.g. ~/.zshrc)
-export MCP_KIT_CRED_BACKEND=keyring
+export MCPGEN_CRED_BACKEND=keyring
 ```
 
-Priority order (highest first): `--cred-backend` flag → `$MCP_KIT_CRED_BACKEND` →
-`~/.mcp-client-kit/config.json` → default (`auto`).
+Priority order (highest first): `--cred-backend` flag → `$MCPGEN_CRED_BACKEND` →
+`~/.mcpgen/config.json` → default (`auto`).
 
 **Migrate credentials between backends** — use `migrate-creds` to move stored OAuth tokens
 from one backend to the other. Both `--from` and `--to` are required and must differ.
 
 ```bash
 # Move all tokens from file → keyring and set keyring as the new default
-mcp-kit migrate-creds --from file --to keyring --set-default
+mcpgen migrate-creds --from file --to keyring --set-default
 
 # Migrate only selected servers (comma-separated)
-mcp-kit migrate-creds --from file --to keyring --servers myserver,otherserver
+mcpgen migrate-creds --from file --to keyring --servers myserver,otherserver
 
 # Move and remove from source after a verified copy
-mcp-kit migrate-creds --from keyring --to file --purge
+mcpgen migrate-creds --from keyring --to file --purge
 ```
 
 Behaviour:
@@ -215,7 +214,7 @@ Behaviour:
 - On collision (server already exists in target), **source wins** — the target entry is overwritten.
 - `--servers A,B,C` filters to those names; any name not found in the source raises an error immediately (before writing).
 - `--purge` deletes only the migrated keys from the source after a successful verified write; non-migrated keys are untouched.
-- `--set-default` writes `{"cred_backend": "<to>"}` into `~/.mcp-client-kit/config.json`, so every subsequent `mcp-kit` invocation uses the new backend without a flag or env var (equivalent to the manual config edit above, but in one step).
+- `--set-default` writes `{"cred_backend": "<to>"}` into `~/.mcpgen/config.json`, so every subsequent `mcpgen` invocation uses the new backend without a flag or env var (equivalent to the manual config edit above, but in one step).
 - Empty source (no tokens stored) is a no-op; exits cleanly with `migrated: 0`.
 
 ---
@@ -226,12 +225,12 @@ Seven steps from invocation to typed wrappers:
 
 | Step | What it does |
 |------|-------------|
-| 1. Mechanical stubs | `mcp-kit codegen <server> --out <server>.py` — all tools, returns `Any` |
+| 1. Mechanical stubs | `mcpgen codegen <server> --out <server>.py` — all tools, returns `Any` |
 | 2. Curate | Pick tools whose payloads you want typed (not all of them) |
-| 3. Probe → skeleton | `mcp-kit probe <server> <tool> --args '...' --emit-shape <server>.shapes.json` — writes a per-tool part under `<server>.shapes.json.parts/` (parallel-safe; many probes can run at once) |
-| 4. Merge | `mcp-kit merge <server> --out <server>.shapes.json` — consolidate the `.parts/` into the committed shape-spec, preserving hand-edits for un-probed tools. Also emits a gitignored `<server>.verify.json` sidecar holding pre-scrub `probed_args` for roundtrip verification. Re-run after partial re-probes. |
+| 3. Probe → skeleton | `mcpgen probe <server> <tool> --args '...' --emit-shape <server>.shapes.json` — writes a per-tool part under `<server>.shapes.json.parts/` (parallel-safe; many probes can run at once) |
+| 4. Merge | `mcpgen merge <server> --out <server>.shapes.json` — consolidate the `.parts/` into the committed shape-spec, preserving hand-edits for un-probed tools. Also emits a gitignored `<server>.verify.json` sidecar holding pre-scrub `probed_args` for roundtrip verification. Re-run after partial re-probes. |
 | 5. Edit shape-spec | Set `unwrap`, `return_model`, `fields`, `input_overrides` — the judgment pass. For tools that return different shapes per input value, use `discriminator` + `variants` instead of a flat `return_model` — see [§ Polymorphic tools](#polymorphic-tools-discriminated-shaping). |
-| 6. Regenerate | `mcp-kit codegen <server> --out <server>.py --shapes <server>.shapes.json` |
+| 6. Regenerate | `mcpgen codegen <server> --out <server>.py --shapes <server>.shapes.json` |
 | 7. Verify | `ast.parse` the module; confirm return types |
 
 Optional step 8: generate a runnable smoke-test — see [§ Smoke-test runner](#smoke-test-runner).
@@ -273,8 +272,8 @@ and pass it when calling any generated function.
 ```python
 import asyncio
 import os
-from mcp_client_kit import McpBridgeCaller
-import github  # generated: mcp-kit codegen github --out github.py --bearer "$GITHUB_TOKEN"
+from mcpgen import McpBridgeCaller
+import github  # generated: mcpgen codegen github --out github.py --bearer "$GITHUB_TOKEN"
 
 async def main():
     # caller carries auth/transport; the wrapper module stays backend-agnostic.
@@ -293,8 +292,8 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from mcp_client_kit import McpBridgeCaller, ensure_login
-import myserver  # generated: mcp-kit codegen myserver --out myserver.py
+from mcpgen import McpBridgeCaller, ensure_login
+import myserver  # generated: mcpgen codegen myserver --out myserver.py
 
 SERVER = "myserver"
 URL = "https://mcp.example.com/mcp/v1"
@@ -320,12 +319,12 @@ How it works:
 - **`ensure_login` is idempotent** — safe to call before every run. When already
   authenticated it returns immediately. When the refresh token itself is expired (or
   absent), it falls back to a full browser login — the in-code equivalent of
-  `mcp-kit login <server>`. Credentials are persisted at
-  `~/.mcp-client-kit/credentials.json`.
+  `mcpgen login <server>`. Credentials are persisted at
+  `~/.mcpgen/credentials.json`.
 - **Lower-level alternative** — skip `ensure_login` and catch
   `ReauthenticationRequired` from the first failing `.call()`, then call
   `login(SERVER, url=URL)` and retry. `ReauthenticationRequired` and `login` are
-  also exported from `mcp_client_kit`.
+  also exported from `mcpgen`.
 
 `McpBridgeCaller` kwargs mirror the CLI connection flags — `url=`, `bearer=` (PAT),
 `cmd=` (stdio), `config_path=`, `client_name=`. One instance is reusable across
@@ -335,7 +334,7 @@ generated module, not into the caller).
 For typing your own caller (e.g. in tests), implement `McpCaller`:
 
 ```python
-from mcp_client_kit import McpCaller
+from mcpgen import McpCaller
 from typing import Any
 
 class FakeCaller:
@@ -426,7 +425,6 @@ union — it never raises.
 | Symptom | Fix |
 |---------|-----|
 | Skill not listed in `/help` | Plugin not installed — run `/plugin marketplace add …` |
-| `ReauthenticationRequired` | Run `mcp-kit login <server>` |
-| `uvx …` fails: `No such command 'mcp-kit'` | Use `uvx --from "mcp-client-kit" mcp-kit …`; the script name differs from the package name |
+| `ReauthenticationRequired` | Run `mcpgen login <server>` |
 | Config not found | Check the search order above; paths resolve from your cwd |
 | Bearer token rejected | Confirm the env var is exported in the current shell |

@@ -95,11 +95,11 @@ layer as a small focused dependency, not a flagship.
    reuse-tolerant tokens; RFC 8414 `token_endpoint` confirmed). However, the
    official `mcp` SDK never reaches its reactive-refresh path at cold start, so
    `_pre_flight_refresh` is **load-bearing** for the SDK client. The seam collapsed
-   to a thin auth-persistence helper in `mcp_client_kit/_bridge.py`. See §Correction below.
+   to a thin auth-persistence helper in `mcpgen/_bridge.py`. See §Correction below.
 2. **Auth for now: defer** *(historical — done; see §Correction).* The extraction and
-   seam swap are complete: auth now lives in `mcp_client_kit/_bridge.py`.
+   seam swap are complete: auth now lives in `mcpgen/_bridge.py`.
 3. **Architectural seam (locked):** generated wrappers MUST NOT import a concrete
-   client — only the `McpCaller` Protocol in `mcp_client_kit/seam.py`. Swap
+   client — only the `McpCaller` Protocol in `mcpgen/seam.py`. Swap
    the backend (`_bridge.py`) without regenerating wrappers. See §Correction for
    the backend choice (official mcp SDK, not FastMCP).
 4. **Migration path:** auth done → prove skill → `--check` drift mode next.
@@ -115,7 +115,7 @@ FastMCP — `fastmcp` is not a dependency. This is the better choice (lighter,
 already required transitively, avoids FastMCP's churn) — recorded here so it is
 not re-litigated:
 
-- **Backend = official `mcp` SDK** in `mcp_client_kit/_bridge.py`: `ClientSession`
+- **Backend = official `mcp` SDK** in `mcpgen/_bridge.py`: `ClientSession`
   + `streamablehttp_client`/`stdio_client` + `OAuthClientProvider` + a hand-rolled
   `FileTokenStorage` (stores absolute `expires_at`) + out-of-band `_pre_flight_refresh`.
 - **FastMCP issue #3425 is irrelevant here** and the code comment that cited it has

@@ -1,10 +1,10 @@
-# mcp-client-kit
+# mcpgen
 
 **Write your MCP server wrappers once — from the live server. Keep them as real Python source you can diff, review, and pin.**
 
-`mcp-client-kit` turns any MCP server into a typed Python module: one `async def` per tool, real return types, no live server needed to read it. Call your tools from code instead of pumping their schemas through the model's context — the pattern Anthropic measured at up to **98% token reduction**.
+`mcpgen` turns any MCP server into a typed Python module: one `async def` per tool, real return types, no live server needed to read it. Call your tools from code instead of pumping their schemas through the model's context — the pattern Anthropic measured at up to **98% token reduction**.
 
-> Two artifacts, one repo: a **CLI** (`mcp-kit`) you run anywhere, and a **Claude Code plugin** (`generate-mcp-wrappers` skill) that drives it for the parts that need judgment.
+> Two artifacts, one repo: a **CLI** (`mcpgen`) you run anywhere, and a **Claude Code plugin** (`generate-mcp-wrappers` skill) that drives it for the parts that need judgment.
 
 ---
 
@@ -22,21 +22,21 @@ Anthropic's validated fix ("Code execution with MCP," Nov 2025): stop routing sc
 
 The catch for Python teams: no good tool generated **standalone, importable, reviewable `.py` wrappers** from a live MCP server. So everyone hand-writes `jira.py`, `github.py`, `slack.py` — slowly, inconsistently, and they silently rot when the server changes.
 
-That's the gap mcp-client-kit fills.
+That's the gap mcpgen fills.
 
 ---
 
 ## What you get
 
 ```bash
-uv tool install mcp-client-kit          # puts `mcp-kit` on your PATH
-mcp-kit login github                    # browser OAuth, tokens persisted
-mcp-kit codegen github --out github.py  # typed wrappers for every tool
+uv tool install mcpgen                  # puts `mcpgen` on your PATH
+mcpgen login github                     # browser OAuth, tokens persisted
+mcpgen codegen github --out github.py   # typed wrappers for every tool
 ```
 
 ```python
 import asyncio
-from mcp_client_kit import McpBridgeCaller
+from mcpgen import McpBridgeCaller
 import github  # the file you just generated
 
 async def main():
@@ -56,7 +56,7 @@ asyncio.run(main())
 
 **Real source you own.** Importable `.py` modules — not `.pyi` stubs (mcp2py), not a runtime proxy, not tied to one execution framework (ipybox). You can diff it, review it, pin it, and read it in your IDE without a server running.
 
-**Types that match reality.** A tool's `inputSchema` describes its *inputs* — it tells you nothing about the *output* shape. mcp-client-kit's `--probe` makes one live call and records the actual response, so your return types reflect what the server really sends. No other generator does this.
+**Types that match reality.** A tool's `inputSchema` describes its *inputs* — it tells you nothing about the *output* shape. mcpgen's `--probe` makes one live call and records the actual response, so your return types reflect what the server really sends. No other generator does this.
 
 **OAuth that survives restarts.** Pre-flight token refresh means a fresh process renews a near-expired token silently from the refresh token — no surprise browser pop-up at cold start. (The official SDK's canonical example is in-memory only; every restart re-authenticates.)
 
@@ -70,9 +70,9 @@ asyncio.run(main())
 
 | Step | Command | What happens |
 |------|---------|--------------|
-| 1. Generate | `mcp-kit codegen <server> --out <server>.py` | One typed `async def` per tool. |
-| 2. Probe (optional) | `mcp-kit probe <server> <tool> --args '{}' --emit-shape <server>.shapes.json` | Records the *real* response shape from a live call. |
-| 3. Regenerate | `mcp-kit codegen <server> --out <server>.py --shapes <server>.shapes.json` | Wrappers now return precise types (`TypedDict`s, unions, lists). |
+| 1. Generate | `mcpgen codegen <server> --out <server>.py` | One typed `async def` per tool. |
+| 2. Probe (optional) | `mcpgen probe <server> <tool> --args '{}' --emit-shape <server>.shapes.json` | Records the *real* response shape from a live call. |
+| 3. Regenerate | `mcpgen codegen <server> --out <server>.py --shapes <server>.shapes.json` | Wrappers now return precise types (`TypedDict`s, unions, lists). |
 
 Polymorphic tools — ones that return different shapes depending on an input (`entityType=1` → `Person`, `=2` → `Position`) — get typed `@overload`s, so your type checker narrows the return at every call site.
 
@@ -85,19 +85,19 @@ The full reference, including the shape-spec format and credential backends, is 
 **CLI on your PATH:**
 
 ```bash
-uv tool install mcp-client-kit
+uv tool install mcpgen
 ```
 
-**One-off, no install** (note: package is `mcp-client-kit`, the script is `mcp-kit`):
+**One-off, no install:**
 
 ```bash
-uvx --from "mcp-client-kit" mcp-kit codegen <server> --out <server>.py
+uvx mcpgen codegen <server> --out <server>.py
 ```
 
 **As a project dependency:**
 
 ```bash
-uv add mcp-client-kit      # or: pip install mcp-client-kit
+uv add mcpgen      # or: pip install mcpgen
 ```
 
 Requires Python 3.11+.
@@ -109,8 +109,8 @@ Requires Python 3.11+.
 The plugin bundles the `generate-mcp-wrappers` skill, which drives the CLI through the 20% that needs judgment — curating which tools matter, probing live responses, and editing the shape-spec — then regenerates and verifies the module.
 
 ```
-/plugin marketplace add svd/mcp-client-kit
-/mcp-client-kit:generate-mcp-wrappers
+/plugin marketplace add svd/mcpgen
+/mcpgen:generate-mcp-wrappers
 ```
 
 A companion skill, `generate-mcp-runner`, writes a standalone smoke-test `run.py` that exercises the generated wrappers end-to-end.
@@ -126,7 +126,7 @@ A companion skill, `generate-mcp-runner`, writes a standalone smoke-test `run.py
 | `probe <server> <tool>` | Live call(s) → response-shape skeleton. |
 | `call <server> <tool> --out <p>` | One live call, raw payload to disk — bootstrap ids or inspect output. |
 | `merge <server>` | Consolidate probe parts into `<server>.shapes.json`. |
-| `login <server>` | Browser OAuth login; tokens stored at `~/.mcp-client-kit/credentials.json`. |
+| `login <server>` | Browser OAuth login; tokens stored at `~/.mcpgen/credentials.json`. |
 | `migrate-creds` | Move stored OAuth tokens between `file` / `keyring` backends. |
 | `discover` | List MCP servers configured in your installed agent hosts. |
 
@@ -137,12 +137,12 @@ Full workflow and flags: [`doc/USAGE.md`](doc/USAGE.md).
 ## Authentication
 
 ```bash
-mcp-kit login <server>                              # OAuth (most servers)
-mcp-kit codegen <server> --bearer "$TOKEN" --out s.py  # PAT / bearer
-mcp-kit codegen <server> --stdio "python server.py" --out s.py  # local stdio, no auth
+mcpgen login <server>                              # OAuth (most servers)
+mcpgen codegen <server> --bearer "$TOKEN" --out s.py  # PAT / bearer
+mcpgen codegen <server> --stdio "python server.py" --out s.py  # local stdio, no auth
 ```
 
-Tokens persist in `~/.mcp-client-kit/credentials.json` (chmod 0600) or your OS keystore via `--cred-backend keyring`. In code, `ensure_login(server, url=...)` refreshes silently and only opens a browser when a real login is required.
+Tokens persist in `~/.mcpgen/credentials.json` (chmod 0600) or your OS keystore via `--cred-backend keyring`. In code, `ensure_login(server, url=...)` refreshes silently and only opens a browser when a real login is required.
 
 ---
 

@@ -1,8 +1,8 @@
-# Running mcp-client-kit locally
+# Running mcpgen locally
 
 How to use the CLI and the bundled skill directly from a local clone — no `uv tool install`
 or PyPI. For server config, auth, and the skill procedure see [USAGE.md](USAGE.md) —
-identical once `mcp-kit` is on PATH.
+identical once `mcpgen` is on PATH.
 
 ---
 
@@ -19,13 +19,13 @@ Once, from the repo root:
 
 ```bash
 uv venv                  # creates .venv (Python ≥3.11 auto-selected)
-uv pip install -e .      # editable install → .venv/bin/mcp-kit
+uv pip install -e .      # editable install → .venv/bin/mcpgen
 ```
 
 Verify:
 
 ```bash
-ls .venv/bin/mcp-kit     # must exist
+ls .venv/bin/mcpgen     # must exist
 ```
 
 `uv sync` is equivalent and reads `uv.lock` for pinned deps.
@@ -42,12 +42,12 @@ KIT=~/src/mcp-client-kit   # adjust to your clone path
 PATH="$KIT/.venv/bin:$PATH" claude --plugin-dir "$KIT"
 ```
 
-- `PATH="$KIT/.venv/bin:$PATH"` — puts `mcp-kit` on PATH for this session. The skill
-  shells out to bare `mcp-kit`; this is the only setup it needs.
+- `PATH="$KIT/.venv/bin:$PATH"` — puts `mcpgen` on PATH for this session. The skill
+  shells out to bare `mcpgen`; this is the only setup it needs.
 - `--plugin-dir "$KIT"` — loads the bundled `skills/generate-mcp-wrappers/SKILL.md` into
   Claude Code. No copy or symlink needed.
 
-The skill is namespaced as `/mcp-client-kit:generate-mcp-wrappers` (pinned via
+The skill is namespaced as `/mcpgen:generate-mcp-wrappers` (pinned via
 `.claude-plugin/plugin.json`). Run `/help` to confirm it's listed.
 
 ### Shell alias
@@ -69,8 +69,8 @@ PATH_add "$KIT/.venv/bin"
 
 | Symptom | Fix |
 |---------|-----|
-| `mcp-kit: command not found` | PATH prefix not set or wrong clone path — check `which mcp-kit` |
+| `mcpgen: command not found` | PATH prefix not set or wrong clone path — check `which mcpgen` |
 | Skill not listed in `/help` | Wrong `--plugin-dir` — confirm `ls "$KIT/skills/generate-mcp-wrappers/SKILL.md"` |
-| `python -m mcp_client_kit` fails | No `__main__.py` in the package; use `python -m mcp_client_kit.cli` |
+| `python -m mcpgen` fails | No `__main__.py` in the package; use `python -m mcpgen.cli` |
 
 For auth and config issues see [USAGE.md § Troubleshooting](USAGE.md#troubleshooting).
