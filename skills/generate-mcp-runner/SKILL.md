@@ -85,8 +85,11 @@ Find for `<server>`:
   fall back to scrubbed `shapes.json.probed_args`, then to schema-minimal args derived
   from the wrapper signature. Note the degradation in a comment inside `run.py`.
 
-Also determine transport and auth kind from context (how the wrappers were generated, any
-`servers.json` entry, or the user's original `codegen` invocation).
+First resolve any parameters the caller passed in — server name, output dir, connection
+source (config path or direct transport params), and transport+auth kind. Any caller (the
+user, `generate-mcp-wrappers` step 7, or another skill/agent) may hand these off. For
+whatever was not passed, determine it from context (how the wrappers were generated, any
+`servers.json` entry, or the original `codegen` invocation).
 
 ### 2. Enumerate tools
 

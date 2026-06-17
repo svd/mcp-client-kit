@@ -423,10 +423,24 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    > **Subagent fallback (when `AskUserQuestion` is unavailable):** skip this step entirely
    > — do not invoke `generate-mcp-runner` automatically.
 
-   If the user says yes, invoke `generate-mcp-runner`. That skill reads the module,
-   `shapes.json`, and `verify.json` you just produced and authors a workflow-ordered,
-   shape-aware smoke test in one step. See `skills/generate-mcp-runner/SKILL.md` for the
-   full procedure. This step is a pointer only — do not duplicate the runner procedure here.
+   If the user says yes, invoke `/generate-mcp-runner`. Pass the following details so the
+   runner skill does not need to re-derive them:
+
+   - **Server name** — `<server>` (the name used throughout this skill)
+   - **Output folder** — the dir from `--out` (e.g. `<server>/`), which holds `<server>.py`,
+     `<server>.shapes.json`, and `<server>.verify.json`
+   - **Connection source** — exactly how step 1 reached the server:
+     - config file: the `servers.json` path used via `MCPGEN_SERVERS=` / `--config`; **or**
+     - direct params: `--stdio "<launch>"`, `--url "<url>"` (+ `--bearer "$ENV_VAR"` if applicable)
+   - **Transport + auth kind** — the `(transport, auth_kind)` tuple, e.g. `(http, oauth)`,
+     `(stdio, none)`, `(http, bearer)` — used by the runner to pick the right connection skeleton
+
+   Example: *"generate runner for `acme`, output dir `acme/`, reached via
+   `MCPGEN_SERVERS=servers.json` (http, oauth)"*
+
+   That skill reads the module, `shapes.json`, and `verify.json` you produced and authors a
+   workflow-ordered, shape-aware smoke test in one step. See `skills/generate-mcp-runner/SKILL.md`
+   for the full procedure. This step is a pointer only — do not duplicate the runner procedure here.
 
 ## Guards (do not violate)
 
