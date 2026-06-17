@@ -210,12 +210,16 @@ _client_names_cache: dict[str, str] = {}
 # (str), "args" (list[str]), and "env" (dict[str, str] | None). Populated alongside
 # _servers_cache by servers() from config entries that have "command" but no "url".
 _stdio_cache: dict[str, dict] = {}
+# Static HTTP headers keyed by server name. Populated alongside _servers_cache by
+# servers() from config entries that have both "url" and "headers". Values in "headers"
+# have ``${VAR}`` references expanded at parse time (same as stdio "env").
+_headers_cache: dict[str, dict[str, str]] = {}
 
 
 def _parse_servers(
     raw: dict,
-) -> tuple[dict[str, str], dict[str, str], dict[str, dict]]:
-    """Parse config into ({name: url}, {name: client_name}, {name: stdio_spec}).
+) -> tuple[dict[str, str], dict[str, str], dict[str, dict], dict[str, dict[str, str]]]:
+    """Parse config into ({name: url}, {name: client_name}, {name: stdio_spec}, {name: headers}).
 
     Accept {"name": "url"} or Claude Code {"mcpServers": {"name": {"url": ...}}}.
     The dict form may carry an optional "clientName" (or "client_name" alias) that
@@ -226,11 +230,16 @@ def _parse_servers(
     "env" (dict[str, str] | None).  Values in "env" have ``${VAR}`` references
     expanded against the host environment so secrets stored as env-var references
     resolve at parse time.
+
+    HTTP entries with a "headers" dict have those headers collected in the fourth
+    return dict with ``${VAR}`` references expanded, enabling static header auth
+    (e.g. ``Authorization: Bearer ${GITHUB_PAT}``) without ``--bearer``.
     """
     block = raw.get("mcpServers", raw)
     urls: dict[str, str] = {}
     names: dict[str, str] = {}
     cmds: dict[str, dict] = {}
+    hdrs: dict[str, dict[str, str]] = {}
     for name, val in block.items():
         if isinstance(val, str):
             urls[name] = val
@@ -239,6 +248,15 @@ def _parse_servers(
             override = val.get("clientName") or val.get("client_name")
             if override:
                 names[name] = override
+            raw_headers = val.get("headers") or {}
+            if isinstance(raw_headers, dict):
+                filtered_h = {
+                    str(k): str(v)
+                    for k, v in raw_headers.items()
+                    if isinstance(v, (str, int, float)) and not isinstance(v, bool)
+                }
+                if filtered_h:
+                    hdrs[name] = {k: os.path.expandvars(v) for k, v in filtered_h.items()}
         elif isinstance(val, dict) and val.get("command"):
             raw_args = val.get("args") or []
             args = [str(a) for a in raw_args] if isinstance(raw_args, list) else []
@@ -253,35 +271,45 @@ def _parse_servers(
                 if filtered:
                     env = {k: os.path.expandvars(v) for k, v in filtered.items()}
             cmds[name] = {"command": str(val["command"]), "args": args, "env": env}
-    return urls, names, cmds
+    return urls, names, cmds, hdrs
 
 
 def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> dict[str, str]:
     """Return the {name: url} registry loaded from user config (cached).
 
     config_path: if given, read that file exclusively (authoritative — no env or
-    search-order fallback) and always fresh, bypassing the cache.
+    search-order fallback) and always fresh, bypassing the cache.  A missing or
+    unparseable explicit config raises rather than silently returning an empty dict.
     """
-    global _servers_cache, _client_names_cache, _stdio_cache
+    global _servers_cache, _client_names_cache, _stdio_cache, _headers_cache
     if config_path is None and _servers_cache is not None and not refresh:
         return _servers_cache
-    candidates: list[Path] = []
     if config_path is not None:
-        candidates.append(Path(config_path))
-    else:
-        if os.environ.get(_SERVERS_CONFIG_ENV):
-            candidates.append(Path(os.environ[_SERVERS_CONFIG_ENV]))
-        candidates += _SERVERS_SEARCH
+        # Authoritative path — fail fast, no search-order fallback.
+        path = Path(config_path)
+        if not path.exists():
+            raise FileNotFoundError(f"config not found: {config_path}")
+        try:
+            _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = (
+                _parse_servers(json.loads(path.read_text()))
+            )
+        except (json.JSONDecodeError, OSError, AttributeError) as e:
+            raise ValueError(f"failed to parse config {path}: {e}") from e
+        return _servers_cache
+    candidates: list[Path] = []
+    if os.environ.get(_SERVERS_CONFIG_ENV):
+        candidates.append(Path(os.environ[_SERVERS_CONFIG_ENV]))
+    candidates += _SERVERS_SEARCH
     for path in candidates:
         if path.exists():
             try:
-                _servers_cache, _client_names_cache, _stdio_cache = _parse_servers(
-                    json.loads(path.read_text())
+                _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = (
+                    _parse_servers(json.loads(path.read_text()))
                 )
                 return _servers_cache
             except (json.JSONDecodeError, OSError, AttributeError):
                 continue
-    _servers_cache, _client_names_cache, _stdio_cache = {}, {}, {}
+    _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = {}, {}, {}, {}
     return _servers_cache
 
 
@@ -816,6 +844,18 @@ async def _bearer_session(url: str, bearer: str):
 
 
 @asynccontextmanager
+async def _static_headers_session(url: str, headers: dict[str, str]):
+    """HTTP MCP session with arbitrary static headers (e.g. from a config ``headers`` block).
+
+    Bypasses OAuth entirely.  Supports any header, not just Authorization.
+    """
+    async with _open_http(url, headers=headers) as (read, write, _):
+        async with ClientSession(read, write) as s:
+            await s.initialize()
+            yield s
+
+
+@asynccontextmanager
 async def session(
     server: str,
     *,
@@ -860,9 +900,17 @@ async def session(
         target = resolved_url or server
         async with _bearer_session(target, bearer) as s:
             yield s
+    elif resolved_url is not None and _headers_cache.get(server):
+        # Config-supplied static headers (e.g. Authorization: Bearer ${PAT}) — bypass OAuth.
+        async with _static_headers_session(resolved_url, _headers_cache[server]) as s:
+            yield s
     elif resolved_url is not None:
         async with _http_session(server, resolved_url, client_name=client_name, cred_backend=cred_backend) as s:
             yield s
+    elif not server.startswith(("http://", "https://")):
+        raise ValueError(
+            f"server {server!r} not found in config and is not a URL"
+        )
     else:
         # Raw URL, no auth
         async with _open_http(server) as (read, write, _):

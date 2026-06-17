@@ -343,7 +343,11 @@ def _cmd_call(ns: argparse.Namespace) -> int:
                 cred_backend=ns.cred_backend, env=_parse_env(ns))
 
     print(f"[call] {ns.server}.{ns.tool} (live) …", file=sys.stderr)
-    raw = asyncio.run(_call(ns.server, ns.tool, args, cmd=cmd, **conn))
+    try:
+        raw = asyncio.run(_call(ns.server, ns.tool, args, cmd=cmd, **conn))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[call] error: {exc}", file=sys.stderr)
+        return 1
 
     text = raw if isinstance(raw, str) else json.dumps(raw, indent=2)
     out = Path(ns.out)

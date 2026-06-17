@@ -11,7 +11,7 @@ def _write(tmp_path, raw: dict):
 
 
 def test_parse_servers_client_name_canonical():
-    urls, names, cmds = _bridge._parse_servers(
+    urls, names, cmds, hdrs = _bridge._parse_servers(
         {"mcpServers": {"s": {"url": "https://x/mcp", "clientName": "My App"}}}
     )
     assert urls == {"s": "https://x/mcp"}
@@ -20,21 +20,21 @@ def test_parse_servers_client_name_canonical():
 
 
 def test_parse_servers_client_name_snake_alias():
-    _, names, _ = _bridge._parse_servers(
+    _, names, _, _ = _bridge._parse_servers(
         {"mcpServers": {"s": {"url": "https://x/mcp", "client_name": "Snake App"}}}
     )
     assert names == {"s": "Snake App"}
 
 
 def test_parse_servers_no_override_absent():
-    urls, names, cmds = _bridge._parse_servers({"mcpServers": {"s": {"url": "https://x/mcp"}}})
+    urls, names, cmds, hdrs = _bridge._parse_servers({"mcpServers": {"s": {"url": "https://x/mcp"}}})
     assert urls == {"s": "https://x/mcp"}
     assert names == {}
     assert cmds == {}
 
 
 def test_parse_servers_flat_string_form():
-    urls, names, cmds = _bridge._parse_servers({"s": "https://x/mcp"})
+    urls, names, cmds, hdrs = _bridge._parse_servers({"s": "https://x/mcp"})
     assert urls == {"s": "https://x/mcp"}
     assert names == {}
     assert cmds == {}
@@ -42,7 +42,7 @@ def test_parse_servers_flat_string_form():
 
 def test_parse_servers_stdio_entry():
     """Stdio entry (command/args, no url) lands in cmds, not urls."""
-    urls, names, cmds = _bridge._parse_servers(
+    urls, names, cmds, hdrs = _bridge._parse_servers(
         {"mcpServers": {"context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]}}}
     )
     assert "context7" not in urls
@@ -56,7 +56,7 @@ def test_parse_servers_stdio_entry():
 def test_parse_servers_stdio_env_expansion(monkeypatch):
     """env values with ${VAR} references are expanded against the host environment."""
     monkeypatch.setenv("TEST_ACCESS_TOK", "secret-abc")
-    _, _, cmds = _bridge._parse_servers(
+    _, _, cmds, _ = _bridge._parse_servers(
         {"mcpServers": {"srv": {
             "command": "uvx",
             "args": ["my-mcp"],
@@ -68,7 +68,7 @@ def test_parse_servers_stdio_env_expansion(monkeypatch):
 
 def test_parse_servers_mixed_http_and_stdio():
     """Config with both http and stdio entries — each lands in the right dict."""
-    urls, _, cmds = _bridge._parse_servers({"mcpServers": {
+    urls, _, cmds, _ = _bridge._parse_servers({"mcpServers": {
         "deepwiki": {"url": "https://mcp.deepwiki.com/mcp"},
         "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]},
     }})
@@ -105,3 +105,40 @@ def test_servers_config_path_is_authoritative(tmp_path):
     # A config_path with no entries yields an empty registry (no search-order fallback).
     cfg = _write(tmp_path, {"mcpServers": {}})
     assert _bridge.servers(config_path=cfg) == {}
+
+
+def test_servers_missing_config_path_raises(tmp_path):
+    """Explicit config_path that does not exist raises FileNotFoundError (Defect A fix)."""
+    import pytest
+    missing = str(tmp_path / "does-not-exist.json")
+    with pytest.raises(FileNotFoundError, match="config not found"):
+        _bridge.servers(config_path=missing)
+
+
+def test_servers_unparseable_config_path_raises(tmp_path):
+    """Explicit config_path with invalid JSON raises ValueError naming the path."""
+    import pytest
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not valid json")
+    with pytest.raises(ValueError, match="failed to parse config"):
+        _bridge.servers(config_path=str(bad))
+
+
+def test_parse_servers_headers_expansion(monkeypatch):
+    """headers block in dict-with-url entry is captured and ${VAR} refs expanded."""
+    monkeypatch.setenv("TEST_PAT", "ghp_abc123")
+    _, _, _, hdrs = _bridge._parse_servers(
+        {"mcpServers": {"github": {
+            "url": "https://api.github.com/mcp",
+            "headers": {"Authorization": "Bearer ${TEST_PAT}"},
+        }}}
+    )
+    assert hdrs == {"github": {"Authorization": "Bearer ghp_abc123"}}
+
+
+def test_parse_servers_no_headers_absent():
+    """HTTP entry without headers yields empty hdrs dict."""
+    _, _, _, hdrs = _bridge._parse_servers(
+        {"mcpServers": {"plain": {"url": "https://x/mcp"}}}
+    )
+    assert hdrs == {}
