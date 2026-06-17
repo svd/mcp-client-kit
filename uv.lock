@@ -417,7 +417,7 @@ cli = [
 ]
 
 [[package]]
-name = "mcp-client-kit"
+name = "mcpgen"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

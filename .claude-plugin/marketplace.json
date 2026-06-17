@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
-  "name": "mcp-client-kit",
+  "name": "mcpgen",
   "version": "0.1.0",
   "description": "Generate typed Python wrappers for any MCP server.",
   "owner": {
@@ -9,7 +9,7 @@
   },
   "plugins": [
     {
-      "name": "mcp-client-kit",
+      "name": "mcpgen",
       "displayName": "MCP Client Kit",
       "source": "./",
       "version": "0.1.0",
