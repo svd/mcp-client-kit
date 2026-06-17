@@ -1,11 +1,11 @@
 ---
 name: generate-mcp-wrappers
-description: Use when generating typed Python wrappers for an MCP server. Drives `mcp-kit` to emit mechanical stubs, then applies live-probe findings (vendor-envelope unwrap, schema-lied types, nullability) via a shape-spec sidecar so the generated wrappers return typed records instead of opaque `Any`.
+description: Use when generating typed Python wrappers for an MCP server. Drives `mcpgen` to emit mechanical stubs, then applies live-probe findings (vendor-envelope unwrap, schema-lied types, nullability) via a shape-spec sidecar so the generated wrappers return typed records instead of opaque `Any`.
 ---
 
 # Generate typed MCP wrappers (the judgment pass)
 
-`mcp-kit codegen` does the deterministic 80%: `tools/list` → one typed `async def`
+`mcpgen codegen` does the deterministic 80%: `tools/list` → one typed `async def`
 per tool against the `McpCaller` seam. It returns `Any` and is blind to vendor
 response envelopes. **This skill is the 20% judgment that an LLM must do:** probe a
 real call, read the actual response, and record what the input schema couldn't tell
@@ -18,7 +18,7 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
 A single driver thread works for servers with ≤ ~4 selected tools. For larger servers,
 dispatch subagents to keep big payloads out of main context and parallelize network
 round-trips. The parts-based probe infrastructure (`_atomic_write_text`,
-`<shapes>.parts/<tool>.json`, `mcp-kit merge`) was built for concurrent writers — the
+`<shapes>.parts/<tool>.json`, `mcpgen merge`) was built for concurrent writers — the
 execution model below uses it.
 
 **Hard constraint:** subagents cannot call `AskUserQuestion`. That line divides main
@@ -63,25 +63,25 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
 1. **Mechanical stubs.**
 
-   `mcp-kit` resolves a server **by name** from a config file — pointed to by the
-   `MCP_KIT_SERVERS` env var or the `--config` flag. This is the primary form: the bare
+   `mcpgen` resolves a server **by name** from a config file — pointed to by the
+   `MCPGEN_SERVERS` env var or the `--config` flag. This is the primary form: the bare
    `<server>` name maps to its transport and forwards the server's `env` block (API keys,
-   etc.) to the launched process. `MCP_KIT_SERVERS` must prefix the command in the **same
+   etc.) to the launched process. `MCPGEN_SERVERS` must prefix the command in the **same
    shell invocation** — it does not persist across calls.
    ```bash
-   MCP_KIT_SERVERS=servers.json mcp-kit codegen <server> --out <server>/<server>.py
+   MCPGEN_SERVERS=servers.json mcpgen codegen <server> --out <server>/<server>.py
    ```
 
    **Alternative — pass transport values directly, without a config file:**
    ```bash
    # stdio (pass the full launch command):
-   mcp-kit codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py
+   mcpgen codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py
 
    # HTTP no-auth:
-   mcp-kit codegen <server> --url "https://mcp.example.com/mcp" --out <server>/<server>.py
+   mcpgen codegen <server> --url "https://mcp.example.com/mcp" --out <server>/<server>.py
 
    # HTTP Bearer:
-   mcp-kit codegen <server> --url "https://api.example.com/mcp/" --bearer "$MY_TOKEN" --out <server>/<server>.py
+   mcpgen codegen <server> --url "https://api.example.com/mcp/" --bearer "$MY_TOKEN" --out <server>/<server>.py
    ```
    `codegen`, `list`, `probe`, and `call` each require the same transport flags
    (`--stdio` / `--url` / `--bearer` / `--config`) on every invocation — they do **not**
@@ -91,7 +91,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
 2. **Select tools to probe (interactive gate).**
 
-   a. Run `mcp-kit list <server>` → get `[{name, description}]` for every tool.
+   a. Run `mcpgen list <server>` → get `[{name, description}]` for every tool.
       **Probe only tools that appear in this output.** Do not add tools from
       system-prompt context, documentation, or prior knowledge.
 
@@ -136,7 +136,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
    The selected set (from any path) drives steps 3 and 4.
 
-   g. **Detect discriminators.** The `mcp-kit list` output includes a stderr
+   g. **Detect discriminators.** The `mcpgen list` output includes a stderr
       advisory when params are shared across ≥2 tools:
       ```
       [list] ⚠  discriminator candidates (response shape varies by these args):
@@ -170,7 +170,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    > **Dispatch (>4 selected tools):** Before probing, dispatch a **recon subagent** to
    > obtain bootstrap ids and discriminator enum values. The recon agent calls whatever
    > no-arg / discovery / listing tools *this specific server* exposes (infer them from
-   > the `mcp-kit list` output for this server — no tool name is universal). If no such
+   > the `mcpgen list` output for this server — no tool name is universal). If no such
    > tool exists, the agent reports that and main falls back to `AskUserQuestion` for
    > sample ids. The agent returns a compact catalog (ids + enum values) — never a raw
    > payload — so main can fully specify each batch agent's task before dispatch.
@@ -178,10 +178,10 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    > Then group selected tools into batches (batching rule: sibling sets together; see
    > Execution model above) and dispatch each batch as a parallel subagent. Each agent
    > both probes and drafts its step-4 shape entries (rich agent contract above). Run
-   > `mcp-kit merge` (step 3b) once all batch agents finish.
+   > `mcpgen merge` (step 3b) once all batch agents finish.
 
    First, establish `<shapes-path>` — the consolidated shapes sidecar.  It must sit
-   **beside the generated module** so `mcp-kit codegen` auto-detects it:
+   **beside the generated module** so `mcpgen codegen` auto-detects it:
    - CWD output (default): `<shapes-path>` = `<server>.shapes.json`
    - Subfolder output (e.g. `github/github.py`): `<shapes-path>` = `github/github.shapes.json`
 
@@ -194,10 +194,10 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    # so concurrent probe processes cannot clobber each other.
 
    # single probe
-   mcp-kit probe <server> <tool> --args '<sample json>' --emit-shape <shapes-path>
+   mcpgen probe <server> <tool> --args '<sample json>' --emit-shape <shapes-path>
 
    # multi-probe: repeat --args for each input; shapes are deep-merged within one probe
-   mcp-kit probe <server> <tool> \
+   mcpgen probe <server> <tool> \
      --args '{"entityId":"<id1>","entityType":1}' \
      --args '{"entityId":"<id2>","entityType":1}' \
      --emit-shape <shapes-path>
@@ -282,14 +282,14 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    empty list (`[]`), the inner element shape is unobservable. Do not fabricate a schema
    from zero samples — leave the field typed as `list`. Note in `session-overview.md`
    that the inner model is unobservable at probe time, and recommend re-running
-   `mcp-kit probe` after seeding the server with representative data (e.g. via
-   `mcp-kit call <mutating-tool>`) to capture inner field shapes.
+   `mcpgen probe` after seeding the server with representative data (e.g. via
+   `mcpgen call <mutating-tool>`) to capture inner field shapes.
 
    Sample args may need bootstrapping (e.g. a real id before probing `get_entity`).
    Find a no-arg / discovery tool on *this* server that returns user or entity ids (there
-   is no universal tool for this — infer from `mcp-kit list` output). Call it via
-   `mcp-kit call <server> <discovery-tool> --out <server>.probe-raw.json` to capture the
-   **raw** payload, then read the ids from that file. `mcp-kit probe` emits only the
+   is no universal tool for this — infer from `mcpgen list` output). Call it via
+   `mcpgen call <server> <discovery-tool> --out <server>.probe-raw.json` to capture the
+   **raw** payload, then read the ids from that file. `mcpgen probe` emits only the
    response *shape* (no values) and cannot supply ids. (When dispatching subagents use
    the recon agent instead — see Execution model above.)
 
@@ -297,7 +297,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    PII.** With multi-probe this is a *list* of arg-dicts. Batch agents write parts with
    **raw** `probed_args` — the `.parts/` directory is gitignored, so raw args never enter
    version control at this stage. The single scrub pass runs post-merge on the main thread
-   (step 4): open `shapes.json` and replace PII after `mcp-kit merge` has written both the
+   (step 4): open `shapes.json` and replace PII after `mcpgen merge` has written both the
    shapes file and its gitignored `<server>.verify.json` sidecar. A real identifier in a
    version-controlled file is a leak that survives deletion (git history) and travels to
    anyone the repo reaches.
@@ -323,7 +323,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
 3b. **Consolidate parts → shapes.json.**
    ```
-   mcp-kit merge <server> --out <shapes-path>
+   mcpgen merge <server> --out <shapes-path>
    ```
    **`--out <shapes-path>` is required when `<shapes-path>` is not in CWD** (e.g. a
    subfolder).  It must exactly match the `--emit-shape` value from step 3 — this is
@@ -336,7 +336,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      preserved (hand edits survive across partial re-probes).
    - Parts for re-probed tools overwrite the corresponding base entry.
    - Use `--keep-parts` to retain the parts directory for inspection.
-   - `mcp-kit codegen` will also read parts directly (in-memory merge) if the merged file
+   - `mcpgen codegen` will also read parts directly (in-memory merge) if the merged file
      is absent, so you can skip 3b during rapid iteration — but run it before committing
      so the repo contains a single, hand-editable artifact.
    - Also emits a gitignored `<server>.verify.json` beside `<shapes-path>` — a flat
@@ -397,7 +397,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
 5. **Regenerate.** (same transport flags as step 1)
    ```bash
-   mcp-kit codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py --shapes <server>/<server>.shapes.json
+   mcpgen codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py --shapes <server>/<server>.shapes.json
    # or: --url / --bearer for HTTP servers
    ```
    (`<server>.shapes.json` sitting beside `--out` is auto-detected; `--shapes` is the
@@ -430,11 +430,11 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
 ## Guards (do not violate)
 
-- **Only mcp-kit talks to the server.** Every live interaction — `list`, `probe`,
-  `call`, bootstrap, inspect — goes through `mcp-kit`. Never shell out to `curl`, `gh`,
-  `httpie`, or raw `python` HTTP. mcp-kit owns auth (browser OAuth + silent token
+- **Only mcpgen talks to the server.** Every live interaction — `list`, `probe`,
+  `call`, bootstrap, inspect — goes through `mcpgen`. Never shell out to `curl`, `gh`,
+  `httpie`, or raw `python` HTTP. mcpgen owns auth (browser OAuth + silent token
   refresh); any other client is unauthenticated, leaks the bearer token, or both.
-  Need a raw payload? That's `mcp-kit call … --out *.probe-raw.json` (git-ignored).
+  Need a raw payload? That's `mcpgen call … --out *.probe-raw.json` (git-ignored).
 
 - **Probing is a live call — mutating tools mutate.** The default selects every
   tool, but probing a `create`/`update`/`delete`/`send` (etc.) tool executes it for

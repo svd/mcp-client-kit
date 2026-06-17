@@ -26,7 +26,7 @@ Artifacts already produced by `generate-mcp-wrappers` for `<server>` output dir 
 | Wrapper module | `<server>/<server>.py` | function names, signatures (`async def <tool>(caller, *, <kwargs>) -> <Model\|Any>`), return annotations, module-level `SERVER` |
 | Shape-spec | `<server>/<server>.shapes.json` | `return_model`, `return_container`, `discriminator`+`variants`, `fields`, `probed_args` (scrubbed) |
 | Verify sidecar | `<server>/<server>.verify.json` | **gold source**: real pre-scrub `probed_args`, gitignored, present locally |
-| Server descriptions | `mcp-kit list <server>` | tool purpose, workflow ordering |
+| Server descriptions | `mcpgen list <server>` | tool purpose, workflow ordering |
 
 ## Connection skeleton selection
 
@@ -40,20 +40,20 @@ Select the skeleton from `runner_templates/` based on how the wrappers were gene
 | `http`/`sse` | oauth | `http_oauth.py` | `await ensure_login(SERVER_NAME)` + `McpBridgeCaller(url=SERVER_URL)` |
 
 **Alternative OAuth pattern (registry-configured servers):** When the server is registered
-in `~/.mcp-client-kit/servers.json` (i.e. the original codegen used `--config`), prefer the
+in `~/.mcpgen/servers.json` (i.e. the original codegen used `--config`), prefer the
 simpler form used in hand-authored runners:
 
 ```python
 from pathlib import Path
-CONFIG_PATH = Path.home() / ".mcp-client-kit" / "servers.json"
+CONFIG_PATH = Path.home() / ".mcpgen" / "servers.json"
 caller = McpBridgeCaller(config_path=CONFIG_PATH)
 ```
 
 No `ensure_login` call is needed — `McpBridgeCaller` resolves auth from `servers.json` and
 the credentials cache. Use this pattern when you can confirm the server appears in that file.
 
-The credentials cache backend (`file` or `keyring`) is selected by `$MCP_KIT_CRED_BACKEND`
-or `~/.mcp-client-kit/config.json` (`{"cred_backend": "..."}`) — both the runner and the
+The credentials cache backend (`file` or `keyring`) is selected by `$MCPGEN_CRED_BACKEND`
+or `~/.mcpgen/config.json` (`{"cred_backend": "..."}`) — both the runner and the
 `ensure_login` path read from whichever backend the environment/config selects.
 
 The `(transport, auth_kind)` mapping (mirrors `runner_gen.py:_TEMPLATE_KEYS`):
@@ -97,7 +97,7 @@ Read every `async def` signature from `<server>/<server>.py`. For each tool coll
 
 Cross-check tool descriptions by running:
 ```bash
-mcp-kit list <server>
+mcpgen list <server>
 ```
 This gives the human-readable description for each tool — you need these to decide workflow
 ordering and to identify which calls make sense together.
@@ -144,7 +144,7 @@ were not probed.
 
 ### 5. Order calls into a workflow
 
-Use tool descriptions from `mcp-kit list` to establish a sensible execution order. General
+Use tool descriptions from `mcpgen list` to establish a sensible execution order. General
 pattern:
 
 ```
@@ -262,6 +262,6 @@ args, and ordering — do not ask for permission to apply them. Examples:
   type changes per variant.
 - **Keep the connection skeleton header verbatim** — it encodes proven auth/transport wiring.
   Only replace the placeholder block (`$demo_calls` region and the `$`-variables).
-- **`run.py` must import the generated module**, not `mcp_client_kit` directly for tool calls.
+- **`run.py` must import the generated module**, not `mcpgen` directly for tool calls.
   The `await module.<fn>(caller, ...)` form is the only supported call site; never call
   `caller.call(SERVER, "raw-tool-name", {...})` from `run.py`.
