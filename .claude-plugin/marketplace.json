@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "mcpgen",
-      "displayName": "MCP Client Kit",
+      "displayName": "mcpgen",
       "source": "./",
       "version": "0.1.0",
       "description": "Generate typed Python wrappers for any MCP server (skill: generate-mcp-wrappers).",

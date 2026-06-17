@@ -17,8 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import $module_name
 
-from mcpgen import McpBridgeCaller
-from mcpgen._bridge import ensure_login
+from mcpgen import McpBridgeCaller, ensure_login
 
 SERVER_URL = "$launch"
 SERVER_NAME = "$server_name"
