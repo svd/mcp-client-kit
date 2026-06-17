@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import $module_name
 
-from mcp_client_kit import McpBridgeCaller
+from mcpgen import McpBridgeCaller
 
 
 async def main() -> None:

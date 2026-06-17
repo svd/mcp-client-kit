@@ -1,11 +1,11 @@
 """
 Smoke-test runner for generated $server_name/ wrappers.
 Transport: HTTP/SSE  ($launch)
-Auth: OAuth (browser flow via mcp-kit)
+Auth: OAuth (browser flow via mcpgen)
 
 Usage:
     # First time: authenticate
-    mcp-kit login $server_name
+    mcpgen login $server_name
 
     # Then run:
     python $server_name/run.py
@@ -17,8 +17,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import $module_name
 
-from mcp_client_kit import McpBridgeCaller
-from mcp_client_kit._bridge import ensure_login
+from mcpgen import McpBridgeCaller
+from mcpgen._bridge import ensure_login
 
 SERVER_URL = "$launch"
 SERVER_NAME = "$server_name"
