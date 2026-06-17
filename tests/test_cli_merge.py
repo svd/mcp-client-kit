@@ -1,5 +1,5 @@
 """Tests for per-tool shapes-part writing, atomic helper, merge_skeletons, and
-the `mcp-kit merge` subcommand.
+the `mcpgen merge` subcommand.
 
 These tests are network-free: _probe is stubbed wherever the probe path is
 exercised.  The concurrency test verifies that parallel writes of *distinct*
@@ -16,8 +16,8 @@ from unittest.mock import patch
 
 import pytest
 
-from mcp_client_kit import codegen
-from mcp_client_kit.cli import (
+from mcpgen import codegen
+from mcpgen.cli import (
     _atomic_write_text,
     _cmd_merge,
     _load_shapes,
@@ -100,7 +100,7 @@ def test_parts_dir_name():
 
 def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
     """Probe with --emit-shape writes a per-tool part, NOT the shared target."""
-    from mcp_client_kit.cli import main
+    from mcpgen.cli import main
 
     target = tmp_path / "acme.shapes.json"
     ns_tool = "get_entity"
@@ -109,13 +109,13 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
     fake_shape = {"id": "str", "name": "str"}
     import asyncio
     monkeypatch.setattr(
-        "mcp_client_kit.cli._probe",
+        "mcpgen.cli._probe",
         lambda *a, **kw: asyncio.coroutine(lambda: fake_shape)(),
     )
     # Also patch asyncio.run to call the coroutine synchronously.
     monkeypatch.setattr("asyncio.run", lambda coro: fake_shape)
 
-    from mcp_client_kit.cli import _cmd_probe
+    from mcpgen.cli import _cmd_probe
     ns = SimpleNamespace(
         server="acme",
         tool=ns_tool,
@@ -128,7 +128,7 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
         config=None,
         cred_backend=None,
     )
-    with patch("mcp_client_kit.cli._probe", return_value=fake_shape), \
+    with patch("mcpgen.cli._probe", return_value=fake_shape), \
          patch("asyncio.run", return_value=fake_shape):
         _cmd_probe(ns)
 
@@ -146,7 +146,7 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
 def test_probe_url_quotes_tool_name(tmp_path):
     """Tool names with / or : are percent-encoded, not interpreted as paths."""
     from urllib.parse import quote as q
-    from mcp_client_kit.cli import _parts_dir, _atomic_write_text
+    from mcpgen.cli import _parts_dir, _atomic_write_text
 
     target = tmp_path / "srv.shapes.json"
     tool = "ns/get:entity"  # hypothetical, has /

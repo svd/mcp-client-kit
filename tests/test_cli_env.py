@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mcp_client_kit.cli import _parse_env
+from mcpgen.cli import _parse_env
 
 
 # ---------------------------------------------------------------------------
@@ -104,11 +104,11 @@ def test_session_stdio_flag_passes_env():
     fake_cm = contextlib.asynccontextmanager(_fake_stdio_session)
 
     import asyncio
-    from mcp_client_kit._bridge import session
+    from mcpgen._bridge import session
 
     env_in = {"CONTEXT7_API_KEY": "testkey"}
 
-    with patch("mcp_client_kit._bridge._stdio_session", side_effect=fake_cm):
+    with patch("mcpgen._bridge._stdio_session", side_effect=fake_cm):
         async def _run():
             async with session("dummy", cmd="echo hello", env=env_in) as s:
                 pass
@@ -132,9 +132,9 @@ def test_session_no_env_passes_none():
     fake_cm = contextlib.asynccontextmanager(_fake_stdio_session)
 
     import asyncio
-    from mcp_client_kit._bridge import session
+    from mcpgen._bridge import session
 
-    with patch("mcp_client_kit._bridge._stdio_session", side_effect=fake_cm):
+    with patch("mcpgen._bridge._stdio_session", side_effect=fake_cm):
         async def _run():
             async with session("dummy", cmd="echo hello") as s:
                 pass

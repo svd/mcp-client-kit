@@ -1,4 +1,4 @@
-"""Tests for `mcp-kit probe` — network-free; _probe is monkeypatched via AsyncMock.
+"""Tests for `mcpgen probe` — network-free; _probe is monkeypatched via AsyncMock.
 
 Covers:
   #1  probe with list-valued arg exits 0 (no unhashable-type crash in advisory block)
@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from mcp_client_kit.cli import _cmd_probe
+from mcpgen.cli import _cmd_probe
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ def test_probe_list_arg_exits_zero(tmp_path):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcp_client_kit.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
         rc = _cmd_probe(ns)
 
     assert rc == 0, "exit code must be 0 even when arg values are lists"
@@ -66,7 +66,7 @@ def test_probe_list_arg_writes_part_file(tmp_path):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcp_client_kit.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
         _cmd_probe(ns)
 
     parts_dir = shapes_file.parent / (shapes_file.name + ".parts")
@@ -86,7 +86,7 @@ def test_probe_scalar_discriminator_advisory_printed(tmp_path, capsys):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcp_client_kit.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
         rc = _cmd_probe(ns)
 
     assert rc == 0
@@ -104,7 +104,7 @@ def test_probe_scalar_single_discriminator_value_warns(tmp_path, capsys):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcp_client_kit.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
         rc = _cmd_probe(ns)
 
     assert rc == 0
@@ -123,7 +123,7 @@ def test_probe_advisory_exception_still_exits_zero(tmp_path, capsys):
     raises — only on the first parsed arg-dict so that probe_skeleton still sees
     a real dict and can write the part file before the advisory runs.
     """
-    import mcp_client_kit.cli as cli_mod
+    import mcpgen.cli as cli_mod
     import json as json_mod
 
     shapes_file = tmp_path / "demo.shapes.json"
@@ -150,8 +150,8 @@ def test_probe_advisory_exception_still_exits_zero(tmp_path, capsys):
             return _BrokenKeysDict(result)
         return result
 
-    with patch("mcp_client_kit.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE), \
-         patch("mcp_client_kit.cli.json.loads", side_effect=_patched_loads):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE), \
+         patch("mcpgen.cli.json.loads", side_effect=_patched_loads):
         rc = _cmd_probe(ns)
 
     assert rc == 0, "exit 0 even when advisory block raises"

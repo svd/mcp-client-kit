@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mcp_client_kit import _bridge
+from mcpgen import _bridge
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +57,8 @@ def test_bearer_session_passes_authorization_header():
     mock_s = _make_mock_session()
 
     async def run():
-        with patch("mcp_client_kit._bridge._open_http", fake_http), \
-             patch("mcp_client_kit._bridge.ClientSession") as mock_cs:
+        with patch("mcpgen._bridge._open_http", fake_http), \
+             patch("mcpgen._bridge.ClientSession") as mock_cs:
             mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_s)
             mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
             async with _bridge._bearer_session("https://api.example.com/mcp", "tok_abc"):
@@ -81,9 +81,9 @@ def test_bearer_session_does_not_touch_file_storage(tmp_path):
     mock_s = _make_mock_session()
 
     async def run():
-        with patch("mcp_client_kit._bridge._open_http", fake_http), \
-             patch("mcp_client_kit._bridge.ClientSession") as mock_cs, \
-             patch("mcp_client_kit._bridge.DEFAULT_CREDS_PATH", creds):
+        with patch("mcpgen._bridge._open_http", fake_http), \
+             patch("mcpgen._bridge.ClientSession") as mock_cs, \
+             patch("mcpgen._bridge.DEFAULT_CREDS_PATH", creds):
             mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_s)
             mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
             async with _bridge._bearer_session("https://api.example.com/mcp", "tok"):
@@ -113,9 +113,9 @@ def test_session_routes_bearer_not_oauth_when_bearer_provided():
         yield _make_mock_session()
 
     async def run():
-        with patch("mcp_client_kit._bridge._bearer_session", fake_bearer), \
-             patch("mcp_client_kit._bridge._http_session", fake_oauth), \
-             patch("mcp_client_kit._bridge.servers", return_value={}):
+        with patch("mcpgen._bridge._bearer_session", fake_bearer), \
+             patch("mcpgen._bridge._http_session", fake_oauth), \
+             patch("mcpgen._bridge.servers", return_value={}):
             async with _bridge.session(
                 "github",
                 url="https://api.githubcopilot.com/mcp/",
@@ -138,8 +138,8 @@ def test_session_bearer_uses_server_arg_as_url_when_no_url():
         yield _make_mock_session()
 
     async def run():
-        with patch("mcp_client_kit._bridge._bearer_session", fake_bearer), \
-             patch("mcp_client_kit._bridge.servers", return_value={}):
+        with patch("mcpgen._bridge._bearer_session", fake_bearer), \
+             patch("mcpgen._bridge.servers", return_value={}):
             async with _bridge.session(
                 "https://api.githubcopilot.com/mcp/",
                 bearer="ghp_test",
@@ -160,8 +160,8 @@ def test_session_oauth_path_unchanged_without_bearer():
         yield _make_mock_session()
 
     async def run():
-        with patch("mcp_client_kit._bridge._http_session", fake_oauth), \
-             patch("mcp_client_kit._bridge.servers",
+        with patch("mcpgen._bridge._http_session", fake_oauth), \
+             patch("mcpgen._bridge.servers",
                    return_value={"myserver": "https://mcp.example.com/mcp"}):
             async with _bridge.session("myserver"):
                 pass
@@ -184,7 +184,7 @@ def test_mcp_bridge_caller_threads_bearer_to_session():
         yield _make_mock_session({"ok": True})
 
     async def run():
-        with patch("mcp_client_kit._bridge.session", fake_session):
+        with patch("mcpgen._bridge.session", fake_session):
             caller = _bridge.McpBridgeCaller(
                 url="https://api.githubcopilot.com/mcp/",
                 bearer="ghp_unit_test",
@@ -206,7 +206,7 @@ def test_mcp_bridge_caller_bearer_none_by_default():
         yield _make_mock_session({"x": 1})
 
     async def run():
-        with patch("mcp_client_kit._bridge.session", fake_session):
+        with patch("mcpgen._bridge.session", fake_session):
             caller = _bridge.McpBridgeCaller(cmd="echo hi")
             return await caller.call("s", "t", {})
 
@@ -234,9 +234,9 @@ def test_session_raw_url_uses_open_http_with_no_auth():
     mock_s = _make_mock_session()
 
     async def run():
-        with patch("mcp_client_kit._bridge._open_http", fake_open_http), \
-             patch("mcp_client_kit._bridge.ClientSession") as mock_cs, \
-             patch("mcp_client_kit._bridge.servers", return_value={}):
+        with patch("mcpgen._bridge._open_http", fake_open_http), \
+             patch("mcpgen._bridge.ClientSession") as mock_cs, \
+             patch("mcpgen._bridge.servers", return_value={}):
             mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_s)
             mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
             async with _bridge.session("https://public.example.com/mcp"):
@@ -296,7 +296,7 @@ def test_file_storage_self_heals_loose_permissions(tmp_path):
 def test_resolve_cred_backend_default_is_file(monkeypatch):
     """Without any input, resolve_cred_backend returns 'file'."""
     monkeypatch.delenv(_bridge._CRED_BACKEND_ENV, raising=False)
-    with patch("mcp_client_kit._bridge._load_client_config", return_value={}):
+    with patch("mcpgen._bridge._load_client_config", return_value={}):
         assert _bridge.resolve_cred_backend(None) == "file"
 
 
@@ -309,7 +309,7 @@ def test_resolve_cred_backend_cli_beats_env(monkeypatch):
 def test_resolve_cred_backend_env_beats_config(monkeypatch):
     """Env var beats config file."""
     monkeypatch.setenv(_bridge._CRED_BACKEND_ENV, "keyring")
-    with patch("mcp_client_kit._bridge._load_client_config", return_value={"cred_backend": "auto"}):
+    with patch("mcpgen._bridge._load_client_config", return_value={"cred_backend": "auto"}):
         assert _bridge.resolve_cred_backend(None) == "keyring"
 
 
@@ -318,7 +318,7 @@ def test_resolve_cred_backend_config_file(monkeypatch, tmp_path):
     monkeypatch.delenv(_bridge._CRED_BACKEND_ENV, raising=False)
     cfg = tmp_path / "config.json"
     cfg.write_text(json.dumps({"cred_backend": "auto"}))
-    with patch("mcp_client_kit._bridge.DEFAULT_CONFIG_PATH", cfg):
+    with patch("mcpgen._bridge.DEFAULT_CONFIG_PATH", cfg):
         assert _bridge.resolve_cred_backend(None) == "auto"
 
 
@@ -851,9 +851,9 @@ def test_login_restores_credential_on_oauth_failure(tmp_path):
         yield  # makes this an async generator; unreachable
 
     async def run():
-        with patch("mcp_client_kit._bridge._local_callback_server", fake_callback_server), \
-             patch("mcp_client_kit._bridge._open_http", fake_http_fail), \
-             patch("mcp_client_kit._bridge.OAuthClientProvider", MagicMock()):
+        with patch("mcpgen._bridge._local_callback_server", fake_callback_server), \
+             patch("mcpgen._bridge._open_http", fake_http_fail), \
+             patch("mcpgen._bridge.OAuthClientProvider", MagicMock()):
             with pytest.raises(RuntimeError, match="network error"):
                 await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
 
@@ -878,9 +878,9 @@ def test_login_no_prior_credential_does_not_create_on_failure(tmp_path):
         yield
 
     async def run():
-        with patch("mcp_client_kit._bridge._local_callback_server", fake_callback_server), \
-             patch("mcp_client_kit._bridge._open_http", fake_http_fail), \
-             patch("mcp_client_kit._bridge.OAuthClientProvider", MagicMock()):
+        with patch("mcpgen._bridge._local_callback_server", fake_callback_server), \
+             patch("mcpgen._bridge._open_http", fake_http_fail), \
+             patch("mcpgen._bridge.OAuthClientProvider", MagicMock()):
             with pytest.raises(RuntimeError, match="network error"):
                 await _bridge.login("newserver", creds_path=creds,
                                     url="https://new.example.com/mcp")

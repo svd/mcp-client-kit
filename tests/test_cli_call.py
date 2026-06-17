@@ -1,4 +1,4 @@
-"""Tests for `mcp-kit call` — network-free; _call is monkeypatched via AsyncMock."""
+"""Tests for `mcpgen call` — network-free; _call is monkeypatched via AsyncMock."""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from mcp_client_kit.cli import _cmd_call, main
+from mcpgen.cli import _cmd_call, main
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -37,7 +37,7 @@ def test_call_writes_json_payload(tmp_path):
     out = tmp_path / "acme.probe-raw.json"
     ns = _ns("acme", "whoami", str(out))
 
-    with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
+    with patch("mcpgen.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
         rc = _cmd_call(ns)
 
     assert rc == 0
@@ -49,7 +49,7 @@ def test_call_nothing_on_stdout(tmp_path, capsys):
     out = tmp_path / "acme.probe-raw.json"
     ns = _ns("acme", "whoami", str(out))
 
-    with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
+    with patch("mcpgen.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
         _cmd_call(ns)
 
     assert capsys.readouterr().out == ""
@@ -59,7 +59,7 @@ def test_call_stderr_summary_has_size_and_path(tmp_path, capsys):
     out = tmp_path / "acme.probe-raw.json"
     ns = _ns("acme", "whoami", str(out))
 
-    with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
+    with patch("mcpgen.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
         _cmd_call(ns)
 
     err = capsys.readouterr().err
@@ -73,7 +73,7 @@ def test_call_string_payload_not_double_encoded(tmp_path):
     out = tmp_path / "srv.probe-raw.json"
     ns = _ns("srv", "ping", str(out))
 
-    with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_STR):
+    with patch("mcpgen.cli._call", new_callable=AsyncMock, return_value=FAKE_STR):
         _cmd_call(ns)
 
     assert out.read_text() == FAKE_STR + "\n"
@@ -85,7 +85,7 @@ def test_call_passes_args_to_underlying_call(tmp_path):
     out = tmp_path / "acme.probe-raw.json"
     ns = _ns("acme", "get_entity", str(out), args='{"entityId":"x","entityType":1}')
 
-    with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT) as mock_c:
+    with patch("mcpgen.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT) as mock_c:
         _cmd_call(ns)
 
     mock_c.assert_called_once()
@@ -97,7 +97,7 @@ def test_call_no_args_defaults_to_empty_dict(tmp_path):
     out = tmp_path / "acme.probe-raw.json"
     ns = _ns("acme", "whoami", str(out), args=None)
 
-    with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT) as mock_c:
+    with patch("mcpgen.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT) as mock_c:
         _cmd_call(ns)
 
     mock_c.assert_called_once()
@@ -132,7 +132,7 @@ def test_call_emits_pii_warning(tmp_path, capsys):
     out = tmp_path / "acme.probe-raw.json"
     ns = _ns("acme", "whoami", str(out))
 
-    with patch("mcp_client_kit.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
+    with patch("mcpgen.cli._call", new_callable=AsyncMock, return_value=FAKE_DICT):
         _cmd_call(ns)
 
     err = capsys.readouterr().err

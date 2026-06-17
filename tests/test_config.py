@@ -1,7 +1,7 @@
 """Tests for the server-config layer: url + clientName parsing and resolution."""
 import json
 
-from mcp_client_kit import _bridge
+from mcpgen import _bridge
 
 
 def _write(tmp_path, raw: dict):
@@ -96,9 +96,9 @@ def test_resolve_client_name_override_and_default(tmp_path):
     }})
     _bridge.servers(config_path=cfg)  # populates the client-name cache
     assert _bridge._resolve_client_name("custom") == "Example Client"
-    assert _bridge._resolve_client_name("plain") == "mcp-client-kit (plain)"
+    assert _bridge._resolve_client_name("plain") == "mcpgen (plain)"
     # Unknown server falls back to the default template too.
-    assert _bridge._resolve_client_name("nope") == "mcp-client-kit (nope)"
+    assert _bridge._resolve_client_name("nope") == "mcpgen (nope)"
 
 
 def test_servers_config_path_is_authoritative(tmp_path):

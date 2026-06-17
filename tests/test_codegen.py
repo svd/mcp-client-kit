@@ -2,7 +2,7 @@
 import ast
 import asyncio
 
-from mcp_client_kit import codegen
+from mcpgen import codegen
 
 # A representative get_entity shape-spec (the double-envelope differentiator, codified).
 _GET_ENTITY = {

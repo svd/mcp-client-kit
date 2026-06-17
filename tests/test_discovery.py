@@ -1,4 +1,4 @@
-"""Pure unit tests for mcp_client_kit.discovery — no network, no subprocess."""
+"""Pure unit tests for mcpgen.discovery — no network, no subprocess."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mcp_client_kit.discovery import (
+from mcpgen.discovery import (
     ClaudeCodeProvider,
     DiscoveredServer,
     _parse_mcp_get,
@@ -262,14 +262,14 @@ def test_json_non_object_root_does_not_crash(tmp_path):
 
 def test_available_with_json_only(tmp_path):
     (tmp_path / ".claude.json").write_text("{}")
-    with patch("mcp_client_kit.discovery.shutil.which", return_value=None):
+    with patch("mcpgen.discovery.shutil.which", return_value=None):
         provider = ClaudeCodeProvider(_home=tmp_path)
         assert provider.available() is True
 
 
 def test_available_false_when_nothing(tmp_path):
     # No .claude.json in tmp_path, no claude on PATH.
-    with patch("mcp_client_kit.discovery.shutil.which", return_value=None):
+    with patch("mcpgen.discovery.shutil.which", return_value=None):
         provider = ClaudeCodeProvider(_home=tmp_path)
         assert provider.available() is False
 
@@ -335,7 +335,7 @@ def test_cli_discover_json_redacts_env_by_default(tmp_path):
     }
     (tmp_path / ".claude.json").write_text(json.dumps(config))
 
-    from mcp_client_kit import cli, discovery as disc_mod
+    from mcpgen import cli, discovery as disc_mod
     import io
 
     provider = ClaudeCodeProvider(_run=_make_run({}), _home=tmp_path)
@@ -368,12 +368,12 @@ def test_cli_discover_json_redacts_env_by_default(tmp_path):
 
 
 def test_discover_all_skips_unavailable(tmp_path, monkeypatch):
-    from mcp_client_kit import discovery
+    from mcpgen import discovery
 
     # Replace the singleton provider with one whose available() returns False.
     fake_provider = ClaudeCodeProvider(_home=tmp_path)
     monkeypatch.setattr(discovery, "PROVIDERS", [fake_provider])
-    with patch("mcp_client_kit.discovery.shutil.which", return_value=None):
+    with patch("mcpgen.discovery.shutil.which", return_value=None):
         # No .claude.json → available() returns False.
         result = discover_all()
     assert result == []
