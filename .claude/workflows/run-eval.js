@@ -29,10 +29,24 @@ if (typeof resolvedArgs === 'string' && resolvedArgs !== 'all') {
 }
 
 log('Generating .mcp.eval.json from servers.toml…')
-await agent(
-  'Run this command in the project root: uv run eval-kit gen-config\nReturn "DONE" when it succeeds, or the full error output if it fails.',
-  { label: 'gen-config' }
+const genConfig = await agent(
+  'Run these two commands and report results:\n' +
+  '1. `pwd` — capture the absolute working directory path\n' +
+  '2. `uv run eval-kit gen-config`\n' +
+  'Return the absolute path from pwd as project_root, and whether gen-config succeeded.',
+  {
+    label: 'gen-config',
+    schema: {
+      type: 'object',
+      properties: {
+        project_root:  { type: 'string' },
+        gen_config_ok: { type: 'boolean' },
+      },
+      required: ['project_root', 'gen_config_ok'],
+    },
+  }
 )
+const PROJECT_ROOT = genConfig.project_root
 
 log('Loading servers manifest…')
 const manifestAgent = await agent(
@@ -103,6 +117,7 @@ const results = await pipeline(
     log(`[${server.name}] Starting generate stage…`)
 
     const prompt = promptTemplate
+      .replace(/\{\{PROJECT_ROOT\}\}/g, PROJECT_ROOT)
       .replace(/\{\{SERVER_NAME\}\}/g, server.name)
       .replace(/\{\{TRANSPORT\}\}/g, server.transport)
       .replace(/\{\{LAUNCH\}\}/g, server.launch)
@@ -119,15 +134,14 @@ const results = await pipeline(
           session_id:    { type: 'string' },
           tool_count:    { type: 'number' },
           shaped_tools:  { type: 'array', items: { type: 'string' } },
-          modes_hit:     { type: 'array', items: { type: 'string' } },
           verdict_hint:  { type: 'string' },
           notes:         { type: 'string' },
         },
-        required: ['server', 'tool_count', 'modes_hit', 'verdict_hint'],
+        required: ['server', 'tool_count', 'verdict_hint'],
       },
     })
 
-    log(`[${server.name}] Generate done — ${summary.tool_count ?? '?'} tools, modes: ${(summary.modes_hit || []).join(', ')}`)
+    log(`[${server.name}] Generate done — ${summary.tool_count ?? '?'} tools, verdict: ${summary.verdict_hint ?? '?'}`)
     return { server, summary }
   },
 
@@ -266,7 +280,6 @@ return {
   servers_evaluated: successCount,
   results: results.filter(Boolean).map(r => ({
     server:       r.server.name,
-    modes_hit:    r.summary?.modes_hit    || [],
     verdict_hint: r.summary?.verdict_hint || 'unknown',
     verified:     r.verifyRunner?.verified || false,
   })),

@@ -109,17 +109,74 @@ def render_matrix(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _humanize_skip(detail: str) -> tuple[str, str, str] | None:
+    """Map a machine skip-reason code to a human-readable (icon, label, prose) triple.
+
+    Returns None for unmapped reasons so the caller falls back to the raw detail.
+    """
+    # Fixed exact-match codes
+    _EXACT: dict[str, tuple[str, str]] = {
+        "no_shaped_non_mutating_tool": (
+            "N/A",
+            "no read-only tool with a typed return to probe",
+        ),
+        "oauth_not_supported_in_verifier": (
+            "N/A",
+            "OAuth servers aren't exercised by the verifier",
+        ),
+        "probed_args_contain_placeholders": (
+            "N/A",
+            "no real probe arguments available",
+        ),
+        "no shapes.json found": (
+            "N/A",
+            "no shapes to probe",
+        ),
+    }
+    # Inline check for "probed_args is not a dict" (dynamic message)
+    if detail.startswith("probed_args is not a dict"):
+        return ("⊘", "N/A", "multi-probe args not supported for live call")
+
+    if detail in _EXACT:
+        label, prose = _EXACT[detail]
+        return ("⊘", label, prose)
+
+    # Prefix-matched codes (dynamic f-string messages)
+    if detail.startswith("missing_cred_"):
+        var = detail[len("missing_cred_"):]
+        return ("⊘", "N/A", f"credential {var} not set")
+    if detail.startswith("mcp_client_kit not installed"):
+        return ("⊘", "not run", "mcp_client_kit not installed")
+    if detail.startswith("generated module has unresolvable imports"):
+        return ("⊘", "not run", "generated module has unresolvable imports")
+    if detail.startswith("function '") and "not found in generated module" in detail:
+        # Extract function name from e.g. "function 'foo' not found in generated module namespace"
+        end = detail.index("'", len("function '"))
+        fn_name = detail[len("function '"):end]
+        return ("⊘", "not run", f"generated function '{fn_name}' not found")
+    if detail.startswith("Could not load shapes.json"):
+        return ("⊘", "not run", "could not load shapes.json")
+
+    return None
+
+
 def _check_cell(status: str, detail: str) -> str:
     """Format a single check result cell."""
+    if status.lower() == "skip" and detail:
+        humanized = _humanize_skip(detail)
+        if humanized is not None:
+            icon, label, prose = humanized
+            return f"{icon} {label} — {prose}"
+        # Unmapped skip: keep raw detail
+        return f"⏭ skip — {detail}"
+
     emoji_map = {
         "pass": "✅ pass",
         "fail": "❌ fail",
         "skip": "⏭ skip",
     }
     cell = emoji_map.get(status.lower(), f"❓ {status}")
-    if detail and status.lower() == "skip":
-        cell = f"{cell} — {detail}"
-    elif detail and status.lower() == "fail":
+    if detail and status.lower() == "fail":
         cell = f"{cell} — {detail}"
     return cell
 

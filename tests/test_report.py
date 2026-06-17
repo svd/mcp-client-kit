@@ -14,6 +14,8 @@ from eval_harness.report import (
     format_auth,
     mode_cell,
     verdict_cell,
+    _check_cell,
+    _humanize_skip,
 )
 
 
@@ -103,6 +105,102 @@ def test_render_matrix_contains_server_row() -> None:
 # ---------------------------------------------------------------------------
 # render_detail
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# _humanize_skip / _check_cell — human-readable skip rendering
+# ---------------------------------------------------------------------------
+
+
+def test_humanize_skip_no_shaped_non_mutating_tool() -> None:
+    result = _humanize_skip("no_shaped_non_mutating_tool")
+    assert result is not None
+    icon, label, prose = result
+    assert icon == "⊘"
+    assert label == "N/A"
+    assert "read-only" in prose
+
+
+def test_humanize_skip_oauth() -> None:
+    icon, label, prose = _humanize_skip("oauth_not_supported_in_verifier")  # type: ignore[misc]
+    assert label == "N/A"
+    assert "OAuth" in prose
+
+
+def test_humanize_skip_missing_cred() -> None:
+    icon, label, prose = _humanize_skip("missing_cred_GITHUB_PAT")  # type: ignore[misc]
+    assert label == "N/A"
+    assert "GITHUB_PAT" in prose
+    assert "credential" in prose
+
+
+def test_humanize_skip_placeholders() -> None:
+    icon, label, prose = _humanize_skip("probed_args_contain_placeholders")  # type: ignore[misc]
+    assert label == "N/A"
+
+
+def test_humanize_skip_no_shapes_found() -> None:
+    icon, label, prose = _humanize_skip("no shapes.json found")  # type: ignore[misc]
+    assert label == "N/A"
+    assert "shapes" in prose
+
+
+def test_humanize_skip_mcp_client_kit_not_installed() -> None:
+    icon, label, prose = _humanize_skip(  # type: ignore[misc]
+        "mcp_client_kit not installed — check DISABLED (install to enable)"
+    )
+    assert label == "not run"
+    assert "mcp_client_kit" in prose
+
+
+def test_humanize_skip_unresolvable_imports() -> None:
+    icon, label, prose = _humanize_skip(  # type: ignore[misc]
+        "generated module has unresolvable imports: No module named 'foo'"
+    )
+    assert label == "not run"
+    assert "unresolvable imports" in prose
+
+
+def test_humanize_skip_function_not_found() -> None:
+    icon, label, prose = _humanize_skip(  # type: ignore[misc]
+        "function 'list_issues' not found in generated module namespace"
+    )
+    assert label == "not run"
+    assert "list_issues" in prose
+
+
+def test_humanize_skip_unknown_returns_none() -> None:
+    assert _humanize_skip("offline determinism check") is None
+    assert _humanize_skip("") is None
+    assert _humanize_skip("some unknown reason") is None
+
+
+def test_check_cell_skip_humanized() -> None:
+    cell = _check_cell("skip", "no_shaped_non_mutating_tool")
+    assert cell.startswith("⊘")
+    assert "N/A" in cell
+    assert "no_shaped_non_mutating_tool" not in cell
+
+
+def test_check_cell_skip_missing_cred() -> None:
+    cell = _check_cell("skip", "missing_cred_GITHUB_PAT")
+    assert "⊘" in cell
+    assert "GITHUB_PAT" in cell
+    assert "missing_cred_" not in cell
+
+
+def test_check_cell_skip_unmapped_keeps_raw() -> None:
+    cell = _check_cell("skip", "offline determinism check")
+    assert cell == "⏭ skip — offline determinism check"
+
+
+def test_check_cell_skip_no_detail() -> None:
+    assert _check_cell("skip", "") == "⏭ skip"
+
+
+def test_check_cell_pass_and_fail_unchanged() -> None:
+    assert _check_cell("pass", "") == "✅ pass"
+    assert _check_cell("fail", "bad type") == "❌ fail — bad type"
 
 
 def test_render_detail_has_check_rows() -> None:
