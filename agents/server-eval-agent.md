@@ -28,7 +28,13 @@ At the end, return a structured JSON summary so the Workflow can record the resu
 
 ## Run the skill
 
+**Before invoking the skill, capture the start time** — run these two Bash commands and remember both results:
+- `date -u "+%Y-%m-%dT%H:%M:%SZ"` → `STARTED_AT` (ISO-8601 UTC, for display)
+- `date +%s` → `T0` (epoch seconds, for arithmetic)
+
 Invoke the **`mcpgen:generate-mcp-wrappers`** skill via the Skill tool to generate the wrappers for `{{SERVER_NAME}}`. Let the skill drive the whole procedure (codegen → list → probe → merge → edit shapes → regenerate → verify).
+
+**After the skill finishes and all artifacts are written, capture the end time** — run `date +%s` → `T1`. Compute `ELAPSED = T1 - T0` seconds; format as `Xm Ys` (e.g. 142 s → `2m 22s`).
 
 Use these path conventions so artifacts land where the harness expects:
 - module out: `eval/{{SERVER_NAME}}/{{SERVER_NAME}}.py`
@@ -55,6 +61,17 @@ One eval-harness–specific rule the skill fallback does not cover:
 
 Create `eval/{{SERVER_NAME}}/session-overview.md`. It should be 200–500 words and cover:
 
+Open the file with this section immediately after the H1 title:
+
+```markdown
+## Run Metadata
+
+- **Executed:** <STARTED_AT>
+- **Duration:** <Xm Ys> (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+```
+
+Then continue with:
+
 - How many tools the server exposes and how many were probed vs. skipped
 - Any interesting or surprising responses (unexpected schema, empty results, errors)
 - Shape decisions for each probed tool: unwrap path chosen, return model name, and why
@@ -64,7 +81,7 @@ Create `eval/{{SERVER_NAME}}/session-overview.md`. It should be 200–500 words 
 
 - Folder: `eval/{{SERVER_NAME}}/` — all three artifacts go here, nothing else
 - `{{SERVER_NAME}}.shapes.json`: valid JSON, fully PII-scrubbed, `_observed_shape` keys may remain as evidence
-- `session-overview.md`: 200–500 words, covers how the skill executed and the shape decisions made
+- `session-overview.md`: 200–500 words, leads with `## Run Metadata` (Executed + Duration), then covers how the skill executed and the shape decisions made
 
 ---
 
