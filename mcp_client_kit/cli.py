@@ -32,10 +32,11 @@ async def _list_tools(
     client_name: str | None = None,
     config_path: str | None = None,
     cred_backend: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> list[dict]:
     async with _bridge.session(
         server, cmd=cmd, url=url, bearer=bearer, client_name=client_name,
-        config_path=config_path, cred_backend=cred_backend,
+        config_path=config_path, cred_backend=cred_backend, env=env,
     ) as s:
         result = await s.list_tools()
     tools = []
@@ -59,10 +60,11 @@ async def _probe(
     client_name: str | None = None,
     config_path: str | None = None,
     cred_backend: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> Any:
     caller = _bridge.McpBridgeCaller(
         cmd=cmd, url=url, bearer=bearer, client_name=client_name, config_path=config_path,
-        cred_backend=cred_backend,
+        cred_backend=cred_backend, env=env,
     )
     raw = await caller.call(server, tool, args)
     return codegen.summarize_shape(raw)
@@ -79,10 +81,11 @@ async def _call(
     client_name: str | None = None,
     config_path: str | None = None,
     cred_backend: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> Any:
     caller = _bridge.McpBridgeCaller(
         cmd=cmd, url=url, bearer=bearer, client_name=client_name, config_path=config_path,
-        cred_backend=cred_backend,
+        cred_backend=cred_backend, env=env,
     )
     return await caller.call(server, tool, args)
 
@@ -97,6 +100,31 @@ def _server_stem(server: str) -> str:
     else:
         stem = server
     return stem
+
+
+def _parse_env(ns: argparse.Namespace) -> dict[str, str] | None:
+    """Parse --env KEY[=VAL] flags into a dict for the stdio subprocess.
+
+    ``--env KEY``      forwards $KEY from the current shell environment.
+    ``--env KEY=VAL``  sets KEY to VAL inline (no shell lookup).
+
+    Returns None when no --env flags were given (or all were skipped).
+    Unset keys produce a stderr warning and are skipped rather than raising.
+    """
+    items: list[str] = getattr(ns, "env", None) or []
+    result: dict[str, str] = {}
+    for item in items:
+        if "=" in item:
+            k, v = item.split("=", 1)
+            result[k] = v
+        elif item in os.environ:
+            result[item] = os.environ[item]
+        else:
+            print(
+                f"[mcp-kit] ⚠  --env {item}: not set in environment; skipped",
+                file=sys.stderr,
+            )
+    return result or None
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -213,7 +241,7 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
 def _cmd_codegen(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
     conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
-                cred_backend=ns.cred_backend)
+                cred_backend=ns.cred_backend, env=_parse_env(ns))
     tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
     print(f"[codegen] {ns.server}: {len(tools)} tools", file=sys.stderr)
 
@@ -257,7 +285,7 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     print(f"[probe] {ns.server}.{ns.tool} ({n} probe(s)) …", file=sys.stderr)
 
     conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
-                cred_backend=ns.cred_backend)
+                cred_backend=ns.cred_backend, env=_parse_env(ns))
     shapes = []
     for i, args in enumerate(args_list):
         print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
@@ -312,7 +340,7 @@ def _cmd_call(ns: argparse.Namespace) -> int:
         print(f"[call] error: --args must be valid JSON ({exc})", file=sys.stderr)
         return 1
     conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
-                cred_backend=ns.cred_backend)
+                cred_backend=ns.cred_backend, env=_parse_env(ns))
 
     print(f"[call] {ns.server}.{ns.tool} (live) …", file=sys.stderr)
     raw = asyncio.run(_call(ns.server, ns.tool, args, cmd=cmd, **conn))
@@ -478,7 +506,7 @@ def _cmd_list(ns: argparse.Namespace) -> int:
     """Print the tool inventory as JSON [{name, description}] for a server."""
     cmd = getattr(ns, "stdio", None)
     conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
-                cred_backend=ns.cred_backend)
+                cred_backend=ns.cred_backend, env=_parse_env(ns))
     tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
     out = [{"name": t["name"], "description": t.get("description") or ""} for t in tools]
     sys.stdout.write(json.dumps(out, indent=2) + "\n")
@@ -609,6 +637,10 @@ def _add_conn_args(p: argparse.ArgumentParser) -> None:
                         "keyring (OS keychain; falls back to file if unavailable), "
                         "or auto (keyring if detected, else file). "
                         "Also: MCP_KIT_CRED_BACKEND env or ~/.mcp-client-kit/config.json 'cred_backend'.")
+    p.add_argument("--env", dest="env", action="append", metavar="KEY[=VAL]",
+                   help="forward an env var to a --stdio server: 'KEY' reads $KEY from "
+                        "the shell; 'KEY=VAL' sets it inline. Repeat for multiple vars. "
+                        "No-op when --stdio is not used.")
 
 
 def main(argv: list[str] | None = None) -> int:

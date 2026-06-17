@@ -784,9 +784,15 @@ async def _http_session(
 async def _stdio_session(command: str, args: list[str], env: dict[str, str] | None = None):
     """Stdio MCP session — no auth.
 
-    env, when provided, is merged on top of the safe inherited environment by
-    ``stdio_client``: ``{**get_default_environment(), **env}``.  PATH and other
-    standard vars are preserved; any extra keys (e.g. an access token) are added.
+    env keys are merged on top of the SDK's safe inherited environment:
+    ``{**get_default_environment(), **env}``.  The SDK's default allowlist is
+    ``HOME, LOGNAME, PATH, SHELL, TERM, USER``; any keys not in that list (e.g.
+    ``CONTEXT7_API_KEY``) must be passed explicitly via ``env`` — they are NOT
+    automatically inherited from ``os.environ``.
+
+    When ``env`` is None the child receives only ``get_default_environment()``.
+    To forward shell env vars, use the ``--env KEY[=VAL]`` CLI flag, which
+    constructs the ``env`` dict before calling this function.
     """
     params = StdioServerParameters(command=command, args=args, env=env)
     async with stdio_client(params) as (read, write):
@@ -819,6 +825,7 @@ async def session(
     client_name: str | None = None,
     config_path: str | Path | None = None,
     cred_backend: str | None = None,
+    env: dict[str, str] | None = None,
 ):
     """Yield an initialized MCP ClientSession.
 
@@ -830,6 +837,10 @@ async def session(
         overriding config. client_name: inline OAuth client_name override.
     config_path: read the server registry from this file instead of the default search.
     server: a configured name (servers()) → HTTP + OAuth; otherwise a raw URL.
+    env: extra env vars forwarded to the stdio subprocess (merged over the SDK's
+        safe allowlist). Keys NOT in ``get_default_environment()`` (e.g. API keys)
+        must be supplied here; they are NOT inherited from ``os.environ`` otherwise.
+        No-op for non-stdio transports.
     """
     _servers = servers(config_path=config_path)
     resolved_url = url or _servers.get(server)
@@ -837,9 +848,11 @@ async def session(
     stdio_spec: dict | None = None
     if cmd is not None:
         parts = shlex.split(cmd)
-        stdio_spec = {"command": parts[0], "args": parts[1:], "env": None}
+        stdio_spec = {"command": parts[0], "args": parts[1:], "env": env}
     elif server in _stdio_cache and url is None and bearer is None:
-        stdio_spec = _stdio_cache[server]
+        stdio_spec = dict(_stdio_cache[server])
+        if env:
+            stdio_spec["env"] = {**(stdio_spec.get("env") or {}), **env}
     if stdio_spec is not None:
         async with _stdio_session(**stdio_spec) as s:
             yield s
@@ -870,6 +883,7 @@ class McpBridgeCaller:
         client_name: str | None = None,
         config_path: str | Path | None = None,
         cred_backend: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         self._cmd = cmd
         self._url = url
@@ -877,6 +891,7 @@ class McpBridgeCaller:
         self._client_name = client_name
         self._config_path = config_path
         self._cred_backend = cred_backend
+        self._env = env
 
     async def call(self, server: str, tool: str, arguments: dict) -> Any:
         async with session(
@@ -887,6 +902,7 @@ class McpBridgeCaller:
             client_name=self._client_name,
             config_path=self._config_path,
             cred_backend=self._cred_backend,
+            env=self._env,
         ) as s:
             result = await s.call_tool(tool, arguments)
             content = [

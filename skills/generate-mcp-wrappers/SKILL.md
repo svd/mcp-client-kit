@@ -188,12 +188,17 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      --args '{"entityId":"<id2>","entityType":1}' \
      --emit-shape <shapes-path>
    ```
-   **Quota / rate-limit errors during probing.** If a probe returns an HTTP 429, a
-   quota-exceeded message, or a rate-limit string (detectable by phrases like
-   `"quota exceeded"`, `"rate limit"`, `"try again later"`):
+   **Quota / rate-limit / auth errors during probing.** If a probe returns an HTTP
+   429/401/403, a quota-exceeded message, a rate-limit string, or an auth/credentials
+   error (detectable by phrases like `"quota exceeded"`, `"rate limit"`, `"try again
+   later"`, `"unauthorized"`, `"forbidden"`, `"invalid api key"`, `"authentication"`,
+   `"not authenticated"`):
    - Set `_observed_shape: "str"` — the error payload is a `str`, which is honest.
    - Leave `return_model: null`.
-   - Note in `session-overview.md` that the shape is an error string, not a success payload.
+   - Note in `session-overview.md` that the shape is an error string, not a success
+     payload; record whether the failure was a quota/rate-limit or an auth error, and
+     note what credential (env var, API key) must be set before re-running to capture
+     the real success shape.
    - Do **not** retry more than once.
 
    The generated `-> Any` return type is correct; callers must handle the error string
@@ -240,6 +245,13 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    `json.loads()` into a dict or list, annotate the shape entry with `"_json_unwrap": true`
    and re-enter shape analysis on the parsed object — the tool may qualify for a `TypedDict`
    model after unwrapping. If `json.loads()` fails, `_observed_shape: "str"` stands.
+
+   **Image / binary / media tools.** Tools returning MCP `image`, `audio`, or `blob`
+   content (base64 + MIME type) surface as `_observed_shape: "str"` — the probe reads
+   only the text envelope, so the structured binary record (`data` + `mimeType`) is
+   invisible. If a tool description mentions "image", "media", "audio", "base64", or
+   "binary", leave the wrapper as `-> Any`, note it in `session-overview.md`, and do
+   not attempt to model the shape from a single probe.
 
    **Empty-store probes produce under-typed list fields.** If a read tool returns an
    empty list (`[]`), the inner element shape is unobservable. Do not fabricate a schema
