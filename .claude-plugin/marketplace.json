@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
   "name": "mcp-client-kit",
   "version": "0.1.0",
-  "description": "Marketplace for the mcpgen plugin — typed Python wrappers for any MCP server.",
+  "description": "Marketplace for the mcp-client-kit plugin — typed Python wrappers for any MCP server.",
   "owner": {
     "name": "Sviatoslav Sviridov",
     "email": "sviridov@gmail.com"

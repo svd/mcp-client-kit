@@ -1,7 +1,7 @@
 [project]
 name = "mcp-client-kit"
 version = "0.0.4"
-description = "mcpgen — generate typed Python wrappers for any MCP server (codegen skill + CLI)."
+description = "mcp-client-kit — generate typed Python wrappers for any MCP server (codegen skill + CLI)."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Sviatoslav Sviridov", email = "sviridov@gmail.com" }]

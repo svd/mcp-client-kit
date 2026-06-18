@@ -1,4 +1,4 @@
-# mcpgen usage
+# mcp-client-kit usage
 
 > **Availability:** this doc describes the published flow (PyPI + marketplace). Not yet
 > live — for now use [RUNNING_LOCALLY.md](RUNNING_LOCALLY.md).

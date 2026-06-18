@@ -728,7 +728,7 @@ def main(argv: list[str] | None = None) -> int:
     from importlib.metadata import version as _pkg_version
 
     try:
-        _version = _pkg_version("mcpgen")
+        _version = _pkg_version("mcp-client-kit")
     except Exception:
         _version = "unknown"
 
