@@ -1,6 +1,6 @@
 [project]
 name = "mcp-client-kit"
-version = "0.0.2"
+version = "0.0.3"
 description = "mcpgen — generate typed Python wrappers for any MCP server (codegen skill + CLI)."
 readme = "README.md"
 license = { text = "MIT" }
@@ -31,9 +31,9 @@ mcpgen = "mcpgen.cli:main"
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 
 [project.urls]
-Homepage = "https://github.com/svd/mcpgen"
-Source = "https://github.com/svd/mcpgen"
-Issues = "https://github.com/svd/mcpgen/issues"
+Homepage = "https://github.com/svd/mcp-client-kit"
+Source = "https://github.com/svd/mcp-client-kit"
+Issues = "https://github.com/svd/mcp-client-kit/issues"
 
 [build-system]
 requires = ["hatchling"]
