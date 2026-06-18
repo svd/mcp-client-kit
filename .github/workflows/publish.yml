@@ -1,0 +1,36 @@
+name: Publish engine to PyPI
+
+# Fires only on bare engine tags (vX.Y.Z). 'plugin-v*' tags never publish.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi          # must match the PyPI Trusted Publisher config
+    permissions:
+      id-token: write          # OIDC token for Trusted Publishing (no API token needed)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Verify tag matches package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(grep -m1 -E '^version *= *"' pyproject.toml | sed -E 's/.*"(.*)".*/\1/')
+          if [ "$tag" != "$pkg" ]; then
+            echo "Tag v$tag does not match pyproject version $pkg"; exit 1
+          fi
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Check distribution metadata
+        run: uvx twine check dist/*
+
+      - name: Publish to PyPI (Trusted Publishing)
+        run: uv publish --trusted-publishing always
