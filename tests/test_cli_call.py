@@ -1,16 +1,17 @@
 """Tests for `mcpgen call` — network-free; _call is monkeypatched via AsyncMock."""
+
 from __future__ import annotations
 
 import json
-import pytest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from mcpgen.cli import _cmd_call, main
 
-
 # ── helpers ───────────────────────────────────────────────────────────────────
+
 
 def _ns(server: str, tool: str, out: str, args=None) -> SimpleNamespace:
     return SimpleNamespace(
@@ -32,6 +33,7 @@ FAKE_STR = "plain text response"
 
 
 # ── dict payload ──────────────────────────────────────────────────────────────
+
 
 def test_call_writes_json_payload(tmp_path):
     out = tmp_path / "acme.probe-raw.json"
@@ -69,6 +71,7 @@ def test_call_stderr_summary_has_size_and_path(tmp_path, capsys):
 
 # ── string (non-JSON) payload ─────────────────────────────────────────────────
 
+
 def test_call_string_payload_not_double_encoded(tmp_path):
     out = tmp_path / "srv.probe-raw.json"
     ns = _ns("srv", "ping", str(out))
@@ -80,6 +83,7 @@ def test_call_string_payload_not_double_encoded(tmp_path):
 
 
 # ── --args forwarded ──────────────────────────────────────────────────────────
+
 
 def test_call_passes_args_to_underlying_call(tmp_path):
     out = tmp_path / "acme.probe-raw.json"
@@ -106,6 +110,7 @@ def test_call_no_args_defaults_to_empty_dict(tmp_path):
 
 # ── --out required ────────────────────────────────────────────────────────────
 
+
 def test_call_missing_out_exits_nonzero():
     with pytest.raises(SystemExit) as exc_info:
         main(["call", "acme", "whoami"])  # no --out
@@ -113,6 +118,7 @@ def test_call_missing_out_exits_nonzero():
 
 
 # ── bad --args JSON ───────────────────────────────────────────────────────────
+
 
 def test_call_bad_args_json_returns_1(tmp_path, capsys):
     out = tmp_path / "acme.probe-raw.json"
@@ -127,6 +133,7 @@ def test_call_bad_args_json_returns_1(tmp_path, capsys):
 
 
 # ── PII warning ───────────────────────────────────────────────────────────────
+
 
 def test_call_emits_pii_warning(tmp_path, capsys):
     out = tmp_path / "acme.probe-raw.json"

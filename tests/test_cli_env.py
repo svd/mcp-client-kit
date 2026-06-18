@@ -9,20 +9,18 @@ Covers:
   #6  session() --stdio path passes env to _stdio_session
   #7  session() config-by-name path merges --env over cached spec env
 """
+
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, patch
 
 from mcpgen.cli import _parse_env
-
 
 # ---------------------------------------------------------------------------
 # _parse_env unit tests
 # ---------------------------------------------------------------------------
+
 
 def _ns(env_flags=None) -> SimpleNamespace:
     return SimpleNamespace(env=env_flags)
@@ -89,6 +87,7 @@ def test_parse_env_empty_key_skipped(capsys):
 # session() wiring tests — ensure env reaches _stdio_session
 # ---------------------------------------------------------------------------
 
+
 def test_session_stdio_flag_passes_env():
     """session() with cmd= must pass the env dict into _stdio_session."""
     captured = {}
@@ -101,16 +100,19 @@ def test_session_stdio_flag_passes_env():
         yield mock_s
 
     import contextlib
+
     fake_cm = contextlib.asynccontextmanager(_fake_stdio_session)
 
     import asyncio
+
     from mcpgen._bridge import session
 
     env_in = {"CONTEXT7_API_KEY": "testkey"}
 
     with patch("mcpgen._bridge._stdio_session", side_effect=fake_cm):
+
         async def _run():
-            async with session("dummy", cmd="echo hello", env=env_in) as s:
+            async with session("dummy", cmd="echo hello", env=env_in):
                 pass
 
         asyncio.run(_run())
@@ -129,14 +131,17 @@ def test_session_no_env_passes_none():
         yield mock_s
 
     import contextlib
+
     fake_cm = contextlib.asynccontextmanager(_fake_stdio_session)
 
     import asyncio
+
     from mcpgen._bridge import session
 
     with patch("mcpgen._bridge._stdio_session", side_effect=fake_cm):
+
         async def _run():
-            async with session("dummy", cmd="echo hello") as s:
+            async with session("dummy", cmd="echo hello"):
                 pass
 
         asyncio.run(_run())

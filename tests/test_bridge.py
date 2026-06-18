@@ -7,6 +7,7 @@ async context-manager helpers so routing logic is exercised in pure Python.
 Async helpers are invoked via asyncio.run() (matching the project convention —
 no pytest-asyncio dependency needed).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -21,10 +22,10 @@ import pytest
 
 from mcpgen import _bridge
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_mock_session(tool_response: dict | None = None):
     """Return a mock MCP ClientSession that records calls."""
@@ -32,16 +33,16 @@ def _make_mock_session(tool_response: dict | None = None):
     s.initialize = AsyncMock()
     if tool_response is not None:
         import json
+
         payload = json.dumps(tool_response)
-        s.call_tool = AsyncMock(return_value=MagicMock(
-            content=[MagicMock(type="text", text=payload)]
-        ))
+        s.call_tool = AsyncMock(return_value=MagicMock(content=[MagicMock(type="text", text=payload)]))
     return s
 
 
 # ---------------------------------------------------------------------------
 # _bearer_session: header and no-file-IO checks
 # ---------------------------------------------------------------------------
+
 
 def test_bearer_session_passes_authorization_header():
     """_bearer_session must call _open_http with Authorization: Bearer <tok>."""
@@ -57,8 +58,7 @@ def test_bearer_session_passes_authorization_header():
     mock_s = _make_mock_session()
 
     async def run():
-        with patch("mcpgen._bridge._open_http", fake_http), \
-             patch("mcpgen._bridge.ClientSession") as mock_cs:
+        with patch("mcpgen._bridge._open_http", fake_http), patch("mcpgen._bridge.ClientSession") as mock_cs:
             mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_s)
             mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
             async with _bridge._bearer_session("https://api.example.com/mcp", "tok_abc"):
@@ -81,9 +81,11 @@ def test_bearer_session_does_not_touch_file_storage(tmp_path):
     mock_s = _make_mock_session()
 
     async def run():
-        with patch("mcpgen._bridge._open_http", fake_http), \
-             patch("mcpgen._bridge.ClientSession") as mock_cs, \
-             patch("mcpgen._bridge.DEFAULT_CREDS_PATH", creds):
+        with (
+            patch("mcpgen._bridge._open_http", fake_http),
+            patch("mcpgen._bridge.ClientSession") as mock_cs,
+            patch("mcpgen._bridge.DEFAULT_CREDS_PATH", creds),
+        ):
             mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_s)
             mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
             async with _bridge._bearer_session("https://api.example.com/mcp", "tok"):
@@ -96,6 +98,7 @@ def test_bearer_session_does_not_touch_file_storage(tmp_path):
 # ---------------------------------------------------------------------------
 # session() routing: bearer takes precedence over OAuth
 # ---------------------------------------------------------------------------
+
 
 def test_session_routes_bearer_not_oauth_when_bearer_provided():
     """session(bearer=…) uses _bearer_session; _http_session must not be called."""
@@ -113,9 +116,11 @@ def test_session_routes_bearer_not_oauth_when_bearer_provided():
         yield _make_mock_session()
 
     async def run():
-        with patch("mcpgen._bridge._bearer_session", fake_bearer), \
-             patch("mcpgen._bridge._http_session", fake_oauth), \
-             patch("mcpgen._bridge.servers", return_value={}):
+        with (
+            patch("mcpgen._bridge._bearer_session", fake_bearer),
+            patch("mcpgen._bridge._http_session", fake_oauth),
+            patch("mcpgen._bridge.servers", return_value={}),
+        ):
             async with _bridge.session(
                 "github",
                 url="https://api.githubcopilot.com/mcp/",
@@ -138,8 +143,7 @@ def test_session_bearer_uses_server_arg_as_url_when_no_url():
         yield _make_mock_session()
 
     async def run():
-        with patch("mcpgen._bridge._bearer_session", fake_bearer), \
-             patch("mcpgen._bridge.servers", return_value={}):
+        with patch("mcpgen._bridge._bearer_session", fake_bearer), patch("mcpgen._bridge.servers", return_value={}):
             async with _bridge.session(
                 "https://api.githubcopilot.com/mcp/",
                 bearer="ghp_test",
@@ -160,9 +164,10 @@ def test_session_oauth_path_unchanged_without_bearer():
         yield _make_mock_session()
 
     async def run():
-        with patch("mcpgen._bridge._http_session", fake_oauth), \
-             patch("mcpgen._bridge.servers",
-                   return_value={"myserver": "https://mcp.example.com/mcp"}):
+        with (
+            patch("mcpgen._bridge._http_session", fake_oauth),
+            patch("mcpgen._bridge.servers", return_value={"myserver": "https://mcp.example.com/mcp"}),
+        ):
             async with _bridge.session("myserver"):
                 pass
 
@@ -173,6 +178,7 @@ def test_session_oauth_path_unchanged_without_bearer():
 # ---------------------------------------------------------------------------
 # McpBridgeCaller: bearer wired through to session()
 # ---------------------------------------------------------------------------
+
 
 def test_mcp_bridge_caller_threads_bearer_to_session():
     """McpBridgeCaller(bearer=…).call() must forward the bearer kwarg to session()."""
@@ -219,6 +225,7 @@ def test_mcp_bridge_caller_bearer_none_by_default():
 # session() raw URL path: no auth, no config entry
 # ---------------------------------------------------------------------------
 
+
 def test_session_raw_url_uses_open_http_with_no_auth():
     """session(raw_url) with no bearer/OAuth must call _open_http with no headers or auth."""
     captured: dict = {}
@@ -234,9 +241,11 @@ def test_session_raw_url_uses_open_http_with_no_auth():
     mock_s = _make_mock_session()
 
     async def run():
-        with patch("mcpgen._bridge._open_http", fake_open_http), \
-             patch("mcpgen._bridge.ClientSession") as mock_cs, \
-             patch("mcpgen._bridge.servers", return_value={}):
+        with (
+            patch("mcpgen._bridge._open_http", fake_open_http),
+            patch("mcpgen._bridge.ClientSession") as mock_cs,
+            patch("mcpgen._bridge.servers", return_value={}),
+        ):
             mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_s)
             mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
             async with _bridge.session("https://public.example.com/mcp"):
@@ -252,9 +261,11 @@ def test_session_raw_url_uses_open_http_with_no_auth():
 # FileTokenStorage: file permissions and atomic write
 # ---------------------------------------------------------------------------
 
+
 def test_file_storage_sets_0600_file_and_0700_dir(tmp_path):
     """_file_save must create credentials with 0600 and parent dir with 0700."""
     from mcp.shared.auth import OAuthToken
+
     creds = tmp_path / "subdir" / "credentials.json"
     storage = _bridge.FileTokenStorage("s", credentials_path=creds, backend="file")
     asyncio.run(storage.set_tokens(OAuthToken(access_token="tok", token_type="bearer")))
@@ -266,6 +277,7 @@ def test_file_storage_sets_0600_file_and_0700_dir(tmp_path):
 def test_file_storage_round_trip(tmp_path):
     """Tokens saved by file backend round-trip to a fresh storage instance."""
     from mcp.shared.auth import OAuthToken
+
     creds = tmp_path / "credentials.json"
     storage = _bridge.FileTokenStorage("s", credentials_path=creds, backend="file")
     asyncio.run(storage.set_tokens(OAuthToken(access_token="mytoken", token_type="bearer")))
@@ -285,13 +297,15 @@ def test_file_storage_self_heals_loose_permissions(tmp_path):
         warnings.simplefilter("always")
         storage._file_load()
     assert stat.S_IMODE(os.stat(creds).st_mode) == 0o600, "perms must be fixed to 0600"
-    assert any("0644" in str(w.message) or "fixed" in str(w.message) for w in caught), \
+    assert any("0644" in str(w.message) or "fixed" in str(w.message) for w in caught), (
         "must warn about loose permissions"
+    )
 
 
 # ---------------------------------------------------------------------------
 # resolve_cred_backend: precedence order
 # ---------------------------------------------------------------------------
+
 
 def test_resolve_cred_backend_default_is_file(monkeypatch):
     """Without any input, resolve_cred_backend returns 'file'."""
@@ -332,6 +346,7 @@ def test_resolve_cred_backend_unknown_raises():
 # _load_client_config
 # ---------------------------------------------------------------------------
 
+
 def test_load_client_config_absent_returns_empty(tmp_path):
     """_load_client_config returns {} when the config file does not exist."""
     assert _bridge._load_client_config(tmp_path / "no-config.json") == {}
@@ -349,8 +364,10 @@ def test_load_client_config_reads_key(tmp_path):
 # Keyring backend: fake in-memory store + no-backend fallback
 # ---------------------------------------------------------------------------
 
+
 class _FakeKeyring:
     """In-memory keyring stub that mimics keyring module's interface."""
+
     def __init__(self):
         self._store: dict = {}
         self.set_calls: list = []
@@ -368,6 +385,7 @@ class _FakeKeyring:
 def test_keyring_backend_round_trip(tmp_path):
     """keyring backend stores/loads tokens via the injected fake keyring."""
     from mcp.shared.auth import OAuthToken
+
     fake_kr = _FakeKeyring()
     creds = tmp_path / "credentials.json"
 
@@ -389,14 +407,16 @@ def test_keyring_backend_falls_back_to_file_when_unavailable(tmp_path):
     from mcp.shared.auth import OAuthToken
 
     class _BrokenKeyring:
-        def get_password(self, s, u): raise RuntimeError("no keyring")
-        def set_password(self, s, u, p): raise RuntimeError("no keyring")
+        def get_password(self, s, u):
+            raise RuntimeError("no keyring")
+
+        def set_password(self, s, u, p):
+            raise RuntimeError("no keyring")
 
     creds = tmp_path / "credentials.json"
     storage = _bridge.FileTokenStorage("srv", credentials_path=creds, backend="keyring")
 
-    with patch.dict("sys.modules", {"keyring": _BrokenKeyring()}), \
-         warnings.catch_warnings(record=True) as caught:
+    with patch.dict("sys.modules", {"keyring": _BrokenKeyring()}), warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         asyncio.run(storage.set_tokens(OAuthToken(access_token="fb_token", token_type="bearer")))
 
@@ -409,8 +429,10 @@ def test_keyring_backend_falls_back_to_file_when_unavailable(tmp_path):
 # migrate_creds — backend-to-backend credential migration
 # ---------------------------------------------------------------------------
 
+
 class _FakeKeyringMig(_FakeKeyring):
     """Extends _FakeKeyring with delete_password support for migration tests."""
+
     def __init__(self):
         super().__init__()
         self.delete_calls: list = []
@@ -422,10 +444,7 @@ class _FakeKeyringMig(_FakeKeyring):
 
 def _creds_data(*server_names: str) -> dict:
     """Build a minimal credentials dict for the given server names."""
-    return {
-        name: {"tokens": {"access_token": f"tok_{name}", "token_type": "bearer"}}
-        for name in server_names
-    }
+    return {name: {"tokens": {"access_token": f"tok_{name}", "token_type": "bearer"}} for name in server_names}
 
 
 def test_migrate_file_to_keyring_basic(tmp_path):
@@ -480,7 +499,7 @@ def test_migrate_collision_source_wins(tmp_path):
     source_data = {"alpha": {"tokens": {"access_token": "src_tok", "token_type": "bearer"}}}
     target_data = {
         "alpha": {"tokens": {"access_token": "old_tok", "token_type": "bearer"}},
-        "beta":  {"tokens": {"access_token": "beta_tok", "token_type": "bearer"}},
+        "beta": {"tokens": {"access_token": "beta_tok", "token_type": "bearer"}},
     }
     creds.write_text(json.dumps(source_data))
     fake_kr = _FakeKeyringMig()
@@ -515,9 +534,7 @@ def test_migrate_servers_subset(tmp_path):
     fake_kr = _FakeKeyringMig()
 
     with patch.dict("sys.modules", {"keyring": fake_kr}):
-        result = _bridge.migrate_creds(
-            "file", "keyring", servers=["acme", "beta"], credentials_path=creds
-        )
+        result = _bridge.migrate_creds("file", "keyring", servers=["acme", "beta"], credentials_path=creds)
         migrated_data = _bridge._keyring_read_raw()
 
     assert result["migrated"] == 2
@@ -533,9 +550,7 @@ def test_migrate_servers_subset_purge_partial(tmp_path):
     fake_kr = _FakeKeyringMig()
 
     with patch.dict("sys.modules", {"keyring": fake_kr}):
-        _bridge.migrate_creds(
-            "file", "keyring", servers=["acme"], credentials_path=creds, purge=True
-        )
+        _bridge.migrate_creds("file", "keyring", servers=["acme"], credentials_path=creds, purge=True)
 
     remaining = json.loads(creds.read_text())
     assert "acme" not in remaining, "migrated key must be purged from source"
@@ -550,9 +565,7 @@ def test_migrate_servers_absent_name_raises(tmp_path):
 
     with patch.dict("sys.modules", {"keyring": fake_kr}):
         with pytest.raises(ValueError, match="nosuchserver"):
-            _bridge.migrate_creds(
-                "file", "keyring", servers=["acme", "nosuchserver"], credentials_path=creds
-            )
+            _bridge.migrate_creds("file", "keyring", servers=["acme", "nosuchserver"], credentials_path=creds)
         # Nothing written to keyring
         assert not fake_kr.set_calls
 
@@ -571,9 +584,7 @@ def test_migrate_set_default_creates_config(tmp_path):
     fake_kr = _FakeKeyringMig()
 
     with patch.dict("sys.modules", {"keyring": fake_kr}):
-        result = _bridge.migrate_creds(
-            "file", "keyring", credentials_path=creds, set_default=True, config_path=cfg
-        )
+        result = _bridge.migrate_creds("file", "keyring", credentials_path=creds, set_default=True, config_path=cfg)
 
     assert result["set_default"] is True
     assert cfg.exists()
@@ -589,9 +600,7 @@ def test_migrate_set_default_preserves_other_keys(tmp_path):
     fake_kr = _FakeKeyringMig()
 
     with patch.dict("sys.modules", {"keyring": fake_kr}):
-        _bridge.migrate_creds(
-            "file", "keyring", credentials_path=creds, set_default=True, config_path=cfg
-        )
+        _bridge.migrate_creds("file", "keyring", credentials_path=creds, set_default=True, config_path=cfg)
 
     data = json.loads(cfg.read_text())
     assert data["cred_backend"] == "keyring"
@@ -618,9 +627,14 @@ def test_migrate_keyring_read_failure_propagates(tmp_path):
     creds.write_text(json.dumps(_creds_data("svc")))
 
     class _BrokenKeyring:
-        def get_password(self, s, u): raise RuntimeError("no keyring")
-        def set_password(self, s, u, p): raise RuntimeError("no keyring")
-        def delete_password(self, s, u): raise RuntimeError("no keyring")
+        def get_password(self, s, u):
+            raise RuntimeError("no keyring")
+
+        def set_password(self, s, u, p):
+            raise RuntimeError("no keyring")
+
+        def delete_password(self, s, u):
+            raise RuntimeError("no keyring")
 
     with patch.dict("sys.modules", {"keyring": _BrokenKeyring()}):
         with pytest.raises(RuntimeError, match="no keyring"):
@@ -634,14 +648,16 @@ def test_migrate_keyring_read_failure_propagates(tmp_path):
 # list_creds / delete_cred
 # ---------------------------------------------------------------------------
 
+
 def _creds_data_with_expiry(past_name: str, future_name: str, noexp_name: str) -> dict:
     """Build a credentials dict with varied expiry states."""
     import time
+
     now = int(time.time())
     return {
-        past_name:   {"tokens": {"access_token": "tok_past",   "token_type": "bearer", "expires_at": now - 3600}},
+        past_name: {"tokens": {"access_token": "tok_past", "token_type": "bearer", "expires_at": now - 3600}},
         future_name: {"tokens": {"access_token": "tok_future", "token_type": "bearer", "expires_at": now + 3600}},
-        noexp_name:  {"tokens": {"access_token": "tok_noexp",  "token_type": "bearer"}},
+        noexp_name: {"tokens": {"access_token": "tok_noexp", "token_type": "bearer"}},
     }
 
 
@@ -692,10 +708,17 @@ def test_list_creds_sorted(tmp_path):
 def test_list_creds_has_refresh_token(tmp_path):
     """has_refresh_token is True only when refresh_token key is present."""
     import time
+
     creds = tmp_path / "credentials.json"
     data = {
-        "with_rt": {"tokens": {"access_token": "t", "token_type": "bearer",
-                                "refresh_token": "r", "expires_at": int(time.time()) + 7200}},
+        "with_rt": {
+            "tokens": {
+                "access_token": "t",
+                "token_type": "bearer",
+                "refresh_token": "r",
+                "expires_at": int(time.time()) + 7200,
+            }
+        },
         "without_rt": {"tokens": {"access_token": "t2", "token_type": "bearer"}},
     }
     creds.write_text(json.dumps(data))
@@ -710,6 +733,7 @@ def test_list_creds_has_refresh_token(tmp_path):
 def test_list_creds_keyring(tmp_path):
     """list_creds works with the keyring backend."""
     import time
+
     fake_kr = _FakeKeyringMig()
     now = int(time.time())
     kr_data = {
@@ -767,8 +791,7 @@ def test_delete_cred_keyring(tmp_path):
     fake_kr = _FakeKeyringMig()
     with patch.dict("sys.modules", {"keyring": fake_kr}):
         _bridge._keyring_write_raw(_creds_data("svcX", "svcY"))
-        existed = _bridge.delete_cred("svcX", backend="keyring",
-                                      credentials_path=tmp_path / "c.json")
+        existed = _bridge.delete_cred("svcX", backend="keyring", credentials_path=tmp_path / "c.json")
         remaining = _bridge._keyring_read_raw()
 
     assert existed is True
@@ -781,8 +804,7 @@ def test_delete_cred_last_keyring_clears(tmp_path):
     fake_kr = _FakeKeyringMig()
     with patch.dict("sys.modules", {"keyring": fake_kr}):
         _bridge._keyring_write_raw(_creds_data("solo"))
-        existed = _bridge.delete_cred("solo", backend="keyring",
-                                      credentials_path=tmp_path / "c.json")
+        existed = _bridge.delete_cred("solo", backend="keyring", credentials_path=tmp_path / "c.json")
         remaining = _bridge._keyring_read_raw()
 
     assert existed is True
@@ -796,13 +818,20 @@ def test_keyring_clear_raw_propagates_non_notfound(tmp_path):
     callers reporting deletion success when the entry still exists breaks the
     security contract.
     """
+
     class _LockedKeyring:
         class errors:
             class PasswordDeleteError(Exception):
                 pass
-        def get_password(self, s, u): return None
-        def set_password(self, s, u, p): pass
-        def delete_password(self, s, u): raise RuntimeError("keychain locked")
+
+        def get_password(self, s, u):
+            return None
+
+        def set_password(self, s, u, p):
+            pass
+
+        def delete_password(self, s, u):
+            raise RuntimeError("keychain locked")
 
     with patch.dict("sys.modules", {"keyring": _LockedKeyring()}):
         with pytest.raises(RuntimeError, match="keychain locked"):
@@ -811,12 +840,18 @@ def test_keyring_clear_raw_propagates_non_notfound(tmp_path):
 
 def test_keyring_clear_raw_silent_on_not_found(tmp_path):
     """_keyring_clear_raw is a no-op (no raise) when the entry is absent."""
+
     class _EmptyKeyring:
         class errors:
             class PasswordDeleteError(Exception):
                 pass
-        def get_password(self, s, u): return None
-        def set_password(self, s, u, p): pass
+
+        def get_password(self, s, u):
+            return None
+
+        def set_password(self, s, u, p):
+            pass
+
         def delete_password(self, s, u):
             raise self.errors.PasswordDeleteError("no such entry")
 
@@ -827,6 +862,7 @@ def test_keyring_clear_raw_silent_on_not_found(tmp_path):
 # ---------------------------------------------------------------------------
 # login() — credential preservation on OAuth failure
 # ---------------------------------------------------------------------------
+
 
 def test_login_restores_credential_on_oauth_failure(tmp_path):
     """login() restores the prior credential when the OAuth flow fails.
@@ -851,9 +887,11 @@ def test_login_restores_credential_on_oauth_failure(tmp_path):
         yield  # makes this an async generator; unreachable
 
     async def run():
-        with patch("mcpgen._bridge._local_callback_server", fake_callback_server), \
-             patch("mcpgen._bridge._open_http", fake_http_fail), \
-             patch("mcpgen._bridge.OAuthClientProvider", MagicMock()):
+        with (
+            patch("mcpgen._bridge._local_callback_server", fake_callback_server),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
             with pytest.raises(RuntimeError, match="network error"):
                 await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
 
@@ -878,12 +916,13 @@ def test_login_no_prior_credential_does_not_create_on_failure(tmp_path):
         yield
 
     async def run():
-        with patch("mcpgen._bridge._local_callback_server", fake_callback_server), \
-             patch("mcpgen._bridge._open_http", fake_http_fail), \
-             patch("mcpgen._bridge.OAuthClientProvider", MagicMock()):
+        with (
+            patch("mcpgen._bridge._local_callback_server", fake_callback_server),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
             with pytest.raises(RuntimeError, match="network error"):
-                await _bridge.login("newserver", creds_path=creds,
-                                    url="https://new.example.com/mcp")
+                await _bridge.login("newserver", creds_path=creds, url="https://new.example.com/mcp")
 
     asyncio.run(run())
     # Either no file, or file exists but "newserver" is absent.
@@ -895,6 +934,7 @@ def test_login_no_prior_credential_does_not_create_on_failure(tmp_path):
 # ---------------------------------------------------------------------------
 # parse() — JSON, repr, and plain-text payloads  (#4)
 # ---------------------------------------------------------------------------
+
 
 def _item(text: str) -> dict:
     return {"type": "text", "text": text}

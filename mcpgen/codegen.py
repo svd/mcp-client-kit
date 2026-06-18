@@ -4,6 +4,7 @@ Pure functions only (no I/O) so they're trivially testable. The CLI wires these
 to a live server via the bridge. Generated modules depend only on the McpCaller
 seam (mcpgen.seam), never on a concrete client.
 """
+
 from __future__ import annotations
 
 import keyword
@@ -41,7 +42,7 @@ def py_type(schema: dict | None) -> str:
         return f"list[{py_type(schema.get('items'))}]"
     if t == "object":
         return "dict"
-    return _SCALARS.get(t, "Any")
+    return _SCALARS.get(t or "", "Any")
 
 
 # ── Shape-spec annotation normalization ──────────────────────────────────────
@@ -54,9 +55,7 @@ _ANNOTATION_REWRITE: dict[str, str] = {
     "none": "None",
     **{k: v for k, v in _SCALARS.items() if k != "null"},  # string→str, integer→int, etc.
 }
-_ANNOTATION_RE = re.compile(
-    r"\b(" + "|".join(re.escape(k) for k in _ANNOTATION_REWRITE) + r")\b"
-)
+_ANNOTATION_RE = re.compile(r"\b(" + "|".join(re.escape(k) for k in _ANNOTATION_REWRITE) + r")\b")
 
 
 def normalize_annotation(s: str) -> str:
@@ -79,6 +78,7 @@ def normalize_annotation(s: str) -> str:
 
 # ── Identifier sanitization ──────────────────────────────────────────────────
 
+
 def sanitize(name: str) -> str:
     """Turn an arbitrary tool/param name into a valid Python identifier."""
     s = re.sub(r"\W", "_", name)
@@ -91,6 +91,7 @@ def sanitize(name: str) -> str:
 
 # ── Rendering ────────────────────────────────────────────────────────────────
 
+
 def _str_literal(s: str) -> str:
     """Emit a Python string literal for *s* that is injection-safe.
 
@@ -99,7 +100,7 @@ def _str_literal(s: str) -> str:
     well-formed names); falls back to ``repr()``, which always produces a
     valid, injection-safe literal.
     """
-    if not any(c in s for c in ('"', '\\', '\n', '\r')):
+    if not any(c in s for c in ('"', "\\", "\n", "\r")):
         return f'"{s}"'
     return repr(s)
 
@@ -111,7 +112,7 @@ def _docstring(text: str | None, indent: str) -> str:
     # Triple-quote form is safe only when the text cannot break out of it:
     # no backslash, no triple-quote sequence, and not ending with a quote
     # char (which would form an accidental close sequence like `foo"""""`).
-    if '\\' not in text and '"""' not in text and not text.endswith('"'):
+    if "\\" not in text and '"""' not in text and not text.endswith('"'):
         lines = text.splitlines()
         if len(lines) == 1:
             return f'{indent}"""{lines[0]}"""'
@@ -119,7 +120,7 @@ def _docstring(text: str | None, indent: str) -> str:
         return f'{indent}"""{body}\n{indent}"""'
     # Server-controlled text with special chars — use a repr() literal.
     # repr() always produces a valid, injection-safe Python string literal.
-    return f'{indent}{repr(text)}'
+    return f"{indent}{repr(text)}"
 
 
 def render_model(name: str, fields: dict[str, str]) -> str:
@@ -203,8 +204,7 @@ _DIG_LIST = '''def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
     return cur'''
 
 
-def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict,
-                       required: set, shape: dict) -> str:
+def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict, required: set, shape: dict) -> str:
     """Emit @overload stubs (one per discriminator value) + impl signature."""
     disc: str = shape["discriminator"]
     variants: dict = shape["variants"]
@@ -233,11 +233,7 @@ def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict,
         all_p = ["caller: McpCaller", "*", *params] if params else ["caller: McpCaller"]
         return ", ".join(all_p)
 
-    variant_models = [
-        (int(k), v.get("return_model", "Any"))
-        for k, v in sorted_variants
-        if v.get("return_model")
-    ]
+    variant_models = [(int(k), v.get("return_model", "Any")) for k, v in sorted_variants if v.get("return_model")]
     union_ret = " | ".join(m for _, m in variant_models) if variant_models else "Any"
 
     blocks: list[str] = []
@@ -259,16 +255,16 @@ def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict,
         args_expr = "{}"
     else:
         if req_pairs:
-            inits = ", ".join(f'{_str_literal(pname)}: {py}' for py, pname in req_pairs)
+            inits = ", ".join(f"{_str_literal(pname)}: {py}" for py, pname in req_pairs)
             impl_lines.append(f"    args: dict[str, Any] = {{{inits}}}")
         else:
             impl_lines.append("    args: dict[str, Any] = {}")
         for py, pname in opt_pairs:
             impl_lines.append(f"    if {py} is not None:")
-            impl_lines.append(f'        args[{_str_literal(pname)}] = {py}')
+            impl_lines.append(f"        args[{_str_literal(pname)}] = {py}")
         args_expr = "args"
 
-    call = f'await caller.call(SERVER, {_str_literal(raw_name)}, {args_expr})'
+    call = f"await caller.call(SERVER, {_str_literal(raw_name)}, {args_expr})"
     if unwrap:
         path = "(" + "".join(f"{k!r}, " for k in unwrap) + ")"
         impl_lines.append(f"    result = {call}")
@@ -315,7 +311,7 @@ def render_tool(tool: dict, shape: dict | None = None) -> str:
     ordered = sorted(props.items(), key=lambda kv: kv[0] not in required)
 
     params: list[str] = []
-    body_args: list[str] = []
+    body_args: list[tuple[str, Any, bool]] = []
     for pname, pschema in ordered:
         py = sanitize(pname)
         ann = overrides.get(pname) or py_type(pschema)
@@ -340,16 +336,16 @@ def render_tool(tool: dict, shape: dict | None = None) -> str:
         args_expr = "{}"
     else:
         if req_pairs:
-            inits = ", ".join(f'{_str_literal(pname)}: {py}' for py, pname in req_pairs)
+            inits = ", ".join(f"{_str_literal(pname)}: {py}" for py, pname in req_pairs)
             lines.append(f"    args: dict[str, Any] = {{{inits}}}")
         else:
             lines.append("    args: dict[str, Any] = {}")
         for py, pname in opt_pairs:
             lines.append(f"    if {py} is not None:")
-            lines.append(f'        args[{_str_literal(pname)}] = {py}')
+            lines.append(f"        args[{_str_literal(pname)}] = {py}")
         args_expr = "args"
 
-    call = f'await caller.call(SERVER, {_str_literal(raw_name)}, {args_expr})'
+    call = f"await caller.call(SERVER, {_str_literal(raw_name)}, {args_expr})"
     if unwrap:
         path = "(" + "".join(f"{k!r}, " for k in unwrap) + ")"
         lines.append(f"    result = {call}")
@@ -381,13 +377,10 @@ SERVER = {server!r}
 '''
 
 
-_PY_BUILTINS = frozenset({
-    "str", "int", "float", "list", "dict", "bool", "bytes", "object", "type", "set", "tuple"
-})
+_PY_BUILTINS = frozenset({"str", "int", "float", "list", "dict", "bool", "bytes", "object", "type", "set", "tuple"})
 
 
-def render_module(server: str, tools: list[dict], shapes: dict | None = None,
-                  probe_note: str = "") -> str:
+def render_module(server: str, tools: list[dict], shapes: dict | None = None, probe_note: str = "") -> str:
     """Render a full wrapper module.
 
     `shapes` maps tool name -> probe-derived shape-spec (see render_tool). When
@@ -397,9 +390,7 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None,
     shapes = shapes or {}
     note = f"\n{probe_note}\n" if probe_note else ""
     has_disc = any(s.get("discriminator") and s.get("variants") for s in shapes.values())
-    needs_json = bool(shapes) and any(
-        (shapes.get(t["name"]) or {}).get("unwrap") for t in tools
-    )
+    needs_json = bool(shapes) and any((shapes.get(t["name"]) or {}).get("unwrap") for t in tools)
     has_typed_return = has_disc or any(s.get("return_model") for s in shapes.values())
     if has_disc:
         type_imports = "from typing import Any, Literal, TypedDict, cast, overload"
@@ -462,8 +453,8 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None,
 
 # ── Response-shape summary (for the empirical probe) ─────────────────────────
 
-def summarize_shape(obj: Any, max_keys: int = 40, max_depth: int = 6,
-                    _depth: int = 0) -> Any:
+
+def summarize_shape(obj: Any, max_keys: int = 40, max_depth: int = 6, _depth: int = 0) -> Any:
     """Reduce a live response to a compact shape (keys + types + nesting).
 
     Records structure, NOT payload — server responses can be 100-500 KB and must not
@@ -475,20 +466,23 @@ def summarize_shape(obj: Any, max_keys: int = 40, max_depth: int = 6,
         out: dict[str, Any] = {}
         for i, (k, v) in enumerate(obj.items()):
             if i >= max_keys:
-                out["...(+%d keys)" % (len(obj) - max_keys)] = None
+                out[f"...(+{len(obj) - max_keys} keys)"] = None
                 break
             out[k] = summarize_shape(v, max_keys, max_depth, _depth + 1)
         return out
     if isinstance(obj, list):
         if not obj:
             return ["<empty>"]
-        return [summarize_shape(obj[0], max_keys, max_depth, _depth + 1),
-                f"...x{len(obj)}"] if len(obj) > 1 else [
-            summarize_shape(obj[0], max_keys, max_depth, _depth + 1)]
+        return (
+            [summarize_shape(obj[0], max_keys, max_depth, _depth + 1), f"...x{len(obj)}"]
+            if len(obj) > 1
+            else [summarize_shape(obj[0], max_keys, max_depth, _depth + 1)]
+        )
     return type(obj).__name__
 
 
 # ── Multi-probe shape merge ───────────────────────────────────────────────────
+
 
 def _merge_scalar(types: set[str]) -> str:
     """Merge a set of observed type-name strings into one annotation.
@@ -584,11 +578,32 @@ def detect_discriminators(tools: list[dict]) -> dict[str, list[str]]:
     # Comparison uses pname.lower(), so include common camelCase compound forms
     # (e.g. "repoName".lower() == "reponame", not "repo").
     _DENYLIST = {
-        "page", "per_page", "limit", "offset", "cursor",
-        "path", "repo", "owner", "org", "branch", "ref",
-        "method", "query", "search", "filter", "sort", "order", "direction",
-        "context_lines", "include", "exclude",
-        "reponame", "repo_name", "repositoryname", "username", "orgname",
+        "page",
+        "per_page",
+        "limit",
+        "offset",
+        "cursor",
+        "path",
+        "repo",
+        "owner",
+        "org",
+        "branch",
+        "ref",
+        "method",
+        "query",
+        "search",
+        "filter",
+        "sort",
+        "order",
+        "direction",
+        "context_lines",
+        "include",
+        "exclude",
+        "reponame",
+        "repo_name",
+        "repositoryname",
+        "username",
+        "orgname",
     }
 
     # candidates[param_name] = [tool_name, ...]
@@ -612,11 +627,7 @@ def detect_discriminators(tools: list[dict]) -> dict[str, list[str]]:
             candidates.setdefault(pname, []).append(tool_name)
 
     # Keep only params that appear in ≥2 tools
-    return {
-        pname: sorted(tool_names)
-        for pname, tool_names in sorted(candidates.items())
-        if len(tool_names) >= 2
-    }
+    return {pname: sorted(tool_names) for pname, tool_names in sorted(candidates.items()) if len(tool_names) >= 2}
 
 
 def merge_skeletons(skeletons: list[dict]) -> dict:
@@ -647,9 +658,7 @@ def probe_skeleton(tool: str, args_list: list[dict], shapes: list[Any]) -> dict:
     # Normalize raw type-name strings (e.g. "NoneType" → "Any | None") so
     # fields values are valid Python annotation strings, not Python type names.
     fields: dict[str, str] = (
-        {k: _merge_scalar({v}) for k, v in merged.items() if isinstance(v, str)}
-        if isinstance(merged, dict)
-        else {}
+        {k: _merge_scalar({v}) for k, v in merged.items() if isinstance(v, str)} if isinstance(merged, dict) else {}
     )
     probed_args: Any = args_list[0] if len(args_list) == 1 else list(args_list)
     return {

@@ -7,15 +7,16 @@ Deterministic stub generation is the 80%; the optional --probe adds one live cal
 and records the observed response *shape* (not payload) — the empirical step that
 distinguishes this from pure inputSchema codegen.
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime
 import json
 import os
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote as _url_quote
@@ -35,17 +36,25 @@ async def _list_tools(
     env: dict[str, str] | None = None,
 ) -> list[dict]:
     async with _bridge.session(
-        server, cmd=cmd, url=url, bearer=bearer, client_name=client_name,
-        config_path=config_path, cred_backend=cred_backend, env=env,
+        server,
+        cmd=cmd,
+        url=url,
+        bearer=bearer,
+        client_name=client_name,
+        config_path=config_path,
+        cred_backend=cred_backend,
+        env=env,
     ) as s:
         result = await s.list_tools()
     tools = []
     for t in result.tools:
-        tools.append({
-            "name": t.name,
-            "description": t.description,
-            "inputSchema": t.inputSchema,
-        })
+        tools.append(
+            {
+                "name": t.name,
+                "description": t.description,
+                "inputSchema": t.inputSchema,
+            }
+        )
     return tools
 
 
@@ -63,8 +72,13 @@ async def _probe(
     env: dict[str, str] | None = None,
 ) -> Any:
     caller = _bridge.McpBridgeCaller(
-        cmd=cmd, url=url, bearer=bearer, client_name=client_name, config_path=config_path,
-        cred_backend=cred_backend, env=env,
+        cmd=cmd,
+        url=url,
+        bearer=bearer,
+        client_name=client_name,
+        config_path=config_path,
+        cred_backend=cred_backend,
+        env=env,
     )
     raw = await caller.call(server, tool, args)
     return codegen.summarize_shape(raw)
@@ -84,8 +98,13 @@ async def _call(
     env: dict[str, str] | None = None,
 ) -> Any:
     caller = _bridge.McpBridgeCaller(
-        cmd=cmd, url=url, bearer=bearer, client_name=client_name, config_path=config_path,
-        cred_backend=cred_backend, env=env,
+        cmd=cmd,
+        url=url,
+        bearer=bearer,
+        client_name=client_name,
+        config_path=config_path,
+        cred_backend=cred_backend,
+        env=env,
     )
     return await caller.call(server, tool, args)
 
@@ -94,6 +113,7 @@ def _server_stem(server: str) -> str:
     """Return a filesystem-safe stem for a server identifier (name or URL)."""
     if server.startswith(("http://", "https://")):
         from urllib.parse import urlparse
+
         parsed = urlparse(server)
         # e.g. "mcp.deepwiki.com" → "mcp.deepwiki.com"
         stem = parsed.netloc or parsed.path.strip("/").replace("/", "_")
@@ -222,8 +242,7 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
                     )
                     if changes:
                         print(
-                            f"[codegen] shapes: normalized {len(changes)} type string(s): "
-                            + ", ".join(changes),
+                            f"[codegen] shapes: normalized {len(changes)} type string(s): " + ", ".join(changes),
                             file=sys.stderr,
                         )
                     return shapes
@@ -234,8 +253,7 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
     print(f"[codegen] shapes: {path} ({len(shapes)} tool(s))", file=sys.stderr)
     if changes:
         print(
-            f"[codegen] shapes: normalized {len(changes)} type string(s): "
-            + ", ".join(changes),
+            f"[codegen] shapes: normalized {len(changes)} type string(s): " + ", ".join(changes),
             file=sys.stderr,
         )
     return shapes
@@ -243,8 +261,14 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
 
 def _cmd_codegen(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
-    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
-                cred_backend=ns.cred_backend, env=_parse_env(ns))
+    conn = dict(
+        url=ns.url,
+        bearer=ns.bearer,
+        client_name=ns.client_name,
+        config_path=ns.config,
+        cred_backend=ns.cred_backend,
+        env=_parse_env(ns),
+    )
     try:
         tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
     except (FileNotFoundError, ValueError) as exc:
@@ -264,10 +288,7 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
             print(f"[codegen] error: {exc}", file=sys.stderr)
             return 1
         shape_json = json.dumps(shape, indent=2)
-        probe_note = (
-            f"\nObserved response shape of {ns.probe!r} (keys/types/nesting only):\n"
-            + shape_json
-        )
+        probe_note = f"\nObserved response shape of {ns.probe!r} (keys/types/nesting only):\n" + shape_json
 
     source = codegen.render_module(ns.server, tools, shapes=shapes, probe_note=probe_note)
     if ns.out:
@@ -295,8 +316,14 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     n = len(args_list)
     print(f"[probe] {ns.server}.{ns.tool} ({n} probe(s)) …", file=sys.stderr)
 
-    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
-                cred_backend=ns.cred_backend, env=_parse_env(ns))
+    conn = dict(
+        url=ns.url,
+        bearer=ns.bearer,
+        client_name=ns.client_name,
+        config_path=ns.config,
+        cred_backend=ns.cred_backend,
+        env=_parse_env(ns),
+    )
     shapes = []
     for i, args in enumerate(args_list):
         print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
@@ -326,13 +353,17 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         for key in sorted(all_keys):
             # Skip non-hashable values (lists, dicts) — discriminators are scalars by definition.
             values = {
-                args[key] for args in args_list
+                args[key]
+                for args in args_list
                 if key in args and isinstance(args[key], (str, int, float, bool, type(None)))
             }
             if len(values) == 1 and key.lower() in _DISCRIMINATOR_KEYS:
                 val = next(iter(values))
                 print(f"[probe] ⚠  {key} probed as {val!r} only — response shape is variant-specific.", file=sys.stderr)
-                print(f"[probe]    Do NOT emit a single-variant model. Probe every value or use a base model (SKILL step 4).", file=sys.stderr)
+                print(
+                    "[probe]    Do NOT emit a single-variant model. Probe every value or use a base model (SKILL step 4).",
+                    file=sys.stderr,
+                )
     except Exception as exc:
         print(f"[probe] ⚠  discriminator advisory skipped ({exc})", file=sys.stderr)
 
@@ -354,8 +385,14 @@ def _cmd_call(ns: argparse.Namespace) -> int:
     except json.JSONDecodeError as exc:
         print(f"[call] error: --args must be valid JSON ({exc})", file=sys.stderr)
         return 1
-    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
-                cred_backend=ns.cred_backend, env=_parse_env(ns))
+    conn = dict(
+        url=ns.url,
+        bearer=ns.bearer,
+        client_name=ns.client_name,
+        config_path=ns.config,
+        cred_backend=ns.cred_backend,
+        env=_parse_env(ns),
+    )
 
     print(f"[call] {ns.server}.{ns.tool} (live) …", file=sys.stderr)
     try:
@@ -524,8 +561,14 @@ def _cmd_discover(ns: argparse.Namespace) -> int:
 def _cmd_list(ns: argparse.Namespace) -> int:
     """Print the tool inventory as JSON [{name, description}] for a server."""
     cmd = getattr(ns, "stdio", None)
-    conn = dict(url=ns.url, bearer=ns.bearer, client_name=ns.client_name, config_path=ns.config,
-                cred_backend=ns.cred_backend, env=_parse_env(ns))
+    conn = dict(
+        url=ns.url,
+        bearer=ns.bearer,
+        client_name=ns.client_name,
+        config_path=ns.config,
+        cred_backend=ns.cred_backend,
+        env=_parse_env(ns),
+    )
     try:
         tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
     except (FileNotFoundError, ValueError) as exc:
@@ -539,7 +582,10 @@ def _cmd_list(ns: argparse.Namespace) -> int:
         print("[list] ⚠  discriminator candidates (response shape varies by these args):", file=sys.stderr)
         for param, tool_names in candidates.items():
             print(f"[list]   {param} → {', '.join(tool_names)}", file=sys.stderr)
-        print("[list]   Probe EACH value or use a base model — do NOT type from one probe. See SKILL step 4.", file=sys.stderr)
+        print(
+            "[list]   Probe EACH value or use a base model — do NOT type from one probe. See SKILL step 4.",
+            file=sys.stderr,
+        )
 
     return 0
 
@@ -547,7 +593,10 @@ def _cmd_list(ns: argparse.Namespace) -> int:
 def _cmd_login(ns: argparse.Namespace) -> int:
     asyncio.run(
         _bridge.login(
-            ns.server, url=ns.url, client_name=ns.client_name, config_path=ns.config,
+            ns.server,
+            url=ns.url,
+            client_name=ns.client_name,
+            config_path=ns.config,
             cred_backend=ns.cred_backend,
         )
     )
@@ -576,8 +625,7 @@ def _cmd_migrate_creds(ns: argparse.Namespace) -> int:
     purged_note = "source purged" if result["purged"] else "source kept"
     default_note = f"; default set to {dst!r}" if result["set_default"] else ""
     print(
-        f"[migrate-creds] copied {n} server(s) {src} → {dst} "
-        f"({ow} overwritten); {purged_note}{default_note}",
+        f"[migrate-creds] copied {n} server(s) {src} → {dst} ({ow} overwritten); {purged_note}{default_note}",
         file=sys.stderr,
     )
     return 0
@@ -600,11 +648,7 @@ def _cmd_list_creds(ns: argparse.Namespace) -> int:
     col_name = max(len(r["name"]) for r in rows)
     col_name = max(col_name, 4)  # min header width "NAME"
     col_status = 9  # longest status value: "no-expiry"
-    header = (
-        "NAME".ljust(col_name) + "  " +
-        "STATUS".ljust(col_status) + "  " +
-        "EXPIRES"
-    )
+    header = "NAME".ljust(col_name) + "  " + "STATUS".ljust(col_status) + "  " + "EXPIRES"
     print(header)
     print("-" * len(header))
     for r in rows:
@@ -647,27 +691,42 @@ def _cmd_delete_creds(ns: argparse.Namespace) -> int:
 def _add_conn_args(p: argparse.ArgumentParser) -> None:
     """Inline server-connection args shared by all commands (override config)."""
     p.add_argument("--url", help="server URL inline; enables OAuth without a config entry")
-    p.add_argument("--bearer", metavar="TOKEN",
-                   help="static Bearer token for APIs that use PATs (e.g. GitHub); "
-                        "bypasses OAuth. Read from $GITHUB_PAT or similar — never "
-                        "pass a literal token on the command line.")
-    p.add_argument("--client-name", dest="client_name",
-                   help="OAuth client_name override (shown on the server consent screen)")
-    p.add_argument("--config", dest="config",
-                   help="servers config path; overrides $MCPGEN_SERVERS and the default search")
-    p.add_argument("--cred-backend", dest="cred_backend", choices=["file", "keyring", "auto"],
-                   help="credential storage backend: file (default, hardened 0600), "
-                        "keyring (OS keychain; falls back to file if unavailable), "
-                        "or auto (keyring if detected, else file). "
-                        "Also: MCPGEN_CRED_BACKEND env or ~/.mcpgen/config.json 'cred_backend'.")
-    p.add_argument("--env", dest="env", action="append", metavar="KEY[=VAL]",
-                   help="forward an env var to a --stdio server: 'KEY' reads $KEY from "
-                        "the shell; 'KEY=VAL' sets it inline. Repeat for multiple vars. "
-                        "No-op when --stdio is not used.")
+    p.add_argument(
+        "--bearer",
+        metavar="TOKEN",
+        help="static Bearer token for APIs that use PATs (e.g. GitHub); "
+        "bypasses OAuth. Read from $GITHUB_PAT or similar — never "
+        "pass a literal token on the command line.",
+    )
+    p.add_argument(
+        "--client-name", dest="client_name", help="OAuth client_name override (shown on the server consent screen)"
+    )
+    p.add_argument(
+        "--config", dest="config", help="servers config path; overrides $MCPGEN_SERVERS and the default search"
+    )
+    p.add_argument(
+        "--cred-backend",
+        dest="cred_backend",
+        choices=["file", "keyring", "auto"],
+        help="credential storage backend: file (default, hardened 0600), "
+        "keyring (OS keychain; falls back to file if unavailable), "
+        "or auto (keyring if detected, else file). "
+        "Also: MCPGEN_CRED_BACKEND env or ~/.mcpgen/config.json 'cred_backend'.",
+    )
+    p.add_argument(
+        "--env",
+        dest="env",
+        action="append",
+        metavar="KEY[=VAL]",
+        help="forward an env var to a --stdio server: 'KEY' reads $KEY from "
+        "the shell; 'KEY=VAL' sets it inline. Repeat for multiple vars. "
+        "No-op when --stdio is not used.",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     from importlib.metadata import version as _pkg_version
+
     try:
         _version = _pkg_version("mcpgen")
     except Exception:
@@ -690,8 +749,12 @@ def main(argv: list[str] | None = None) -> int:
     pr = sub.add_parser("probe", help="live-call a tool and emit a shape-spec skeleton")
     pr.add_argument("server", help="server name (e.g. acme) or URL")
     pr.add_argument("tool", help="tool to call live")
-    pr.add_argument("--args", action="append", metavar="JSON",
-                    help="JSON args for one probe call; repeat for multi-probe (default: {})")
+    pr.add_argument(
+        "--args",
+        action="append",
+        metavar="JSON",
+        help="JSON args for one probe call; repeat for multi-probe (default: {})",
+    )
     pr.add_argument("--emit-shape", help="write skeleton to this path (default: stdout)")
     pr.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(pr)
@@ -700,10 +763,10 @@ def main(argv: list[str] | None = None) -> int:
     cl = sub.add_parser("call", help="live-call a tool and write the raw payload to --out")
     cl.add_argument("server", help="server name (e.g. acme) or URL")
     cl.add_argument("tool", help="tool to call live")
-    cl.add_argument("--args", metavar="JSON", default=None,
-                    help="JSON args for the tool call (default: {})")
-    cl.add_argument("--out", required=True, metavar="FILE",
-                    help="write raw payload here; use a *.probe-raw.json name — git-ignored")
+    cl.add_argument("--args", metavar="JSON", default=None, help="JSON args for the tool call (default: {})")
+    cl.add_argument(
+        "--out", required=True, metavar="FILE", help="write raw payload here; use a *.probe-raw.json name — git-ignored"
+    )
     cl.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(cl)
     cl.set_defaults(func=_cmd_call)
@@ -718,11 +781,15 @@ def main(argv: list[str] | None = None) -> int:
             "e.g. --out github/github.shapes.json"
         ),
     )
-    mg.add_argument("--keep-parts", action="store_true",
-                    help="keep the .parts/ directory after merging (default: remove)")
-    mg.add_argument("--config", dest="config",
-                    help="accepted for flag-surface consistency with other subcommands; "
-                         "has no effect on merge (merge is pure filesystem consolidation)")
+    mg.add_argument(
+        "--keep-parts", action="store_true", help="keep the .parts/ directory after merging (default: remove)"
+    )
+    mg.add_argument(
+        "--config",
+        dest="config",
+        help="accepted for flag-surface consistency with other subcommands; "
+        "has no effect on merge (merge is pure filesystem consolidation)",
+    )
     mg.set_defaults(func=_cmd_merge)
 
     ls = sub.add_parser("list", help="list tools for a server as JSON [{name, description}]")
@@ -741,39 +808,53 @@ def main(argv: list[str] | None = None) -> int:
         help="copy stored credentials between file and keyring backends",
     )
     mc.add_argument(
-        "--from", dest="from_backend", required=True, choices=["file", "keyring"],
+        "--from",
+        dest="from_backend",
+        required=True,
+        choices=["file", "keyring"],
         help="source backend",
     )
     mc.add_argument(
-        "--to", dest="to_backend", required=True, choices=["file", "keyring"],
+        "--to",
+        dest="to_backend",
+        required=True,
+        choices=["file", "keyring"],
         help="target backend",
     )
     mc.add_argument(
-        "--servers", metavar="A,B,C",
+        "--servers",
+        metavar="A,B,C",
         help="comma-separated server names to migrate (default: all stored servers)",
     )
     mc.add_argument(
-        "--purge", action="store_true",
+        "--purge",
+        action="store_true",
         help="remove migrated entries from the source after a verified copy (default: keep)",
     )
     mc.add_argument(
-        "--set-default", dest="set_default", action="store_true",
+        "--set-default",
+        dest="set_default",
+        action="store_true",
         help="write cred_backend=<to> into ~/.mcpgen/config.json so future "
-             "commands default to the target backend (default: leave config untouched)",
+        "commands default to the target backend (default: leave config untouched)",
     )
     mc.set_defaults(func=_cmd_migrate_creds)
 
     lc = sub.add_parser("list-creds", help="list stored credentials (flags expired)")
     lc.add_argument(
-        "--expired", action="store_true",
+        "--expired",
+        action="store_true",
         help="show only expired credentials (omit valid and non-expiring entries)",
     )
     lc.add_argument(
-        "--json", action="store_true",
+        "--json",
+        action="store_true",
         help="emit JSON array instead of a human table",
     )
     lc.add_argument(
-        "--cred-backend", dest="cred_backend", choices=["file", "keyring", "auto"],
+        "--cred-backend",
+        dest="cred_backend",
+        choices=["file", "keyring", "auto"],
         help="credential storage backend (default: resolved from env/config, else file)",
     )
     lc.set_defaults(func=_cmd_list_creds)
@@ -781,22 +862,30 @@ def main(argv: list[str] | None = None) -> int:
     dl = sub.add_parser("delete-creds", help="delete the stored credential for one server")
     dl.add_argument("server", help="server name whose stored credential to delete")
     dl.add_argument(
-        "--yes", "-y", action="store_true",
+        "--yes",
+        "-y",
+        action="store_true",
         help="skip the confirmation prompt",
     )
     dl.add_argument(
-        "--cred-backend", dest="cred_backend", choices=["file", "keyring", "auto"],
+        "--cred-backend",
+        dest="cred_backend",
+        choices=["file", "keyring", "auto"],
         help="credential storage backend (default: resolved from env/config, else file)",
     )
     dl.set_defaults(func=_cmd_delete_creds)
 
     dc = sub.add_parser("discover", help="list MCP servers from installed agent hosts")
-    dc.add_argument("--host", action="append", dest="host", metavar="ID",
-                    help="filter to this host id (repeatable; default: all)")
-    dc.add_argument("--json", action="store_true",
-                    help="emit JSON array instead of human table")
-    dc.add_argument("--include-env", action="store_true", dest="include_env",
-                    help="include raw env values in JSON output (may expose secrets)")
+    dc.add_argument(
+        "--host", action="append", dest="host", metavar="ID", help="filter to this host id (repeatable; default: all)"
+    )
+    dc.add_argument("--json", action="store_true", help="emit JSON array instead of human table")
+    dc.add_argument(
+        "--include-env",
+        action="store_true",
+        dest="include_env",
+        help="include raw env values in JSON output (may expose secrets)",
+    )
     dc.set_defaults(func=_cmd_discover)
 
     ns = parser.parse_args(argv)

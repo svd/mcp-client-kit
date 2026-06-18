@@ -38,6 +38,7 @@ Unrelated: FastMCP is not a dependency. FastMCP issue #3425 (stale expires_in on
 reload) is a FastMCP bug fixed in fastmcp 3.2.0; our FileTokenStorage stores
 absolute `expires_at` so that class of bug cannot occur regardless.
 """
+
 from __future__ import annotations
 
 import ast
@@ -126,24 +127,18 @@ def resolve_cred_backend(cli_value: str | None = None) -> str:
     """
     if cli_value is not None:
         if cli_value not in _VALID_BACKENDS:
-            raise ValueError(
-                f"Unknown cred backend {cli_value!r}. Valid choices: {sorted(_VALID_BACKENDS)}"
-            )
+            raise ValueError(f"Unknown cred backend {cli_value!r}. Valid choices: {sorted(_VALID_BACKENDS)}")
         return cli_value
     env = os.environ.get(_CRED_BACKEND_ENV)
     if env:
         if env not in _VALID_BACKENDS:
-            raise ValueError(
-                f"{_CRED_BACKEND_ENV}={env!r} unknown. Valid choices: {sorted(_VALID_BACKENDS)}"
-            )
+            raise ValueError(f"{_CRED_BACKEND_ENV}={env!r} unknown. Valid choices: {sorted(_VALID_BACKENDS)}")
         return env
     cfg = _load_client_config()
     backend = cfg.get("cred_backend")
     if backend:
         if backend not in _VALID_BACKENDS:
-            raise ValueError(
-                f"config cred_backend={backend!r} unknown. Valid choices: {sorted(_VALID_BACKENDS)}"
-            )
+            raise ValueError(f"config cred_backend={backend!r} unknown. Valid choices: {sorted(_VALID_BACKENDS)}")
         return backend
     return "file"
 
@@ -152,6 +147,7 @@ def _detect_keyring() -> str:
     """Return 'keyring' if a working OS keyring backend is available, else 'file'."""
     try:
         import keyring as _kr
+
         ring = _kr.get_keyring()
         module = getattr(type(ring), "__module__", "") or ""
         if "fail" in module:
@@ -163,9 +159,11 @@ def _detect_keyring() -> str:
 
 # ── Raw keyring helpers (raise on error — no silent fallback) ────────────────
 
+
 def _keyring_read_raw() -> dict:
     """Read all credentials from the OS keyring. Raises on any failure."""
     import keyring as _kr  # lazy — tests can monkeypatch sys.modules["keyring"]
+
     raw = _kr.get_password(_KEYRING_SERVICE, _KEYRING_USER)
     return json.loads(raw) if raw else {}
 
@@ -173,6 +171,7 @@ def _keyring_read_raw() -> dict:
 def _keyring_write_raw(data: dict) -> None:
     """Write all credentials to the OS keyring. Raises on any failure."""
     import keyring as _kr
+
     _kr.set_password(_KEYRING_SERVICE, _KEYRING_USER, json.dumps(data, indent=2))
 
 
@@ -184,6 +183,7 @@ def _keyring_clear_raw() -> None:
     can surface them rather than falsely reporting deletion success.
     """
     import keyring as _kr
+
     try:
         _kr.delete_password(_KEYRING_SERVICE, _KEYRING_USER)
     except _kr.errors.PasswordDeleteError:
@@ -300,8 +300,8 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
         if not path.exists():
             raise FileNotFoundError(f"config not found: {config_path}")
         try:
-            _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = (
-                _parse_servers(json.loads(path.read_text()))
+            _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(
+                json.loads(path.read_text())
             )
         except (json.JSONDecodeError, OSError, AttributeError) as e:
             raise ValueError(f"failed to parse config {path}: {e}") from e
@@ -313,8 +313,8 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
     for path in candidates:
         if path.exists():
             try:
-                _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = (
-                    _parse_servers(json.loads(path.read_text()))
+                _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(
+                    json.loads(path.read_text())
                 )
                 return _servers_cache
             except (json.JSONDecodeError, OSError, AttributeError):
@@ -375,8 +375,7 @@ class FileTokenStorage(TokenStorage):
         if mode != 0o600:
             os.chmod(self._path, 0o600)
             warnings.warn(
-                f"[mcpgen] {self._path} had permissions {oct(mode)}; "
-                "fixed to 0600.",
+                f"[mcpgen] {self._path} had permissions {oct(mode)}; fixed to 0600.",
                 stacklevel=3,
             )
         return json.loads(self._path.read_text())
@@ -424,8 +423,7 @@ class FileTokenStorage(TokenStorage):
         warnings within the same process lifetime.
         """
         warnings.warn(
-            f"[mcpgen] keyring unavailable ({reason}); "
-            f"falling back to hardened file at {self._path}.",
+            f"[mcpgen] keyring unavailable ({reason}); falling back to hardened file at {self._path}.",
             stacklevel=3,
         )
         self._backend = "file"
@@ -478,6 +476,7 @@ class FileTokenStorage(TokenStorage):
 
 
 # ── Backend-agnostic migration helpers ──────────────────────────────────────
+
 
 def _read_backend(backend: str, credentials_path: Path) -> dict:
     """Read the full credentials dict from *backend* (raises on keyring failure)."""
@@ -547,16 +546,12 @@ def migrate_creds(
     for label, val in [("from_backend", from_backend), ("to_backend", to_backend)]:
         resolved = _detect_keyring() if val == "auto" else val
         if resolved not in concrete:
-            raise ValueError(
-                f"{label}={val!r} is not a concrete backend. Valid choices: {sorted(concrete)}"
-            )
+            raise ValueError(f"{label}={val!r} is not a concrete backend. Valid choices: {sorted(concrete)}")
     from_backend = _detect_keyring() if from_backend == "auto" else from_backend
-    to_backend   = _detect_keyring() if to_backend   == "auto" else to_backend
+    to_backend = _detect_keyring() if to_backend == "auto" else to_backend
 
     if from_backend == to_backend:
-        raise ValueError(
-            f"from_backend and to_backend are both {from_backend!r}; nothing to migrate."
-        )
+        raise ValueError(f"from_backend and to_backend are both {from_backend!r}; nothing to migrate.")
 
     # Read source
     source_all = _read_backend(from_backend, credentials_path)
@@ -566,16 +561,21 @@ def migrate_creds(
         missing = [s for s in servers if s not in source_all]
         if missing:
             raise ValueError(
-                f"Requested server(s) not found in {from_backend!r} backend: "
-                + ", ".join(repr(s) for s in missing)
+                f"Requested server(s) not found in {from_backend!r} backend: " + ", ".join(repr(s) for s in missing)
             )
         source_subset = {k: source_all[k] for k in servers}
     else:
         source_subset = source_all
 
     if not source_subset:
-        return {"from": from_backend, "to": to_backend, "migrated": 0,
-                "overwritten": 0, "purged": False, "set_default": False}
+        return {
+            "from": from_backend,
+            "to": to_backend,
+            "migrated": 0,
+            "overwritten": 0,
+            "purged": False,
+            "set_default": False,
+        }
 
     # Merge into target (source wins on collision)
     target = _read_backend(to_backend, credentials_path)
@@ -657,12 +657,14 @@ def list_creds(
         expired = exp is not None and now >= exp - _MARGIN
         if expired_only and not expired:
             continue
-        out.append({
-            "name": name,
-            "expires_at": exp,
-            "expired": expired,
-            "has_refresh_token": bool(tok.get("refresh_token")),
-        })
+        out.append(
+            {
+                "name": name,
+                "expires_at": exp,
+                "expired": expired,
+                "has_refresh_token": bool(tok.get("refresh_token")),
+            }
+        )
     return out
 
 
@@ -722,15 +724,11 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
 
     refresh_token = tokens_raw.get("refresh_token")
     if not refresh_token:
-        raise ReauthenticationRequired(
-            f"No refresh_token for '{server_name}'. Run: mcpgen login {server_name}"
-        )
+        raise ReauthenticationRequired(f"No refresh_token for '{server_name}'. Run: mcpgen login {server_name}")
 
     client_id = entry.get("client_info", {}).get("client_id")
     if not client_id:
-        raise ReauthenticationRequired(
-            f"No client_id cached for '{server_name}'. Run: mcpgen login {server_name}"
-        )
+        raise ReauthenticationRequired(f"No client_id cached for '{server_name}'. Run: mcpgen login {server_name}")
 
     token_endpoint = entry.get("token_endpoint")
     if not token_endpoint:
@@ -753,8 +751,7 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
 
     if resp.status_code != 200:
         raise ReauthenticationRequired(
-            f"Token refresh failed ({resp.status_code}): {resp.text[:200]}. "
-            f"Run: mcpgen login {server_name}"
+            f"Token refresh failed ({resp.status_code}): {resp.text[:200]}. Run: mcpgen login {server_name}"
         )
 
     await storage.set_tokens(OAuthToken(**resp.json()))
@@ -790,20 +787,16 @@ async def _http_session(
     callback_uri = redirect_uris[0] if redirect_uris else "http://localhost:0/callback"
 
     async def _no_browser(url: str) -> None:
-        raise ReauthenticationRequired(
-            f"OAuth re-auth needed for '{server_name}'. Run: mcpgen login {server_name}"
-        )
+        raise ReauthenticationRequired(f"OAuth re-auth needed for '{server_name}'. Run: mcpgen login {server_name}")
 
     async def _no_callback() -> tuple[str, str | None]:
-        raise ReauthenticationRequired(
-            f"OAuth re-auth needed for '{server_name}'. Run: mcpgen login {server_name}"
-        )
+        raise ReauthenticationRequired(f"OAuth re-auth needed for '{server_name}'. Run: mcpgen login {server_name}")
 
     provider = OAuthClientProvider(
         server_url=server_url,
         client_metadata=OAuthClientMetadata(
             client_name=client_name or _resolve_client_name(server_name),
-            redirect_uris=[callback_uri],
+            redirect_uris=[callback_uri],  # type: ignore[list-item]  # Pydantic coerces str→AnyUrl
             grant_types=["authorization_code", "refresh_token"],
             response_types=["code"],
         ),
@@ -915,9 +908,7 @@ async def session(
         async with _http_session(server, resolved_url, client_name=client_name, cred_backend=cred_backend) as s:
             yield s
     elif "://" not in server:
-        raise ValueError(
-            f"server {server!r} not found in config and is not a URL"
-        )
+        raise ValueError(f"server {server!r} not found in config and is not a URL")
     else:
         # Raw URL, no auth
         async with _open_http(server) as (read, write, _):
@@ -960,10 +951,7 @@ class McpBridgeCaller:
             env=self._env,
         ) as s:
             result = await s.call_tool(tool, arguments)
-            content = [
-                {"type": item.type, "text": getattr(item, "text", "")}
-                for item in result.content
-            ]
+            content = [{"type": item.type, "text": getattr(item, "text", "")} for item in result.content]
             return parse(content)
 
 
@@ -991,10 +979,11 @@ def parse(content_items: list) -> Any:
 # Login flow (browser-based initial OAuth)
 # ---------------------------------------------------------------------------
 
+
 async def _local_callback_server(port: int = 0) -> tuple[int, asyncio.Future]:
     """Start a local HTTP server to receive the OAuth redirect. Returns (port, future)."""
     loop = asyncio.get_event_loop()
-    future: asyncio.Future[tuple[str, str | None]] = loop.create_future()
+    future: asyncio.Future[tuple[str | None, str | None]] = loop.create_future()
 
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         code: str | None = None
@@ -1053,10 +1042,7 @@ async def login(
     _servers = servers(config_path=config_path)
     server_url = url or _servers.get(server_name)
     if server_url is None:
-        raise ValueError(
-            f"Unknown server {server_name!r}. Pass --url or add it to config. "
-            f"Known: {list(_servers)}"
-        )
+        raise ValueError(f"Unknown server {server_name!r}. Pass --url or add it to config. Known: {list(_servers)}")
 
     storage = FileTokenStorage(server_name, creds_path, backend=resolve_cred_backend(cred_backend))
 
@@ -1083,7 +1069,7 @@ async def login(
             server_url=server_url,
             client_metadata=OAuthClientMetadata(
                 client_name=client_name or _resolve_client_name(server_name),
-                redirect_uris=[callback_uri],
+                redirect_uris=[callback_uri],  # type: ignore[list-item]  # Pydantic coerces str→AnyUrl
                 grant_types=["authorization_code", "refresh_token"],
                 response_types=["code"],
             ),
@@ -1149,15 +1135,25 @@ async def ensure_login(
     - Near/past expiry, no refresh_token (or renewal fails): browser login.
     - No token at all: browser login.
     """
-    storage = FileTokenStorage(
-        server_name, creds_path, backend=resolve_cred_backend(cred_backend)
-    )
+    storage = FileTokenStorage(server_name, creds_path, backend=resolve_cred_backend(cred_backend))
     try:
         await _pre_flight_refresh(server_name, storage)
     except ReauthenticationRequired:
-        await login(server_name, creds_path, url=url, client_name=client_name,
-                    config_path=config_path, cred_backend=cred_backend)
+        await login(
+            server_name,
+            creds_path,
+            url=url,
+            client_name=client_name,
+            config_path=config_path,
+            cred_backend=cred_backend,
+        )
         return
-    if await storage.get_tokens() is None:   # first-time: no token cached at all
-        await login(server_name, creds_path, url=url, client_name=client_name,
-                    config_path=config_path, cred_backend=cred_backend)
+    if await storage.get_tokens() is None:  # first-time: no token cached at all
+        await login(
+            server_name,
+            creds_path,
+            url=url,
+            client_name=client_name,
+            config_path=config_path,
+            cred_backend=cred_backend,
+        )

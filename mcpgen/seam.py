@@ -5,6 +5,7 @@ client. That keeps generated code reusable and lets the auth/transport backend
 swap (official `mcp` SDK via `_bridge.py` today; another backend later) without regenerating wrappers.
 See doc/VERDICT.md "Fixed decisions" #3.
 """
+
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable

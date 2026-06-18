@@ -13,6 +13,7 @@ Usage::
 This module is purely enumerative — it does NOT connect to or probe servers.
 No async. No dependency on :mod:`mcpgen._bridge`.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -20,13 +21,14 @@ import json
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Protocol, runtime_checkable
-
+from typing import Protocol, runtime_checkable
 
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
+
 
 @dataclasses.dataclass
 class DiscoveredServer:
@@ -86,6 +88,7 @@ class DiscoveredServer:
 # HostProvider protocol
 # ---------------------------------------------------------------------------
 
+
 @runtime_checkable
 class HostProvider(Protocol):
     """Protocol for host-environment discovery adapters."""
@@ -106,6 +109,7 @@ class HostProvider(Protocol):
 # Subprocess helper default
 # ---------------------------------------------------------------------------
 
+
 def _default_run(cmd: list[str]) -> str | None:
     """Run *cmd*, return stdout on success (rc==0), else None."""
     try:
@@ -119,9 +123,7 @@ def _default_run(cmd: list[str]) -> str | None:
 # ClaudeCodeProvider
 # ---------------------------------------------------------------------------
 
-_CLAUDE_AI_CONNECTOR_NOTE = (
-    "claude.ai connector — managed OAuth, not probeable by mcpgen"
-)
+_CLAUDE_AI_CONNECTOR_NOTE = "claude.ai connector — managed OAuth, not probeable by mcpgen"
 
 # Match "<name>: <rest> - <status_part>" with the status being everything
 # after the LAST " - " on the line.
@@ -273,10 +275,7 @@ class ClaudeCodeProvider:
 
     def available(self) -> bool:
         """Return True if the Claude Code CLI or its config file is present."""
-        return (
-            shutil.which("claude") is not None
-            or (self._home / ".claude.json").exists()
-        )
+        return shutil.which("claude") is not None or (self._home / ".claude.json").exists()
 
     def discover(self) -> list[DiscoveredServer]:
         """Return all MCP servers found in the Claude Code environment.
@@ -314,12 +313,8 @@ class ClaudeCodeProvider:
         servers: list[DiscoveredServer] = []
         for name, list_entry in list_entries.items():
             get_output = self._run(["claude", "mcp", "get", name])
-            get_fields: dict[str, str | None] = (
-                _parse_mcp_get(get_output) if get_output is not None else {}
-            )
-            servers.append(
-                _build_server_from_get(self.id, name, list_entry, get_fields)
-            )
+            get_fields: dict[str, str | None] = _parse_mcp_get(get_output) if get_output is not None else {}
+            servers.append(_build_server_from_get(self.id, name, list_entry, get_fields))
         return servers
 
     # ------------------------------------------------------------------
@@ -371,9 +366,7 @@ class ClaudeCodeProvider:
             servers.append(server)
         return servers
 
-    def _entry_to_server(
-        self, name: str, entry: dict, scope: str
-    ) -> DiscoveredServer:
+    def _entry_to_server(self, name: str, entry: dict, scope: str) -> DiscoveredServer:
         """Convert a single mcpServers JSON entry to a :class:`DiscoveredServer`."""
         # Determine transport from the presence of url/command keys or a "type" hint.
         explicit_type = (entry.get("type") or "").lower()
@@ -396,7 +389,9 @@ class ClaudeCodeProvider:
         raw_env = entry.get("env") or {}
         if not isinstance(raw_env, dict):
             raw_env = {}
-        env = {str(k): str(v) for k, v in raw_env.items() if isinstance(v, (str, int, float)) and not isinstance(v, bool)}
+        env = {
+            str(k): str(v) for k, v in raw_env.items() if isinstance(v, (str, int, float)) and not isinstance(v, bool)
+        }
 
         is_connector = _is_claude_ai_connector(name, scope)
         return DiscoveredServer(

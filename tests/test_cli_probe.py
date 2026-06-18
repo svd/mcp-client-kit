@@ -4,19 +4,19 @@ Covers:
   #1  probe with list-valued arg exits 0 (no unhashable-type crash in advisory block)
   #2  advisory block failure does not change exit code (defence-in-depth try/except)
 """
+
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from mcpgen.cli import _cmd_probe
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _ns(server: str, tool: str, args: list[str] | None, emit_shape: str | None = None) -> SimpleNamespace:
     return SimpleNamespace(
@@ -39,6 +39,7 @@ _FAKE_SHAPE = {"names": "list"}
 # ---------------------------------------------------------------------------
 # #1 — list-valued arg: no TypeError in advisory, exit 0
 # ---------------------------------------------------------------------------
+
 
 def test_probe_list_arg_exits_zero(tmp_path):
     """Probe with a list-valued arg must exit 0 (no unhashable-type crash)."""
@@ -116,6 +117,7 @@ def test_probe_scalar_single_discriminator_value_warns(tmp_path, capsys):
 # #2 — defence-in-depth: even if advisory raises, exit 0
 # ---------------------------------------------------------------------------
 
+
 def test_probe_advisory_exception_still_exits_zero(tmp_path, capsys):
     """If the advisory block raises unexpectedly, exit 0 and print a warning to stderr.
 
@@ -123,7 +125,6 @@ def test_probe_advisory_exception_still_exits_zero(tmp_path, capsys):
     raises — only on the first parsed arg-dict so that probe_skeleton still sees
     a real dict and can write the part file before the advisory runs.
     """
-    import mcpgen.cli as cli_mod
     import json as json_mod
 
     shapes_file = tmp_path / "demo.shapes.json"
@@ -139,6 +140,7 @@ def test_probe_advisory_exception_still_exits_zero(tmp_path, capsys):
 
     class _BrokenKeysDict(dict):
         """dict whose .keys() raises — triggers the advisory try/except."""
+
         def keys(self):
             raise RuntimeError("injected advisory failure")
 
@@ -150,8 +152,10 @@ def test_probe_advisory_exception_still_exits_zero(tmp_path, capsys):
             return _BrokenKeysDict(result)
         return result
 
-    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE), \
-         patch("mcpgen.cli.json.loads", side_effect=_patched_loads):
+    with (
+        patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE),
+        patch("mcpgen.cli.json.loads", side_effect=_patched_loads),
+    ):
         rc = _cmd_probe(ns)
 
     assert rc == 0, "exit 0 even when advisory block raises"

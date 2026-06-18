@@ -1,10 +1,9 @@
 """Pure unit tests for mcpgen.discovery — no network, no subprocess."""
+
 from __future__ import annotations
 
 import json
 from unittest.mock import patch
-
-import pytest
 
 from mcpgen.discovery import (
     ClaudeCodeProvider,
@@ -89,6 +88,7 @@ FIXTURE_CLAUDE_JSON = {
 # ---------------------------------------------------------------------------
 # Helper: build a _run callable backed by a cmd→output mapping
 # ---------------------------------------------------------------------------
+
 
 def _make_run(mapping: dict[tuple, str | None]):
     """Return a _run callable that maps command tuples to output strings."""
@@ -291,8 +291,7 @@ def test_discover_all_host_filter():
 
 def test_as_dict_redacts_env_values_by_default():
     """env values are replaced with '***' by default to prevent secret leaks."""
-    s = DiscoveredServer(host="claude-code", name="my-server",
-                         env={"API_KEY": "supersecret", "TOKEN": "tok_abc"})
+    s = DiscoveredServer(host="claude-code", name="my-server", env={"API_KEY": "supersecret", "TOKEN": "tok_abc"})
     d = s.as_dict()
     assert "supersecret" not in json.dumps(d)
     assert "tok_abc" not in json.dumps(d)
@@ -301,16 +300,14 @@ def test_as_dict_redacts_env_values_by_default():
 
 def test_as_dict_preserves_env_keys_when_redacting():
     """Keys are kept even when values are redacted (user can see what's configured)."""
-    s = DiscoveredServer(host="claude-code", name="my-server",
-                         env={"API_KEY": "secret"})
+    s = DiscoveredServer(host="claude-code", name="my-server", env={"API_KEY": "secret"})
     d = s.as_dict()
     assert "API_KEY" in d["env"]
 
 
 def test_as_dict_includes_raw_env_with_redact_env_false():
     """redact_env=False passes the raw values through unchanged."""
-    s = DiscoveredServer(host="claude-code", name="my-server",
-                         env={"API_KEY": "supersecret"})
+    s = DiscoveredServer(host="claude-code", name="my-server", env={"API_KEY": "supersecret"})
     d = s.as_dict(redact_env=False)
     assert d["env"] == {"API_KEY": "supersecret"}
 
@@ -335,8 +332,10 @@ def test_cli_discover_json_redacts_env_by_default(tmp_path):
     }
     (tmp_path / ".claude.json").write_text(json.dumps(config))
 
-    from mcpgen import cli, discovery as disc_mod
     import io
+
+    from mcpgen import cli
+    from mcpgen import discovery as disc_mod
 
     provider = ClaudeCodeProvider(_run=_make_run({}), _home=tmp_path)
 
@@ -350,6 +349,7 @@ def test_cli_discover_json_redacts_env_by_default(tmp_path):
     try:
         disc_mod.PROVIDERS = [provider]
         import sys
+
         old_stdout = sys.stdout
         sys.stdout = buf
         try:

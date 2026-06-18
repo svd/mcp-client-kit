@@ -5,6 +5,7 @@ These tests are network-free: _probe is stubbed wherever the probe path is
 exercised.  The concurrency test verifies that parallel writes of *distinct*
 tool parts produce no clobbered files.
 """
+
 from __future__ import annotations
 
 import json
@@ -13,8 +14,6 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
-import pytest
 
 from mcpgen import codegen
 from mcpgen.cli import (
@@ -25,8 +24,8 @@ from mcpgen.cli import (
     _parts_dir,
 )
 
-
 # ── merge_skeletons ───────────────────────────────────────────────────────────
+
 
 def test_merge_skeletons_empty():
     assert codegen.merge_skeletons([]) == {}
@@ -63,6 +62,7 @@ def test_merge_skeletons_preserves_unprobed_base():
 
 # ── _atomic_write_text ────────────────────────────────────────────────────────
 
+
 def test_atomic_write_text_creates_file(tmp_path):
     target = tmp_path / "out.json"
     _atomic_write_text(target, '{"x": 1}')
@@ -91,6 +91,7 @@ def test_atomic_write_text_overwrites(tmp_path):
 
 # ── _parts_dir ────────────────────────────────────────────────────────────────
 
+
 def test_parts_dir_name():
     p = _parts_dir(Path("/work/acme.shapes.json"))
     assert p == Path("/work/acme.shapes.json.parts")
@@ -98,9 +99,9 @@ def test_parts_dir_name():
 
 # ── probe emit path (unit) ────────────────────────────────────────────────────
 
+
 def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
     """Probe with --emit-shape writes a per-tool part, NOT the shared target."""
-    from mcpgen.cli import main
 
     target = tmp_path / "acme.shapes.json"
     ns_tool = "get_entity"
@@ -108,6 +109,7 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
     # Stub _probe so no network call is made.
     fake_shape = {"id": "str", "name": "str"}
     import asyncio
+
     monkeypatch.setattr(
         "mcpgen.cli._probe",
         lambda *a, **kw: asyncio.coroutine(lambda: fake_shape)(),
@@ -116,6 +118,7 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
     monkeypatch.setattr("asyncio.run", lambda coro: fake_shape)
 
     from mcpgen.cli import _cmd_probe
+
     ns = SimpleNamespace(
         server="acme",
         tool=ns_tool,
@@ -128,8 +131,7 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
         config=None,
         cred_backend=None,
     )
-    with patch("mcpgen.cli._probe", return_value=fake_shape), \
-         patch("asyncio.run", return_value=fake_shape):
+    with patch("mcpgen.cli._probe", return_value=fake_shape), patch("asyncio.run", return_value=fake_shape):
         _cmd_probe(ns)
 
     # Shared target must NOT exist (part was written instead).
@@ -137,6 +139,7 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
 
     # Part file must exist under <target>.parts/.
     from urllib.parse import quote as q
+
     part = _parts_dir(target) / (q(ns_tool, safe="") + ".json")
     assert part.exists(), f"expected part at {part}"
     data = json.loads(part.read_text())
@@ -146,7 +149,8 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
 def test_probe_url_quotes_tool_name(tmp_path):
     """Tool names with / or : are percent-encoded, not interpreted as paths."""
     from urllib.parse import quote as q
-    from mcpgen.cli import _parts_dir, _atomic_write_text
+
+    from mcpgen.cli import _atomic_write_text, _parts_dir
 
     target = tmp_path / "srv.shapes.json"
     tool = "ns/get:entity"  # hypothetical, has /
@@ -162,6 +166,7 @@ def test_probe_url_quotes_tool_name(tmp_path):
 
 # ── concurrency (no network) ──────────────────────────────────────────────────
 
+
 def test_concurrent_distinct_tools_no_clobber(tmp_path):
     """N threads writing distinct tool parts concurrently produce N intact files."""
     target = tmp_path / "acme.shapes.json"
@@ -171,6 +176,7 @@ def test_concurrent_distinct_tools_no_clobber(tmp_path):
     def write_part(tool: str) -> None:
         try:
             from urllib.parse import quote as q
+
             part = _parts_dir(target) / (q(tool, safe="") + ".json")
             sk = {tool: {"fields": {"i": "int"}, "source": "live"}}
             _atomic_write_text(part, json.dumps(sk))
@@ -195,9 +201,11 @@ def test_concurrent_distinct_tools_no_clobber(tmp_path):
 
 # ── _cmd_merge ────────────────────────────────────────────────────────────────
 
+
 def _seed_parts(target: Path, tool_skeletons: dict[str, dict]) -> None:
     """Write each skeleton as a separate part file."""
     from urllib.parse import quote as q
+
     parts_d = _parts_dir(target)
     for tool, sk in tool_skeletons.items():
         part = parts_d / (q(tool, safe="") + ".json")
@@ -216,10 +224,13 @@ def test_merge_union_of_parts_and_base(tmp_path):
     target.write_text(json.dumps(base))
 
     # Two parts: one overlapping base, one new.
-    _seed_parts(target, {
-        "hand_edited": {"unwrap": [], "return_model": None, "source": "live"},  # overlaps
-        "new_tool": {"fields": {"x": "int"}, "source": "live"},
-    })
+    _seed_parts(
+        target,
+        {
+            "hand_edited": {"unwrap": [], "return_model": None, "source": "live"},  # overlaps
+            "new_tool": {"fields": {"x": "int"}, "source": "live"},
+        },
+    )
 
     rc = _cmd_merge(_merge_ns("acme", target))
 
@@ -284,6 +295,7 @@ def test_merge_no_base_file(tmp_path):
 
 # ── subfolder support ─────────────────────────────────────────────────────────
 
+
 def test_probe_part_lands_in_subfolder(tmp_path):
     """Parts dir is a sibling of --emit-shape, even when it's in a subfolder."""
     sub = tmp_path / "github"
@@ -317,13 +329,17 @@ def test_merge_subfolder_out(tmp_path):
 
 # ── verify sidecar ────────────────────────────────────────────────────────────
 
+
 def test_merge_writes_verify_sidecar(tmp_path):
     """merge emits <server>.verify.json with raw probed_args keyed by tool."""
     target = tmp_path / "acme.shapes.json"
-    _seed_parts(target, {
-        "get_entity": {"source": "live", "probed_args": {"id": "abc123", "type": 1}},
-        "whoami": {"source": "live", "probed_args": {}},  # no-arg — must be omitted
-    })
+    _seed_parts(
+        target,
+        {
+            "get_entity": {"source": "live", "probed_args": {"id": "abc123", "type": 1}},
+            "whoami": {"source": "live", "probed_args": {}},  # no-arg — must be omitted
+        },
+    )
 
     rc = _cmd_merge(_merge_ns("acme", target))
 
@@ -339,10 +355,13 @@ def test_merge_writes_verify_sidecar(tmp_path):
 def test_merge_verify_sidecar_omits_no_arg_tools(tmp_path):
     """Tools with probed_args == {} are excluded from the sidecar."""
     target = tmp_path / "acme.shapes.json"
-    _seed_parts(target, {
-        "noop": {"source": "live", "probed_args": {}},
-        "noop2": {"source": "live"},  # missing key entirely
-    })
+    _seed_parts(
+        target,
+        {
+            "noop": {"source": "live", "probed_args": {}},
+            "noop2": {"source": "live"},  # missing key entirely
+        },
+    )
 
     _cmd_merge(_merge_ns("acme", target))
 
@@ -360,9 +379,12 @@ def test_merge_verify_sidecar_overlays_existing(tmp_path):
     verify.write_text(json.dumps({"tool_a": {"owner": "prior"}}))
 
     # New run only re-probes tool_b.
-    _seed_parts(target, {
-        "tool_b": {"source": "live", "probed_args": {"repo": "kit"}},
-    })
+    _seed_parts(
+        target,
+        {
+            "tool_b": {"source": "live", "probed_args": {"repo": "kit"}},
+        },
+    )
 
     _cmd_merge(_merge_ns("acme", target))
 
@@ -380,9 +402,12 @@ def test_merge_verify_sidecar_from_parts_not_scrubbed_base(tmp_path):
     target.write_text(json.dumps(base))
 
     # Part for the same tool carries the raw (pre-scrub) args.
-    _seed_parts(target, {
-        "get_entity": {"source": "live", "probed_args": {"id": "real-uuid-9999"}},
-    })
+    _seed_parts(
+        target,
+        {
+            "get_entity": {"source": "live", "probed_args": {"id": "real-uuid-9999"}},
+        },
+    )
 
     _cmd_merge(_merge_ns("acme", target))
 
@@ -397,14 +422,11 @@ def test_merge_verify_sidecar_from_parts_not_scrubbed_base(tmp_path):
 def test_merge_no_parts_dir_hints_subfolder(tmp_path, capsys):
     """When no parts dir exists and --out was not passed, hint about subfolder."""
     # Simulate: user forgot --out; default target is CWD, but parts are in a subfolder.
-    target = tmp_path / "github.shapes.json"  # CWD default, no parts here
-
     ns = SimpleNamespace(server="github", out=None, keep_parts=False)
     # Override target resolution: cmd_merge builds target from ns.out/ns.server;
     # we call it via public CLI path, accepting that it looks in CWD.
     # Instead, exercise hint by calling _cmd_merge with a namespace where out=None
     # and no parts dir exists (the CWD default).
-    import os
     orig_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
@@ -418,6 +440,7 @@ def test_merge_no_parts_dir_hints_subfolder(tmp_path, capsys):
 
 
 # ── Fix 1: shapes type-string normalization ───────────────────────────────────
+
 
 def test_normalize_shapes_rewrites_lowercase_types():
     shapes = {
@@ -436,12 +459,12 @@ def test_normalize_shapes_rewrites_lowercase_types():
 
     assert shapes["get_entity"]["fields"]["score"] == "Any"
     assert shapes["get_entity"]["fields"]["tags"] == "list[Any]"
-    assert shapes["get_entity"]["fields"]["id"] == "str"           # unchanged
+    assert shapes["get_entity"]["fields"]["id"] == "str"  # unchanged
     assert shapes["get_entity"]["input_overrides"]["limit"] == "int"
     assert shapes["get_entity"]["input_overrides"]["active"] == "bool"
     assert shapes["get_entity"]["return_model"] == "None"
     assert shapes["list_items"]["fields"]["result"] == "str | None"
-    assert shapes["list_items"]["return_model"] is None            # None unchanged
+    assert shapes["list_items"]["return_model"] is None  # None unchanged
 
     assert len(changes) == 6  # score, tags, limit, active, return_model, result
 
@@ -460,20 +483,24 @@ def test_normalize_shapes_clean_shapes_no_changes():
 
 def test_load_shapes_normalizes_type_strings(tmp_path, capsys):
     shapes_file = tmp_path / "acme.shapes.json"
-    shapes_file.write_text(json.dumps({
-        "get_entity": {
-            "fields": {"score": "any", "name": "str"},
-            "input_overrides": {"limit": "integer"},
-            "return_model": "null",
-        }
-    }))
+    shapes_file.write_text(
+        json.dumps(
+            {
+                "get_entity": {
+                    "fields": {"score": "any", "name": "str"},
+                    "input_overrides": {"limit": "integer"},
+                    "return_model": "null",
+                }
+            }
+        )
+    )
 
     ns = SimpleNamespace(shapes=str(shapes_file), out=None, server="acme")
     shapes = _load_shapes(ns)
 
     assert shapes is not None
     assert shapes["get_entity"]["fields"]["score"] == "Any"
-    assert shapes["get_entity"]["fields"]["name"] == "str"          # unchanged
+    assert shapes["get_entity"]["fields"]["name"] == "str"  # unchanged
     assert shapes["get_entity"]["input_overrides"]["limit"] == "int"
     assert shapes["get_entity"]["return_model"] == "None"
 
@@ -484,14 +511,13 @@ def test_load_shapes_normalizes_type_strings(tmp_path, capsys):
 
 # ── Fix 2: merge accepts --config for flag-surface consistency ────────────────
 
+
 def test_merge_accepts_config_flag(tmp_path):
     """merge --config is silently accepted and ignored (no exit code 2)."""
     target = tmp_path / "acme.shapes.json"
     _seed_parts(target, {"tool_a": {"source": "live", "fields": {"x": "int"}}})
 
-    ns = SimpleNamespace(
-        server="acme", out=str(target), keep_parts=False, config="/some/servers.json"
-    )
+    ns = SimpleNamespace(server="acme", out=str(target), keep_parts=False, config="/some/servers.json")
     rc = _cmd_merge(ns)
 
     assert rc == 0
