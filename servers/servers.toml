@@ -1,4 +1,4 @@
-# servers.example.toml — Reference server configurations for mcpgen-eval
+# servers.example.toml — Reference server configurations for mcp-client-kit-eval
 # Copy entries you want to evaluate into servers.toml
 # Each [[server]] block configures one MCP server for eval.
 

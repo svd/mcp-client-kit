@@ -1,6 +1,6 @@
 ---
 name: triaging-eval-outputs
-description: Use when reviewing generated outputs of the generate-mcp-wrappers eval (per-server session-overview.md / .shapes.json / .py artifacts) to produce owner-split fix reports for mcpgen and eval-kit.
+description: Use when reviewing generated outputs of the generate-mcp-wrappers eval (per-server session-overview.md / .shapes.json / .py artifacts) to produce owner-split fix reports for mcp-client-kit and eval-kit.
 disable-model-invocation: true
 ---
 
@@ -27,7 +27,7 @@ Read `doc/EVAL_REPORT.md` for the verdict matrix.
 **Step 2 — Mine (parallel Explore fan-out)**
 Dispatch 3 parallel `Explore` agents in one message, each reading ~5 session-overviews.
 Prompt each to extract: symptom, server name, **verbatim error quote**, owner tag (`[GEN]` =
-mcpgen, `[HARNESS]` = eval-kit), and recurrence count (flag if ≥2 servers).
+mcp-client-kit, `[HARNESS]` = eval-kit), and recurrence count (flag if ≥2 servers).
 Do not write reports until mining is complete for all servers.
 
 **Step 3 — Ground**
@@ -47,7 +47,7 @@ friction ≥2 servers, **P2** = low-priority note. Assign each to one owner (rub
 Cross-cutting items appear in both reports with distinct, non-redundant framing.
 
 **Step 5 — Emit two reports**
-- `doc/FIXES-mcpgen.md` — generator owner. **Self-contained**: no eval-repo paths,
+- `doc/FIXES-mcp-client-kit.md` — generator owner. **Self-contained**: no eval-repo paths,
   verbatim error strings, repro steps.
 - `doc/FIXES-eval-kit.md` — harness owner. Every P0 item cites `file:line`. Every item
   names ≥1 affected server.
@@ -57,15 +57,15 @@ Use skeletons in `report-templates.md` (this directory).
 **Step 6 — Verify**
 - Spot-check `file:line` citations against source.
 - Every P0 item has a verbatim error string (not paraphrased).
-- `doc/FIXES-mcpgen.md` has no eval-repo-only path references.
+- `doc/FIXES-mcp-client-kit.md` has no eval-repo-only path references.
 
 ## Owner boundary rubric
 
 | Component | Owner |
 |---|---|
-| `mcpgen codegen / list / probe / merge` CLI | **mcpgen** |
-| `generate-mcp-wrappers` SKILL.md guidance | **mcpgen** |
-| `generate-mcp-runner` SKILL.md guidance (run.py quality) | **mcpgen** |
+| `mcpgen codegen / list / probe / merge` CLI | **mcp-client-kit** |
+| `generate-mcp-wrappers` SKILL.md guidance | **mcp-client-kit** |
+| `generate-mcp-runner` SKILL.md guidance (run.py quality) | **mcp-client-kit** |
 | `eval-kit verify / report / gen-config` | **eval-kit** |
 | `.claude/workflows/run-eval.js` | **eval-kit** |
 | `agents/server-eval-agent.md` | **eval-kit** |
@@ -81,5 +81,5 @@ Use skeletons in `report-templates.md` (this directory).
 
 ## Worked example
 
-`doc/FIXES-mcpgen.md` and `doc/FIXES-eval-kit.md` (produced 2026-06-16, 13-server run)
+`doc/FIXES-mcp-client-kit.md` and `doc/FIXES-eval-kit.md` (produced 2026-06-16, 13-server run)
 are the canonical reference for what correctly-formed output looks like.

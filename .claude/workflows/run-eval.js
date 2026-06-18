@@ -181,7 +181,7 @@ When done, return "DONE: eval/${server.name}/session-analyzer.md written"`
 1. Run: uv run eval-kit verify ${server.name}
    Capture its stdout and exit code.
 
-2. Generate the sample runner by invoking the **mcpgen:generate-mcp-runner** skill
+2. Generate the sample runner by invoking the **mcp-client-kit:generate-mcp-runner** skill
    via the Skill tool. Tell the skill:
    - Artifacts are in eval/${server.name}/ (${server.name}.py, ${server.name}.shapes.json,
      ${server.name}.verify.json).

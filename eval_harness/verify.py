@@ -1,4 +1,4 @@
-"""Deterministic verifier for mcpgen-eval: runs 5 checks on a server's
+"""Deterministic verifier for mcp-client-kit-eval: runs 5 checks on a server's
 generated artifacts and writes result.json.
 
 Checks:

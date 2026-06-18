@@ -32,7 +32,7 @@ At the end, return a structured JSON summary so the Workflow can record the resu
 - `date -u "+%Y-%m-%dT%H:%M:%SZ"` → `STARTED_AT` (ISO-8601 UTC, for display)
 - `date +%s` → `T0` (epoch seconds, for arithmetic)
 
-Invoke the **`mcpgen:generate-mcp-wrappers`** skill via the Skill tool to generate the wrappers for `{{SERVER_NAME}}`. Let the skill drive the whole procedure (codegen → list → probe → merge → edit shapes → regenerate → verify).
+Invoke the **`mcp-client-kit:generate-mcp-wrappers`** skill via the Skill tool to generate the wrappers for `{{SERVER_NAME}}`. Let the skill drive the whole procedure (codegen → list → probe → merge → edit shapes → regenerate → verify).
 
 **After the skill finishes and all artifacts are written, capture the end time** — run `date +%s` → `T1`. Compute `ELAPSED = T1 - T0` seconds; format as `Xm Ys` (e.g. 142 s → `2m 22s`).
 

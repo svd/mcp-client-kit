@@ -4,10 +4,10 @@ Use these skeletons for Step 5 of the triaging workflow. Fill in discovered item
 
 ---
 
-## Template A: `doc/FIXES-mcpgen.md`
+## Template A: `doc/FIXES-mcp-client-kit.md`
 
 ```markdown
-# Fix report — mcpgen (`generate-mcp-wrappers` skill + `mcpgen` CLI)
+# Fix report — mcp-client-kit (`generate-mcp-wrappers` skill + `mcpgen` CLI)
 
 Generated from: eval of <N> MCP servers, <DATE>.
 Scope: confirmed code bugs + recurring friction (2+ servers). Excludes one-off LLM lapses.
@@ -132,4 +132,4 @@ Every item (in both reports) must satisfy:
 | Root cause | P0 | Mechanistic, not "the LLM guessed wrong" |
 | Fix | all | Actionable, not "improve X" |
 
-**mcpgen report extra constraint:** no eval-repo-only paths (e.g. no `<eval-repo-path>/...`). All paths must be relative to the mcpgen repo or be generic.
+**mcp-client-kit report extra constraint:** no eval-repo-only paths (e.g. no `<eval-repo-path>/...`). All paths must be relative to the mcp-client-kit repo or be generic.
