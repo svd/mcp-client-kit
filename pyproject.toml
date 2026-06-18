@@ -1,6 +1,6 @@
 [project]
 name = "mcp-client-kit"
-version = "0.0.4"
+version = "0.1.0"
 description = "mcp-client-kit — generate typed Python wrappers for any MCP server (codegen skill + CLI)."
 readme = "README.md"
 license = { text = "MIT" }
