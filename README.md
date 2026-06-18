@@ -29,7 +29,7 @@ That's the gap mcpgen fills.
 ## What you get
 
 ```bash
-uv tool install mcpgen                  # puts `mcpgen` on your PATH
+uv tool install mcp-client-kit          # puts `mcpgen` on your PATH
 mcpgen login github                     # browser OAuth, tokens persisted
 mcpgen codegen github --out github.py   # typed wrappers for every tool
 ```
@@ -82,22 +82,24 @@ The full reference, including the shape-spec format and credential backends, is 
 
 ## Install
 
+> The PyPI package is **`mcp-client-kit`**; the command it installs is **`mcpgen`**.
+
 **CLI on your PATH:**
 
 ```bash
-uv tool install mcpgen
+uv tool install mcp-client-kit
 ```
 
 **One-off, no install:**
 
 ```bash
-uvx mcpgen codegen <server> --out <server>.py
+uvx --from mcp-client-kit mcpgen codegen <server> --out <server>.py
 ```
 
 **As a project dependency:**
 
 ```bash
-uv add mcpgen      # or: pip install mcpgen
+uv add mcp-client-kit      # or: pip install mcp-client-kit
 ```
 
 Requires Python 3.11+.
@@ -108,11 +110,11 @@ Requires Python 3.11+.
 
 The plugin bundles the `generate-mcp-wrappers` skill, which drives the CLI through the 20% that needs judgment — curating which tools matter, probing live responses, and editing the shape-spec — then regenerates and verifies the module.
 
-The CLI is not bundled with the plugin — install it separately (`uv add mcpgen`, see [Install](#install) above). The skill requires **mcpgen >= 0.1.0** and checks this before running; a local editable install (`uv pip install -e .`) satisfies it for development. This is a version floor, not an exact pin, so the skill and CLI can be upgraded independently as long as the CLI stays at or above the floor.
+The CLI is not bundled with the plugin — install it separately (`uv add mcp-client-kit`, see [Install](#install) above). The skill requires **mcpgen >= 0.1.0** and checks this before running; a local editable install (`uv pip install -e .`) satisfies it for development. This is a version floor, not an exact pin, so the skill and CLI can be upgraded independently as long as the CLI stays at or above the floor.
 
 ```
 /plugin marketplace add svd/mcpgen
-/mcpgen:generate-mcp-wrappers
+/mcp-client-kit:generate-mcp-wrappers
 ```
 
 A companion skill, `generate-mcp-runner`, writes a standalone smoke-test `run.py` that exercises the generated wrappers end-to-end.

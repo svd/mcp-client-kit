@@ -64,7 +64,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 0. **Check the CLI.** Requires `mcpgen >= 0.1.0` (install: see README). Abort if missing or too old:
 
    ```bash
-   mcpgen --version >/dev/null 2>&1 || { echo "mcpgen not found — install: uv add mcpgen"; exit 1; }
+   mcpgen --version >/dev/null 2>&1 || { echo "mcpgen not found — install: uv add mcp-client-kit"; exit 1; }
    ver=$(mcpgen --version | awk '{print $2}'); min=0.1.0
    [ "$(printf '%s\n%s\n' "$min" "$ver" | sort -V | head -1)" = "$min" ] || { echo "mcpgen $ver too old — need >= $min"; exit 1; }
    ```

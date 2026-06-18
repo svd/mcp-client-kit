@@ -47,8 +47,8 @@ PATH="$KIT/.venv/bin:$PATH" claude --plugin-dir "$KIT"
 - `--plugin-dir "$KIT"` — loads the bundled `skills/generate-mcp-wrappers/SKILL.md` into
   Claude Code. No copy or symlink needed.
 
-The skill is namespaced as `/mcpgen:generate-mcp-wrappers` (pinned via
-`.claude-plugin/plugin.json`). Run `/help` to confirm it's listed.
+The skill is namespaced as `/mcp-client-kit:generate-mcp-wrappers` (the namespace is the
+plugin name from `.claude-plugin/plugin.json`). Run `/help` to confirm it's listed.
 
 ### Shell alias
 

@@ -28,7 +28,7 @@ Or via the `svd-agent-skills` aggregator if it's listed there.
 **Invoke the skill** in any Claude Code session:
 
 ```
-/mcpgen:generate-mcp-wrappers
+/mcp-client-kit:generate-mcp-wrappers
 ```
 
 The skill:
@@ -47,25 +47,27 @@ For the full 6-step procedure see [§ The skill procedure](#the-skill-procedure)
 
 Use `mcpgen` directly to generate wrappers or probe tools without the skill layer.
 
+> The PyPI package is **`mcp-client-kit`**; the command it installs is **`mcpgen`**.
+
 ### One-off (no install)
 
 ```bash
-uvx mcpgen codegen <server> --out <server>.py
-uvx mcpgen probe <server> <tool> --args '{}' --emit-shape <server>.shapes.json
-uvx mcpgen login <server>
+uvx --from mcp-client-kit mcpgen codegen <server> --out <server>.py
+uvx --from mcp-client-kit mcpgen probe <server> <tool> --args '{}' --emit-shape <server>.shapes.json
+uvx --from mcp-client-kit mcpgen login <server>
 ```
 
 ### Persistent (on PATH)
 
 ```bash
-uv tool install mcpgen   # installs mcpgen on PATH
+uv tool install mcp-client-kit   # installs the mcpgen command on PATH
 mcpgen codegen <server> --out <server>.py
 ```
 
 ### Project dependency
 
 ```bash
-uv add mcpgen            # or: pip install mcpgen
+uv add mcp-client-kit            # or: pip install mcp-client-kit
 ```
 
 ### Command reference

@@ -4,11 +4,15 @@
 
 | Artifact | What | Channel | Consumer command |
 |---|---|---|---|
-| **engine** — `mcpgen` | the codegen CLI + OAuth bridge (Python package) | **PyPI** | `uvx mcpgen …` / `uv add` |
-| **plugin** — `mcpgen` | the judgment layer (Claude Code plugin; skill `generate-mcp-wrappers`) | **marketplace** (git repo) | `/plugin marketplace add …` |
+| **engine** — `mcp-client-kit` (command `mcpgen`) | the codegen CLI + OAuth bridge (Python package) | **PyPI** | `uvx --from mcp-client-kit mcpgen …` / `uv add mcp-client-kit` |
+| **plugin** — `mcp-client-kit` | the judgment layer (Claude Code plugin; skill `generate-mcp-wrappers`) | **marketplace** (git repo) | `/plugin marketplace add …` |
 
-(Plugin name = `mcpgen`, matching the package and repo. The skill *inside*
-the plugin is `generate-mcp-wrappers` — filesystem `skills/generate-mcp-wrappers/`.)
+(`mcp-client-kit` names three things: the PyPI **distribution**, the Claude Code
+**plugin**, and the **marketplace catalog**. The **command** and **import module** stay
+`mcpgen` (as does the **repo**). `mcpgen` can't be the PyPI distribution name — PyPI's
+similarity guard rejects it as too close to the existing `mcp-gen` — which is what forced
+the split. The skill *inside* the plugin is `generate-mcp-wrappers` — filesystem
+`skills/generate-mcp-wrappers/`, invoked as `/mcp-client-kit:generate-mcp-wrappers`.)
 
 They are one product with one contract (the CLI command surface + shape-spec
 format), so they live in one repo: atomic commits, one issue tracker, lockstep
@@ -19,7 +23,7 @@ review. The skill drives the engine as a declared CLI dependency — see [Wiring
 ## Why PyPI (engine)
 
 `mcpgen` is a general-purpose tool ("typed Python wrappers for any MCP
-server"). Audience is wider than one org. PyPI gives `uv add mcpgen`
+server"). Audience is wider than one org. PyPI gives `uv add mcp-client-kit`
 discoverability, no special repo access, and standard release semantics.
 
 **Alternatives dismissed:**
@@ -30,15 +34,19 @@ discoverability, no special repo access, and standard release semantics.
 | Copier / Cookiecutter template | That's project templating, not library distribution — different problem. |
 | git+https-only (no PyPI) | Fine for pre-release pinning; not a long-term distribution strategy. |
 
-**PyPI name status:** `mcpgen` confirmed unclaimed as of 2026-06-14 — claim early.
+**PyPI name status:** `mcpgen` is unregistered but **blocked** by PyPI's name-similarity
+guard — it normalizes to the same canonical form as the existing `mcp-gen`, so PyPI
+refuses to create it (registration *and* first upload both fail). The distribution
+therefore ships as **`mcp-client-kit`** (free; no separator-twin on PyPI), with `mcpgen`
+kept as the command/import/plugin name. Verified 2026-06-18.
 
 ---
 
 ## Wiring: how the skill reaches the engine
 
 The skill does **not** bundle the engine. `mcpgen` is a **declared prerequisite** —
-the user installs it once (`uv add mcpgen` / `pip install mcpgen`), and `SKILL.md`
-invokes the installed CLI directly:
+the user installs it once (`uv add mcp-client-kit` / `pip install mcp-client-kit`), and
+`SKILL.md` invokes the installed CLI directly:
 
 ```
 mcpgen codegen …
@@ -91,9 +99,9 @@ named `mcpgen`) — keeps the bare tags. The skill takes the prefix.
 
 **README must set this expectation explicitly:**
 
-> This repo ships two artifacts: the `mcpgen` Python package (PyPI; git tags
-> `vX.Y.Z`) and the `mcpgen` Claude Code plugin — which provides the
-> `generate-mcp-wrappers` skill (git tags `plugin-vX.Y.Z`).
+> This repo ships two artifacts: the `mcp-client-kit` Python package (PyPI; git tags
+> `vX.Y.Z`; installs the `mcpgen` command) and the `mcp-client-kit` Claude Code plugin —
+> which provides the `generate-mcp-wrappers` skill (git tags `plugin-vX.Y.Z`).
 
 ---
 
@@ -158,12 +166,14 @@ jobs:
 ```
 
 **One-time setup:** register a Trusted Publisher on PyPI (Settings → Publishing →
-Add a new pending publisher). Fields: GitHub owner, repo, workflow filename,
-environment (`pypi`). Reference:
+Add a new pending publisher). Fields: **PyPI Project Name `mcp-client-kit`**, GitHub
+owner, repo, workflow filename (`publish.yml`), environment (`pypi`). Reference:
 [astral-sh/trusted-publishing-examples](https://github.com/astral-sh/trusted-publishing-examples).
+(Registering `mcpgen` as the project here fails the same similarity check — use
+`mcp-client-kit`.)
 
 **Dry run first:** register on TestPyPI and publish there
-(`uv publish --index-url https://test.pypi.org/legacy/`) to validate end-to-end
+(`uv publish --publish-url https://test.pypi.org/legacy/`) to validate end-to-end
 before the real release.
 
 ---
@@ -193,14 +203,14 @@ entry** — the marketplace lists a pointer, it does not vendor a copy:
 
 ```json
 {
-  "name": "mcpgen",
+  "name": "mcp-client-kit",
   "source": { "source": "github", "repo": "<owner>/mcpgen", "ref": "plugin-v0.1.1" },
   "description": "Generate typed Python wrappers for any MCP server (skill: generate-mcp-wrappers)."
 }
 ```
 
-(Marketplace entry `name` is the **plugin** name = `mcpgen`. The skill it
-provides is `generate-mcp-wrappers`.)
+(Marketplace entry `name` is the **plugin** name = `mcp-client-kit`; `repo` is the
+GitHub slug, which stays `mcpgen`. The skill it provides is `generate-mcp-wrappers`.)
 
 (`git-subdir` source + `path` if the plugin sits in a subdir rather than repo root.
 The Claude Code marketplace schema supports `url`, `github`, `git-subdir`, and `npm`
@@ -210,16 +220,17 @@ Result: **one marketplace for users to add** (centralized discovery), **code +
 engine in one repo** (atomic commits, one tracker, lockstep). Bump the skill → move
 the `ref`.
 
-**Optional dual discovery:** this repo can also carry its own
-`.claude-plugin/marketplace.json` so it is installable standalone
+**Optional dual discovery:** this repo also carries its own
+`.claude-plugin/marketplace.json` — a single-plugin catalog where the catalog and the
+plugin share the name **`mcp-client-kit`** — so it is installable standalone
 (`/plugin marketplace add <owner>/mcpgen`) for anyone landing on the repo
-directly. Coexists with the aggregator entry.
+directly. Coexists with the `svd-agent-skills` aggregator entry.
 
 ---
 
 ## Repo-as-plugin (done)
 
-- `.claude-plugin/plugin.json` — `name: mcpgen`, `version` (= product),
+- `.claude-plugin/plugin.json` — `name: mcp-client-kit`, `version` (= product),
   `description`. **Not** `skills`/`agents` — the `generate-mcp-wrappers` skill is
   auto-discovered from `skills/`. ✅ present.
 - root `.claude-plugin/marketplace.json` for standalone install. ✅ present.
@@ -242,7 +253,7 @@ they don't get skipped:
 - [x] **Add `.claude-plugin/plugin.json`** (product version) so the repo is a plugin —
   present, alongside `.claude-plugin/marketplace.json`.
 - [x] **Declare CLI dependency + guard:** SKILL.md documents `mcpgen` as a prerequisite
-  (`uv add mcpgen`) and runs an install check plus a `>= 0.1.0` version-floor guard at the
+  (`uv add mcp-client-kit`) and runs an install check plus a `>= 0.1.0` version-floor guard at the
   top of the procedure. Chosen over an exact `uvx "mcpgen==<engine>"` pin so local/editable
   dev installs work unchanged and there's no separate pin-equality CI check to maintain;
   the floor is bumped only when the skill starts requiring a newer CLI feature.

@@ -1,16 +1,16 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
-  "name": "mcpgen",
+  "name": "mcp-client-kit",
   "version": "0.1.0",
-  "description": "Generate typed Python wrappers for any MCP server.",
+  "description": "Marketplace for the mcpgen plugin — typed Python wrappers for any MCP server.",
   "owner": {
     "name": "Sviatoslav Sviridov",
     "email": "sviridov@gmail.com"
   },
   "plugins": [
     {
-      "name": "mcpgen",
-      "displayName": "mcpgen",
+      "name": "mcp-client-kit",
+      "displayName": "mcp-client-kit",
       "source": "./",
       "version": "0.1.0",
       "description": "Generate typed Python wrappers for any MCP server (skill: generate-mcp-wrappers).",
