@@ -108,6 +108,8 @@ Requires Python 3.11+.
 
 The plugin bundles the `generate-mcp-wrappers` skill, which drives the CLI through the 20% that needs judgment — curating which tools matter, probing live responses, and editing the shape-spec — then regenerates and verifies the module.
 
+The CLI is not bundled with the plugin — install it separately (`uv add mcpgen`, see [Install](#install) above). The skill requires **mcpgen >= 0.1.0** and checks this before running; a local editable install (`uv pip install -e .`) satisfies it for development. This is a version floor, not an exact pin, so the skill and CLI can be upgraded independently as long as the CLI stays at or above the floor.
+
 ```
 /plugin marketplace add svd/mcpgen
 /mcpgen:generate-mcp-wrappers

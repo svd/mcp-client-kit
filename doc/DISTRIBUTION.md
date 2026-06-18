@@ -12,7 +12,7 @@ the plugin is `generate-mcp-wrappers` — filesystem `skills/generate-mcp-wrappe
 
 They are one product with one contract (the CLI command surface + shape-spec
 format), so they live in one repo: atomic commits, one issue tracker, lockstep
-review. The skill drives the engine via `uvx` — see [Wiring](#wiring).
+review. The skill drives the engine as a declared CLI dependency — see [Wiring](#wiring).
 
 ---
 
@@ -36,20 +36,21 @@ discoverability, no special repo access, and standard release semantics.
 
 ## Wiring: how the skill reaches the engine
 
-The skill does **not** bundle the engine. `SKILL.md` instructs Claude to run the
-CLI via `uvx`, which fetches the package from PyPI on demand — no pre-install step
-for the user:
+The skill does **not** bundle the engine. `mcpgen` is a **declared prerequisite** —
+the user installs it once (`uv add mcpgen` / `pip install mcpgen`), and `SKILL.md`
+invokes the installed CLI directly:
 
 ```
-uvx "mcpgen==0.2.0" codegen …
+mcpgen codegen …
 ```
 
-So: **PyPI publish** makes the engine reachable; **repo-as-plugin** delivers the
-skill; **the skill's `uvx` pin** is the link. The pin is *exact* (`==`) so an old
-skill install can never silently drive a newer CLI (no skew through `uvx`).
+Step 0 of the procedure guards this: it checks the CLI is present and at or above a
+**version floor** (`>= 0.1.0`), aborting with an install/upgrade hint otherwise.
 
-(`uvx` assumes the user has `uv`. Claude Code users mostly do; README documents the
-`pip install mcpgen` + `mcpgen` on PATH fallback.)
+So: **PyPI publish** makes the engine installable; **repo-as-plugin** delivers the
+skill; **the step-0 floor check** is the link. It is a floor, not an exact pin, so the
+skill and CLI upgrade independently as long as the CLI stays at or above the floor — and
+a local editable install (`uv pip install -e .`) satisfies it unchanged for development.
 
 ---
 
@@ -63,7 +64,7 @@ Python code, and an engine refactor must not force a skill re-tag.
 |---|---|---|---|
 | **engine** | `pyproject.toml` `version` | `mcpgen/**` code changes | PyPI |
 | **product** | `.claude-plugin/plugin.json` `version` | any release (skill or engine) | marketplace (git tag) |
-| **engine pin** | `SKILL.md` `uvx mcpgen==<engine>` | tracks engine version | — |
+| **engine floor** | `SKILL.md` step-0 guard (`mcpgen >= <min>`) | bumps only when the skill needs a newer CLI feature | — |
 
 What you are actually versioning is **the contract** — the CLI surface + shape-spec
 format. SemVer the *engine* against it (minor = surface change, patch = bugfix,
@@ -101,7 +102,7 @@ named `mcpgen`) — keeps the bare tags. The skill takes the prefix.
 **Engine changed** (code under `mcpgen/**`):
 
 ```bash
-# bump pyproject.toml version, update SKILL.md pin to match, bump plugin.json
+# bump pyproject.toml version, bump plugin.json (raise the SKILL.md floor only if the skill now needs the new release)
 git commit -am "release: engine v0.2.0"
 git tag v0.2.0
 git push && git push --tags          # 'v*' tag fires the publish workflow
@@ -111,7 +112,7 @@ git push && git push --tags          # 'v*' tag fires the publish workflow
 **Skill-only changed** (SKILL.md, docs — no engine code):
 
 ```bash
-# bump plugin.json only; pyproject + SKILL.md pin unchanged
+# bump plugin.json only; pyproject and the SKILL.md floor unchanged
 git commit -am "release: plugin v0.1.1 (engine unchanged 0.1.0)"
 git tag plugin-v0.1.1
 git push && git push --tags          # 'plugin-v*' does NOT fire publish — no PyPI involvement
@@ -124,9 +125,9 @@ no phantom PyPI version, no skip-existing guard needed.
 **Timeline (watch the numbers drift):**
 
 ```
-Release 1  initial            engine 0.1.0   tag v0.1.0         → publish engine 0.1.0
-Release 2  SKILL.md prose      engine 0.1.0   tag plugin-v0.1.1 → no publish; pin stays ==0.1.0
-Release 3  new CLI flag        engine 0.2.0   tag v0.2.0        → publish engine 0.2.0; pin → ==0.2.0
+Release 1  initial            engine 0.1.0   tag v0.1.0         → publish engine 0.1.0; floor >= 0.1.0
+Release 2  SKILL.md prose      engine 0.1.0   tag plugin-v0.1.1 → no publish; floor unchanged
+Release 3  new CLI flag        engine 0.2.0   tag v0.2.0        → publish engine 0.2.0; raise floor to >= 0.2.0 (skill uses it)
 ```
 
 ---
@@ -167,18 +168,20 @@ before the real release.
 
 ---
 
-## CI guard: pin must reference a real engine
+## CI guard: floor must reference a real engine
 
-Independent of the tag scheme, assert at release that the skill's pin points at the
-engine version actually in `pyproject.toml`, so the skill can never ship pointing
-at a non-existent engine:
+No pin-equality check is needed — the skill is not pinned to an exact engine. The only
+invariant worth asserting at release is that the SKILL.md floor does not *exceed* the
+engine version in `pyproject.toml`, so the skill can never require an engine that has
+not been published yet:
 
 ```
-SKILL.md pin (mcpgen==X.Y.Z)  ==  pyproject.toml version
+SKILL.md floor (mcpgen >= X.Y.Z)  <=  pyproject.toml version
 ```
 
-A ~5-line check (grep both, compare). Fail the release on mismatch. The product /
-`plugin.json` version is free to differ — it is only the release counter.
+A ~5-line check (grep both, compare). Fail the release if the floor is higher than the
+published engine. The product / `plugin.json` version is free to differ — it is only
+the release counter.
 
 ---
 
@@ -214,12 +217,12 @@ directly. Coexists with the aggregator entry.
 
 ---
 
-## To make this repo a plugin (small, not yet done)
+## Repo-as-plugin (done)
 
 - `.claude-plugin/plugin.json` — `name: mcpgen`, `version` (= product),
   `description`. **Not** `skills`/`agents` — the `generate-mcp-wrappers` skill is
-  auto-discovered from `skills/`.
-- (optional) root `.claude-plugin/marketplace.json` for standalone install.
+  auto-discovered from `skills/`. ✅ present.
+- root `.claude-plugin/marketplace.json` for standalone install. ✅ present.
 
 ---
 
@@ -230,14 +233,19 @@ they don't get skipped:
 
 - [x] **Genericize internal references.** All org-specific server names, endpoints,
   and internal doc references replaced with neutral `example.com` examples throughout
-  code, tests, SKILL.md, and public docs. Three internal-only eval docs excluded via
-  `.gitattributes export-ignore`; remove them from the repo before first public push.
-- [ ] **Add `LICENSE`** (MIT or Apache-2.0 — pick one).
-- [ ] **Fill `pyproject.toml` metadata:** `authors`, `license`, `readme = "README.md"`,
-  `classifiers`, `[project.urls]` (Homepage, Source, Issues).
-- [ ] **Add `.claude-plugin/plugin.json`** (product version) so the repo is a plugin.
-- [ ] **Pin + guard:** SKILL.md uses `uvx "mcpgen==<engine>"`; add the
-  pin-equality CI check.
+  code, tests, SKILL.md, and public docs. The three internal-only eval docs
+  (`EVAL_RADAR`, `OQ1_PREFLIGHT`, `EVAL_MULTISERVER`) were removed from history and are
+  no longer tracked.
+- [x] **Add `LICENSE`** — MIT present at repo root.
+- [x] **Fill `pyproject.toml` metadata:** `authors`, `license`, `readme = "README.md"`,
+  `classifiers`, and `[project.urls]` (Homepage, Source, Issues) all present.
+- [x] **Add `.claude-plugin/plugin.json`** (product version) so the repo is a plugin —
+  present, alongside `.claude-plugin/marketplace.json`.
+- [x] **Declare CLI dependency + guard:** SKILL.md documents `mcpgen` as a prerequisite
+  (`uv add mcpgen`) and runs an install check plus a `>= 0.1.0` version-floor guard at the
+  top of the procedure. Chosen over an exact `uvx "mcpgen==<engine>"` pin so local/editable
+  dev installs work unchanged and there's no separate pin-equality CI check to maintain;
+  the floor is bumped only when the skill starts requiring a newer CLI feature.
 - [ ] **TestPyPI dry run** — validate build + publish before the real index.
 - [ ] **Tag strategy** — decide `0.0.x` pre-release vs jump to `0.1.0`; document in README.
 
@@ -251,7 +259,7 @@ they don't get skipped:
 | Versioning | two independent numbers — engine (pyproject→PyPI), product (plugin.json→tag) |
 | Tags | engine `vX.Y.Z` (PyPI convention); skill `plugin-vX.Y.Z` |
 | Publish trigger | bare `v*` tags only; `plugin-v*` never publishes |
-| Skill→engine link | `uvx "mcpgen==<engine>"`, exact pin; CI asserts pin == pyproject |
+| Skill→engine link | declared CLI dependency; SKILL.md step-0 floor check (`mcpgen >= <min>`); CI asserts floor ≤ pyproject |
 | Discovery | `svd-agent-skills` marketplace external-source entry; code stays here |
 | Publish auth | uv Trusted Publishing (OIDC) — no stored tokens |
 | First gating task | ~~genericize internal references~~ ✅ done |
