@@ -7,7 +7,7 @@ All claims below are primary-source-backed unless flagged.
 ## TL;DR
 
 - The "**call MCP from code, not from LLM context**" pattern is **vendor-endorsed**
-  (Anthropic, Nov 2025) — exactly what you built into staffing-assistant.
+  (Anthropic, Nov 2025) — exactly what the origin project proved in practice.
 - **Your reusable-client idea overlaps heavily** with the official `mcp` SDK and
   **FastMCP 2.x** — neither is a green field.
 - **Your codegen-skill idea (generate per-server *typed importable Python wrapper
@@ -15,22 +15,25 @@ All claims below are primary-source-backed unless flagged.
   `.pyi` stubs only; Anthropic's reference impl is **TypeScript-only**.
 - Your specific differentiator — **persistent file token cache + proactive
   pre-flight refresh** — fills a real hole in the official SDK's canonical example
-  and dodges open token-cache bugs in FastMCP.
+  and dodges token-cache bugs in FastMCP (one still open: #1764).
 
 ## Q1 — Existing Python MCP client libraries
 
 | Library | Programmatic client | Streamable HTTP | OAuth 2.1 PKCE | Persistent token cache | Maturity |
 |---|---|---|---|---|---|
 | **official `mcp` SDK** | ✅ `ClientSession.call_tool` | ✅ `streamable_http_client` (was `streamablehttp_client`) | ✅ `OAuthClientProvider`+`TokenStorage` | ❌ canonical example is **in-memory only** — you implement `TokenStorage`. Refresh is **reactive** (on 401), not pre-flight | v1.x maintenance; **v2 beta ~2026-06-30 → API may shift** |
-| **FastMCP 2.x** | ✅ `Client`, well-typed | ✅ (recommended for prod) | ✅ full: PKCE + DCR (RFC 7591) + CIMD + auto refresh-token | ✅ pluggable `token_storage` (AsyncKeyValue; encrypted-disk example) — **but open bugs**, see below | Most complete OAuth story; **3.0 beta exists** (scope findings to 2.x) |
+| **FastMCP 2.x** | ✅ `Client`, well-typed | ✅ (recommended for prod) | ✅ full: PKCE + DCR (RFC 7591) + CIMD + auto refresh-token | ✅ pluggable `token_storage` (AsyncKeyValue; encrypted-disk example) — **one open token-cache bug (#1764)**, see below | Most complete OAuth story; **3.0 beta exists** (scope findings to 2.x) |
 | **mcp-use** | ✅ `MCPClient` — "direct tool calls without LLM" | ✅ | ❌ README documents **no** client OAuth/PKCE/token cache | Active; auth differentiator absent |
 | **mcp2py** | ✅ runtime dynamic proxy (tools→functions) | ✅ (built on `streamablehttp_client`) | ❌ **no** OAuth+disk-token-refresh (claim REFUTED 0-3) | ❌ caches `.pyi` stubs only | latest 0.6.0 (2025-11-03); ~7mo stale |
 
-**FastMCP maturity caveat (medium confidence, GitHub-issue-based):** open
-unresolved token-cache/refresh bugs as of June 2026 — notably **#3425** (cached
-relative `expires_in` reinterpreted as fresh after reload → already-expired
-access token looks valid on restart — *exactly* the persistent-cache scenario
-your pre-flight refresh avoids), plus #1764, #1863, #2641. Soft signal, not proof.
+**FastMCP token-cache caveat (re-verified 2026-06-15):** one confirmed-open
+client auth bug — **#1764** (cached OAuth token not sent in subsequent requests
+when multiple Client instances share the same cache dir). The originally-cited
+cluster (#3425, #1863, #2641) is resolved: #3425 closed (behavior fixed in
+fastmcp 3.2.0 via PR #3572 / issue #2862 — absolute `expires_at` stored);
+#1863 closed (PR #2505 — refresh token now updates auth ContextVar);
+#2641 closed (server-side JWT lifetime config, not a client-cache issue).
+Soft signal, not proof.
 
 ## Q2 — Typed-wrapper code generation
 
@@ -60,7 +63,7 @@ your pre-flight refresh avoids), plus #1764, #1863, #2641. Soft signal, not proo
   - **Operational cost** — sandboxing/monitoring overhead "that direct tool calls
     avoid" (Anthropic's own caveat).
   - **Response-shape assumptions** — inputSchema describes inputs, not outputs;
-    your staffing-assistant already learned this (empirical projection validation).
+    the origin project already learned this (empirical projection validation).
 
 ## Q4 — Distributing a small internal Python lib (2025-2026)
 
@@ -69,7 +72,7 @@ uv/astral primary docs that were fetched (distribution angle) + standard practic
 not adversarially verified. Treat as advisory.
 
 - **git+https dependency via uv/pip** — lowest friction for a few colleagues.
-  `uv add "git+https://git.example.com/…/mcp-client-kit.git@v0.1.0"`; uv supports git
+  `uv add "git+https://git.example.com/…/mcpgen.git@v0.1.0"`; uv supports git
   auth + tag/branch/rev pinning (docs.astral.sh/uv git auth). Good first step.
 - **Private index** (internal PyPI / Artifactory / GitLab package registry) — when
   audience grows beyond a handful; `uv` supports extra indexes w/ auth.
@@ -82,14 +85,14 @@ not adversarially verified. Treat as advisory.
 ## Refuted / do-not-rely-on
 
 1. ❌ mcp2py does OAuth w/ on-disk token cache+refresh at `~/.config/mcp2py/tokens.json` (0-3).
-2. ❌ FastMCP #1764 is a maintainer-confirmed cross-instance cache bug (1-2 — overstated).
-3. ❌ FastMCP caching "does not reliably persist across runs" (1-2 — it does persist when `token_storage` configured; bugs are edge cases).
+2. ❌ FastMCP #1764 is a "maintainer-confirmed" cross-instance cache bug (1-2 — "confirmed" was overstated; the issue IS open but not officially acknowledged by maintainers).
+3. ❌ FastMCP caching "does not reliably persist across runs" (1-2 — it does persist when `token_storage` configured; #1764 is an edge case, not a general failure).
 
 ## Open questions carried forward
 
-1. Does EPAM's OAuth need **pre-flight** refresh (short refresh-token life / odd
-   expiry) or would FastMCP reactive-refresh + `token_storage` suffice? → decides
-   whether your hand-rolled pre-flight is a true differentiator or redundant.
+1. ~~Does the server's OAuth need **pre-flight** refresh?~~ **Closed** — pre-flight
+   IS load-bearing due to an mcp SDK cold-start gap (not a server requirement). See
+   `doc/VERDICT.md §Fixed decisions`.
 2. Real demand for **static importable** wrappers (diff/audit/IDE-without-runtime)
    over mcp2py's runtime proxy?
 3. Distribution best practice (Q4) — needs its own research pass.

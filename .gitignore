@@ -1,4 +1,11 @@
 deep-research-wf_*.js
+*.probe-raw.json
+*.verify.json
+*.shapes.json.parts/
 *.pyc
 __pycache__/
 .venv/
+.mcp.json
+eval_preflight.py
+eval/
+.codegraph/

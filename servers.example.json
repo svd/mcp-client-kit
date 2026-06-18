@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "myserver": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp/myserver",
+      "clientName": "My App (myserver)"
+    }
+  }
+}

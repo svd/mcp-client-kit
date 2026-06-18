@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "mcpgen",
+  "version": "0.1.0",
+  "description": "Generate typed Python wrappers for any MCP server.",
+  "owner": {
+    "name": "Sviatoslav Sviridov",
+    "email": "sviridov@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "mcpgen",
+      "displayName": "mcpgen",
+      "source": "./",
+      "version": "0.1.0",
+      "description": "Generate typed Python wrappers for any MCP server (skill: generate-mcp-wrappers).",
+      "author": {
+        "name": "Sviatoslav Sviridov",
+        "email": "sviridov@gmail.com"
+      },
+      "keywords": ["mcp", "codegen", "typed-wrappers", "python", "oauth"],
+      "license": "MIT"
+    }
+  ]
+}
