@@ -1,9 +1,11 @@
-# mcpgen
+# mcp-client-kit
 
 **Write your MCP server wrappers once — from the live server. Keep them as real Python source you can diff, review, and pin.**
 
 `mcpgen` turns any MCP server into a typed Python module: one `async def` per tool, real return types, no live server needed to read it. Call your tools from code instead of pumping their schemas through the model's context — the pattern Anthropic measured at up to **98% token reduction**.
 
+> **Package / repo / plugin:** `mcp-client-kit` · **CLI command:** `mcpgen`
+>
 > Two artifacts, one repo: a **CLI** (`mcpgen`) you run anywhere, and a **Claude Code plugin** (`generate-mcp-wrappers` skill) that drives it for the parts that need judgment.
 
 ---
