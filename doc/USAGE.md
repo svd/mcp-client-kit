@@ -20,7 +20,7 @@ automatically via `uvx` — no separate engine install needed.
 **Install the plugin:**
 
 ```
-/plugin marketplace add svd/mcpgen
+/plugin marketplace add svd/mcp-client-kit
 ```
 
 Or via the `svd-agent-skills` aggregator if it's listed there.

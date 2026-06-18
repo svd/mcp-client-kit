@@ -113,7 +113,7 @@ The plugin bundles the `generate-mcp-wrappers` skill, which drives the CLI throu
 The CLI is not bundled with the plugin — install it separately (`uv add mcp-client-kit`, see [Install](#install) above). The skill requires **mcpgen >= 0.1.0** and checks this before running; a local editable install (`uv pip install -e .`) satisfies it for development. This is a version floor, not an exact pin, so the skill and CLI can be upgraded independently as long as the CLI stays at or above the floor.
 
 ```
-/plugin marketplace add svd/mcpgen
+/plugin marketplace add svd/mcp-client-kit
 /mcp-client-kit:generate-mcp-wrappers
 ```
 

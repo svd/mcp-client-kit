@@ -7,9 +7,9 @@
 | **engine** — `mcp-client-kit` (command `mcpgen`) | the codegen CLI + OAuth bridge (Python package) | **PyPI** | `uvx --from mcp-client-kit mcpgen …` / `uv add mcp-client-kit` |
 | **plugin** — `mcp-client-kit` | the judgment layer (Claude Code plugin; skill `generate-mcp-wrappers`) | **marketplace** (git repo) | `/plugin marketplace add …` |
 
-(`mcp-client-kit` names three things: the PyPI **distribution**, the Claude Code
-**plugin**, and the **marketplace catalog**. The **command** and **import module** stay
-`mcpgen` (as does the **repo**). `mcpgen` can't be the PyPI distribution name — PyPI's
+(`mcp-client-kit` names four things: the PyPI **distribution**, the Claude Code
+**plugin**, the **marketplace catalog**, and the **repo**. Only the **command** and
+**import module** stay `mcpgen`. `mcpgen` can't be the PyPI distribution name — PyPI's
 similarity guard rejects it as too close to the existing `mcp-gen` — which is what forced
 the split. The skill *inside* the plugin is `generate-mcp-wrappers` — filesystem
 `skills/generate-mcp-wrappers/`, invoked as `/mcp-client-kit:generate-mcp-wrappers`.)
@@ -204,13 +204,13 @@ entry** — the marketplace lists a pointer, it does not vendor a copy:
 ```json
 {
   "name": "mcp-client-kit",
-  "source": { "source": "github", "repo": "<owner>/mcpgen", "ref": "plugin-v0.1.1" },
+  "source": { "source": "github", "repo": "<owner>/mcp-client-kit", "ref": "plugin-v0.1.1" },
   "description": "Generate typed Python wrappers for any MCP server (skill: generate-mcp-wrappers)."
 }
 ```
 
 (Marketplace entry `name` is the **plugin** name = `mcp-client-kit`; `repo` is the
-GitHub slug, which stays `mcpgen`. The skill it provides is `generate-mcp-wrappers`.)
+GitHub slug `<owner>/mcp-client-kit`. The skill it provides is `generate-mcp-wrappers`.)
 
 (`git-subdir` source + `path` if the plugin sits in a subdir rather than repo root.
 The Claude Code marketplace schema supports `url`, `github`, `git-subdir`, and `npm`
@@ -223,7 +223,7 @@ the `ref`.
 **Optional dual discovery:** this repo also carries its own
 `.claude-plugin/marketplace.json` — a single-plugin catalog where the catalog and the
 plugin share the name **`mcp-client-kit`** — so it is installable standalone
-(`/plugin marketplace add <owner>/mcpgen`) for anyone landing on the repo
+(`/plugin marketplace add <owner>/mcp-client-kit`) for anyone landing on the repo
 directly. Coexists with the `svd-agent-skills` aggregator entry.
 
 ---
