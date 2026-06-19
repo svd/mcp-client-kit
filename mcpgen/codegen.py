@@ -252,7 +252,8 @@ def _docstring_with_args(tool: dict, ordered: list[tuple[str, dict]], indent: st
     lines_list = text.splitlines()
     if len(lines_list) == 1:
         return f'{indent}"""{lines_list[0]}"""'
-    joined = f"\n{indent}".join(lines_list)
+    parts = [lines_list[0]] + [f"{indent}{ln}" if ln else "" for ln in lines_list[1:]]
+    joined = "\n".join(parts)
     return f'{indent}"""{joined}\n{indent}"""'
 
 
@@ -460,6 +461,7 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None, pr
     has_disc = any(s.get("discriminator") and s.get("variants") for s in shapes.values())
     needs_json = bool(shapes) and any((shapes.get(t["name"]) or {}).get("unwrap") for t in tools)
     has_typed_return = has_disc or any(s.get("return_model") for s in shapes.values())
+
     def _schema_has_enum(s: dict | None) -> bool:
         if not isinstance(s, dict):
             return False
