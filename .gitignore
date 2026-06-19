@@ -31,8 +31,9 @@ dist/
 github.bak/
 g.bak/
 
-# Archived eval runs
+# Archived eval runs (eval_harness/ is the source package, not an output dir)
 eval*/
+!eval_harness/
 
 # Docs scratch / fix notes
 doc/FIXES*

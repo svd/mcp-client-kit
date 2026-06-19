@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = []   # mcp-client-kit must be installed separately; see README
 
 [dependency-groups]
-dev = ["pytest>=8,<10"]
+dev = ["pytest>=8,<10", "ruff>=0.9", "mypy>=1.14"]
 
 [project.scripts]
 eval-kit = "eval_harness.cli:main"
@@ -21,3 +21,13 @@ packages = ["eval_harness"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

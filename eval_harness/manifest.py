@@ -1,5 +1,7 @@
 """Manifest loader for mcp-client-kit-eval server specs."""
+
 from __future__ import annotations
+
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,7 +16,7 @@ class ServerSpec:
     name: str
     transport: Literal["stdio", "http", "sse"]
     launch: str  # stdio command OR URL
-    auth: str    # "none" | "oauth" | "bearer:ENV_VAR"
+    auth: str  # "none" | "oauth" | "bearer:ENV_VAR"
     expected_modes: list[str] = field(default_factory=list)
     notes: str = ""
     env: dict[str, str] = field(default_factory=dict)
@@ -35,7 +37,7 @@ class ServerSpec:
     def bearer_env_var(self) -> str | None:
         """Return the env-var name for bearer auth, or None."""
         if self.auth.startswith(_AUTH_PREFIX_BEARER):
-            return self.auth[len(_AUTH_PREFIX_BEARER):]
+            return self.auth[len(_AUTH_PREFIX_BEARER) :]
         return None
 
 
@@ -50,19 +52,23 @@ def load_manifest(path: Path | str = Path("servers/servers.toml")) -> list[Serve
         transport = entry["transport"]
         if transport not in _TRANSPORTS:
             raise ValueError(f"Server {name!r}: unknown transport {transport!r}")
-        specs.append(ServerSpec(
-            name=name,
-            transport=transport,
-            launch=entry["launch"],
-            auth=entry.get("auth", "none"),
-            expected_modes=entry.get("expected_modes", []),
-            notes=entry.get("notes", ""),
-            env=entry.get("env", {}),
-        ))
+        specs.append(
+            ServerSpec(
+                name=name,
+                transport=transport,
+                launch=entry["launch"],
+                auth=entry.get("auth", "none"),
+                expected_modes=entry.get("expected_modes", []),
+                notes=entry.get("notes", ""),
+                env=entry.get("env", {}),
+            )
+        )
     return specs
 
 
-def get_server(name: str, path: Path | str = Path("servers/servers.toml")) -> ServerSpec:
+def get_server(
+    name: str, path: Path | str = Path("servers/servers.toml")
+) -> ServerSpec:
     """Get a single server spec by name."""
     for spec in load_manifest(path):
         if spec.name == name:

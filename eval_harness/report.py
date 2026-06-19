@@ -2,13 +2,13 @@
 
 import datetime
 import json
-import os
 from pathlib import Path
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
+
 
 def find_results(base_dir: Path) -> list[Path]:
     """Find all <server>/result.json files under base_dir, sorted by server name."""
@@ -19,15 +19,16 @@ def find_results(base_dir: Path) -> list[Path]:
     return results
 
 
-def load_result(result_path: Path) -> dict:
+def load_result(result_path: Path) -> dict[str, Any]:
     """Load a result.json and return the parsed dict."""
     with result_path.open() as fh:
-        return json.load(fh)
+        return json.load(fh)  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
+
 
 def format_transport(transport: str) -> str:
     """Return display form: 'stdio' → 'stdio', 'http' → 'HTTP', 'sse' → 'SSE'."""
@@ -83,12 +84,12 @@ _TABLE_HEADER = """\
 |---|---|---|---|---|---|---|---|---|---|"""
 
 
-def _path_cell(result: dict, key: str) -> str:
+def _path_cell(result: dict[str, Any], key: str) -> str:
     """Return ✅ if result[key] is truthy, else —."""
     return "✅" if result.get(key) else "—"
 
 
-def render_matrix(results: list[dict]) -> str:
+def render_matrix(results: list[dict[str, Any]]) -> str:
     """Render the progress matrix table as a markdown string."""
     lines = [_TABLE_HEADER]
     for r in results:
@@ -143,7 +144,7 @@ def _humanize_skip(detail: str) -> tuple[str, str, str] | None:
 
     # Prefix-matched codes (dynamic f-string messages)
     if detail.startswith("missing_cred_"):
-        var = detail[len("missing_cred_"):]
+        var = detail[len("missing_cred_") :]
         return ("⊘", "N/A", f"credential {var} not set")
     if detail.startswith("mcpgen not installed"):
         return ("⊘", "not run", "mcpgen not installed")
@@ -152,7 +153,7 @@ def _humanize_skip(detail: str) -> tuple[str, str, str] | None:
     if detail.startswith("function '") and "not found in generated module" in detail:
         # Extract function name from e.g. "function 'foo' not found in generated module namespace"
         end = detail.index("'", len("function '"))
-        fn_name = detail[len("function '"):end]
+        fn_name = detail[len("function '") : end]
         return ("⊘", "not run", f"generated function '{fn_name}' not found")
     if detail.startswith("Could not load shapes.json"):
         return ("⊘", "not run", "could not load shapes.json")
@@ -197,7 +198,7 @@ def _load_synthesis(base_dir: Path) -> str | None:
     return None
 
 
-def render_detail(result: dict) -> str:
+def render_detail(result: dict[str, Any]) -> str:
     """Render per-server detail section with 5-check table."""
     server = result.get("server", "?")
     transport = format_transport(result.get("transport", ""))
@@ -233,6 +234,7 @@ def render_detail(result: dict) -> str:
 # ---------------------------------------------------------------------------
 # Top-level generator
 # ---------------------------------------------------------------------------
+
 
 def generate_report(
     base_dir: Path = Path("eval"),
@@ -315,7 +317,9 @@ def generate_report(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Generate eval report from result.json files.")
+    parser = argparse.ArgumentParser(
+        description="Generate eval report from result.json files."
+    )
     parser.add_argument(
         "--base-dir",
         type=Path,
@@ -336,5 +340,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    content = generate_report(base_dir=args.base_dir, out_path=args.out, with_narrative=args.with_narrative)
+    content = generate_report(
+        base_dir=args.base_dir, out_path=args.out, with_narrative=args.with_narrative
+    )
     print(f"Report written to {args.out}")

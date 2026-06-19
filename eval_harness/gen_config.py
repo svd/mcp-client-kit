@@ -15,11 +15,13 @@ Typical use:
     MCPGEN_SERVERS=.mcp.eval.json mcpgen list context7
     MCPGEN_SERVERS=.mcp.eval.json mcpgen list deepwiki
 """
+
 from __future__ import annotations
 
 import json
 import shlex
 from pathlib import Path
+from typing import Any
 
 from eval_harness.manifest import ServerSpec, load_manifest
 
@@ -27,24 +29,22 @@ _DEFAULT_MANIFEST = Path("servers/servers.toml")
 _DEFAULT_OUT = Path(".mcp.eval.json")
 
 
-def _spec_to_entry(spec: ServerSpec) -> dict:
+def _spec_to_entry(spec: ServerSpec) -> dict[str, Any]:
     """Convert one ServerSpec to a mcpServers JSON entry."""
     if spec.transport == "stdio":
         parts = shlex.split(spec.launch)
-        entry: dict = {"command": parts[0], "args": parts[1:]}
+        entry: dict[str, Any] = {"command": parts[0], "args": parts[1:]}
     else:
         # http or sse
         entry = {"type": spec.transport, "url": spec.launch}
         if spec.auth_kind == "bearer" and spec.bearer_env_var:
-            entry["headers"] = {
-                "Authorization": f"Bearer ${{{spec.bearer_env_var}}}"
-            }
+            entry["headers"] = {"Authorization": f"Bearer ${{{spec.bearer_env_var}}}"}
     if spec.env:
         entry["env"] = spec.env
     return entry
 
 
-def build_mcp_config(specs: list[ServerSpec]) -> dict:
+def build_mcp_config(specs: list[ServerSpec]) -> dict[str, Any]:
     """Return a ``{"mcpServers": {...}}`` dict from a list of ServerSpecs."""
     return {"mcpServers": {spec.name: _spec_to_entry(spec) for spec in specs}}
 

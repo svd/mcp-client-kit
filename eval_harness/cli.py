@@ -1,10 +1,10 @@
 """eval-kit CLI — ties together verify, report, and gen-config."""
+
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
-
 
 # ── Emoji helpers ─────────────────────────────────────────────────────────────
 
@@ -67,14 +67,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
     verdict_icon = _VERDICT_ICON.get(verdict, "?")
     print(f"\nVerdict: {verdict_icon} {verdict}")
 
-    server_dir = base_dir / spec.name
-    result_json = server_dir / "result.json"
     print(f"Written: eval/{spec.name}/result.json")
 
     if verdict == "pass":
         return 0
     if verdict == "error":
-        print(f"Warning: verify returned verdict=error for {spec.name}", file=sys.stderr)
+        print(
+            f"Warning: verify returned verdict=error for {spec.name}", file=sys.stderr
+        )
         return 0
     # "partial" or "fail"
     return 1
@@ -99,7 +99,7 @@ def cmd_gen_config(args: argparse.Namespace) -> int:
 def cmd_report(args: argparse.Namespace) -> int:
     """eval-kit report"""
     try:
-        from eval_harness.report import generate_report, find_results
+        from eval_harness.report import find_results, generate_report
     except ImportError as exc:
         print(f"ImportError: {exc}\nInstall the package first.", file=sys.stderr)
         return 1
@@ -111,10 +111,11 @@ def cmd_report(args: argparse.Namespace) -> int:
     result_paths = find_results(base_dir)
     n_servers = len(result_paths)
 
-    generate_report(base_dir=base_dir, out_path=out_path, with_narrative=args.with_narrative)
+    generate_report(
+        base_dir=base_dir, out_path=out_path, with_narrative=args.with_narrative
+    )
     print(f"Report written: {out_path} ({n_servers} servers)")
     return 0
-
 
 
 # ── Parser ────────────────────────────────────────────────────────────────────
@@ -132,11 +133,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_verify = sub.add_parser("verify", help="Verify a server's generated artifacts.")
     p_verify.add_argument("server", help="Server name (must appear in manifest).")
     p_verify.add_argument(
-        "--base-dir", default="eval", metavar="DIR",
+        "--base-dir",
+        default="eval",
+        metavar="DIR",
         help="Directory where <server>/ folders live (default: eval).",
     )
     p_verify.add_argument(
-        "--manifest", default="servers/servers.toml", metavar="PATH",
+        "--manifest",
+        default="servers/servers.toml",
+        metavar="PATH",
         help="Path to servers.toml manifest (default: servers/servers.toml).",
     )
 
@@ -146,22 +151,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Generate .mcp.eval.json from servers.toml (for mcpgen name resolution).",
     )
     p_gen.add_argument(
-        "--manifest", default="servers/servers.toml", metavar="PATH",
+        "--manifest",
+        default="servers/servers.toml",
+        metavar="PATH",
         help="Path to servers.toml manifest (default: servers/servers.toml).",
     )
     p_gen.add_argument(
-        "--out", default=".mcp.eval.json", metavar="PATH",
+        "--out",
+        default=".mcp.eval.json",
+        metavar="PATH",
         help="Output JSON path (default: .mcp.eval.json).",
     )
 
     # --- report ---
-    p_report = sub.add_parser("report", help="Generate EVAL_REPORT.md from result.json files.")
+    p_report = sub.add_parser(
+        "report", help="Generate EVAL_REPORT.md from result.json files."
+    )
     p_report.add_argument(
-        "--base-dir", default="eval", metavar="DIR",
+        "--base-dir",
+        default="eval",
+        metavar="DIR",
         help="Directory where <server>/ folders live (default: eval).",
     )
     p_report.add_argument(
-        "--out", default="doc/EVAL_REPORT.md", metavar="PATH",
+        "--out",
+        default="doc/EVAL_REPORT.md",
+        metavar="PATH",
         help="Output path for the report (default: doc/EVAL_REPORT.md).",
     )
     p_report.add_argument(

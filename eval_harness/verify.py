@@ -8,6 +8,7 @@ Checks:
   4. pii          — shapes.json probed_args contain no PII-like values
   5. roundtrip    — live call returns typed dict (requires creds + non-mutating tool)
 """
+
 from __future__ import annotations
 
 import ast
@@ -29,14 +30,14 @@ class CheckResult:
     name: str
     status: Literal["pass", "fail", "skip"]
     detail: str = ""
-    extra: dict = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 def pass_(name: str, detail: str = "") -> CheckResult:
     return CheckResult(name=name, status="pass", detail=detail)
 
 
-def fail_(name: str, detail: str, extra: dict | None = None) -> CheckResult:
+def fail_(name: str, detail: str, extra: dict[str, Any] | None = None) -> CheckResult:
     return CheckResult(name=name, status="fail", detail=detail, extra=extra or {})
 
 
@@ -48,14 +49,29 @@ def skip_(name: str, reason: str) -> CheckResult:
 
 _RE_EMAIL = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 _RE_LONG_NUM = re.compile(r"\b\d{8,}\b")
-_RE_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+_RE_UUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
+)
 _RE_HOME_PATH = re.compile(r"/(?:Users|home)/[^/\s]+")
 
 # Mutating verbs — tool names containing any of these are considered mutating
 _MUTATING_VERBS = {
-    "create", "update", "delete", "remove", "send", "write", "post",
-    "patch", "put", "cancel", "approve", "submit", "assign", "push",
-    "merge", "fork",
+    "create",
+    "update",
+    "delete",
+    "remove",
+    "send",
+    "write",
+    "post",
+    "patch",
+    "put",
+    "cancel",
+    "approve",
+    "submit",
+    "assign",
+    "push",
+    "merge",
+    "fork",
 }
 
 
@@ -85,15 +101,19 @@ def check_signatures(server_py: Path, shapes_json: Path) -> CheckResult:
         return fail_("signatures", f"Could not read file: {e}")
 
     try:
-        shapes: dict = json.loads(shapes_json.read_text(encoding="utf-8"))
+        shapes: dict[str, Any] = json.loads(shapes_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         return skip_("signatures", f"Could not load shapes.json: {e}")
 
-    inconclusive = [t for t, s in shapes.items() if s.get("_probe_status") == "inconclusive"]
+    inconclusive = [
+        t for t, s in shapes.items() if s.get("_probe_status") == "inconclusive"
+    ]
     if inconclusive:
+        names = ", ".join(inconclusive)
+        n = len(inconclusive)
         return skip_(
             "signatures",
-            f"probe_inconclusive: {len(inconclusive)} tool(s) returned quota/auth errors — shapes unknown: {', '.join(inconclusive)}",
+            f"probe_inconclusive: {n} tool(s) returned quota/auth errors — shapes unknown: {names}",
         )
 
     failures: list[str] = []
@@ -142,12 +162,14 @@ def check_signatures(server_py: Path, shapes_json: Path) -> CheckResult:
 def check_idempotency(server: str, shapes_json: Path) -> CheckResult:
     """Call render_module() twice with stub schemas and assert identical output."""
     try:
-        import mcpgen.codegen as codegen  # noqa: PLC0415
+        import mcpgen.codegen as codegen  # type: ignore[import-not-found]  # noqa: PLC0415
     except ImportError:
-        return skip_("idempotency", "mcpgen not installed — check DISABLED (install to enable)")
+        return skip_(
+            "idempotency", "mcpgen not installed — check DISABLED (install to enable)"
+        )
 
     try:
-        shapes_data: dict = json.loads(shapes_json.read_text(encoding="utf-8"))
+        shapes_data: dict[str, Any] = json.loads(shapes_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         return skip_("idempotency", f"Could not load shapes.json: {e}")
 
@@ -205,7 +227,7 @@ def _scan_for_pii(
 def check_pii(shapes_json: Path) -> CheckResult:
     """Scan probed_args in shapes.json for PII-like values."""
     try:
-        shapes: dict = json.loads(shapes_json.read_text(encoding="utf-8"))
+        shapes: dict[str, Any] = json.loads(shapes_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         return skip_("pii", f"Could not load shapes.json: {e}")
 
@@ -216,8 +238,7 @@ def check_pii(shapes_json: Path) -> CheckResult:
 
     if findings:
         detail_lines = [
-            f"{tool} @ {fpath!r}: {preview!r}"
-            for tool, fpath, preview in findings
+            f"{tool} @ {fpath!r}: {preview!r}" for tool, fpath, preview in findings
         ]
         return fail_(
             "pii",
@@ -240,13 +261,13 @@ def check_roundtrip(
 ) -> CheckResult:
     """Live call: find a shaped non-mutating tool, call it, verify typed return."""
     try:
-        shapes: dict = json.loads(shapes_json.read_text(encoding="utf-8"))
+        shapes: dict[str, Any] = json.loads(shapes_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         return skip_("roundtrip", f"Could not load shapes.json: {e}")
 
     # Find a shaped, non-mutating tool
     candidate_name: str | None = None
-    candidate_shape: dict | None = None
+    candidate_shape: dict[str, Any] | None = None
     for tool_name, shape in shapes.items():
         if shape.get("return_model") is not None and not _is_mutating(tool_name):
             candidate_name = tool_name
@@ -274,9 +295,13 @@ def check_roundtrip(
         return fail_("roundtrip", f"Could not read generated module: {e}")
 
     try:
-        from mcpgen._bridge import McpBridgeCaller  # noqa: PLC0415
+        from mcpgen._bridge import (  # type: ignore[import-not-found]  # noqa: PLC0415
+            McpBridgeCaller,
+        )
     except ImportError:
-        return skip_("roundtrip", "mcpgen not installed — check DISABLED (install to enable)")
+        return skip_(
+            "roundtrip", "mcpgen not installed — check DISABLED (install to enable)"
+        )
 
     # Build the caller
     bearer_token: str | None = None
@@ -296,9 +321,13 @@ def check_roundtrip(
 
     try:
         if spec.transport == "stdio":
-            caller = McpBridgeCaller(cmd=spec.launch, bearer=bearer_token, env=resolved_env)
+            caller = McpBridgeCaller(
+                cmd=spec.launch, bearer=bearer_token, env=resolved_env
+            )
         else:
-            caller = McpBridgeCaller(url=spec.launch, bearer=bearer_token, env=resolved_env)
+            caller = McpBridgeCaller(
+                url=spec.launch, bearer=bearer_token, env=resolved_env
+            )
     except Exception as e:
         return fail_("roundtrip", f"Failed to construct caller: {e}")
 
@@ -320,6 +349,7 @@ def check_roundtrip(
         if not sanitized or sanitized[0].isdigit():
             sanitized = "_" + sanitized
         import keyword  # noqa: PLC0415
+
         if keyword.iskeyword(sanitized):
             sanitized += "_"
         fn = ns.get(sanitized)
@@ -332,14 +362,19 @@ def check_roundtrip(
 
     probed_args = candidate_shape.get("probed_args", {})
     if not isinstance(probed_args, dict):
-        return skip_("roundtrip", "probed_args is not a dict (multi-probe list not supported for live call)")
+        return skip_(
+            "roundtrip",
+            "probed_args is not a dict (multi-probe list not supported for live call)",
+        )
     # Prefer real pre-scrub args from a gitignored sidecar when available, so the
     # live call uses values the server accepts instead of <example-*> placeholders.
     verify_args_path = shapes_json.parent / f"{spec.name}.verify.json"
     if verify_args_path.exists():
         try:
             overrides = json.loads(verify_args_path.read_text(encoding="utf-8"))
-            if isinstance(overrides, dict) and isinstance(overrides.get(candidate_name), dict):
+            if isinstance(overrides, dict) and isinstance(
+                overrides.get(candidate_name), dict
+            ):
                 probed_args = overrides[candidate_name]
         except (OSError, json.JSONDecodeError):
             pass  # unreadable sidecar — fall through to placeholder guard
@@ -347,7 +382,7 @@ def check_roundtrip(
         return skip_("roundtrip", "probed_args_contain_placeholders")
     return_model: str = candidate_shape["return_model"]
     return_container: str | None = candidate_shape.get("return_container")
-    expected_fields: dict = candidate_shape.get("fields", {})
+    expected_fields: dict[str, Any] = candidate_shape.get("fields", {})
 
     try:
         import asyncio  # noqa: PLC0415
@@ -359,6 +394,7 @@ def check_roundtrip(
 
         if loop is not None and loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(asyncio.run, fn(caller, **probed_args))
                 result = future.result(timeout=30)
@@ -366,7 +402,11 @@ def check_roundtrip(
             result = asyncio.run(fn(caller, **probed_args))
     except Exception as e:  # noqa: BLE001
         tb = traceback.format_exc()
-        return fail_("roundtrip", f"live call raised {type(e).__name__}: {e}", extra={"traceback": tb})
+        return fail_(
+            "roundtrip",
+            f"live call raised {type(e).__name__}: {e}",
+            extra={"traceback": tb},
+        )
 
     # Validate result shape
     if return_container == "list":
@@ -379,9 +419,10 @@ def check_roundtrip(
             item = result[0]
             matching = [k for k in expected_fields if k in item]
             if not matching:
+                expected = list(expected_fields.keys())
                 return fail_(
                     "roundtrip",
-                    f"first item in list has none of the expected fields {list(expected_fields.keys())!r}",
+                    f"first item in list has none of the expected fields {expected!r}",
                 )
     else:
         if isinstance(result, str):
@@ -403,7 +444,7 @@ def check_roundtrip(
 # ── Modes detection ───────────────────────────────────────────────────────────
 
 
-def _compute_modes_hit(shapes: dict | None) -> list[str]:
+def _compute_modes_hit(shapes: dict[str, Any] | None) -> list[str]:
     """Determine which eval modes are exercised by the shapes."""
     if shapes is None:
         return []
@@ -430,7 +471,7 @@ def _compute_modes_hit(shapes: dict | None) -> list[str]:
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 
-def verify_server(spec: ServerSpec, base_dir: Path = Path("eval")) -> dict:
+def verify_server(spec: ServerSpec, base_dir: Path = Path("eval")) -> dict[str, Any]:
     """Run all 5 checks for a server and write result.json.
 
     Returns the result dict.
@@ -441,7 +482,7 @@ def verify_server(spec: ServerSpec, base_dir: Path = Path("eval")) -> dict:
 
     # If generated file doesn't exist at all — early error return
     if not server_py.exists():
-        result: dict = {
+        result: dict[str, Any] = {
             "server": spec.name,
             "transport": spec.transport,
             "auth": spec.auth,
@@ -472,7 +513,7 @@ def verify_server(spec: ServerSpec, base_dir: Path = Path("eval")) -> dict:
     all_checks = [ast_result, sig_result, idem_result, pii_result, rt_result]
 
     # Load shapes for modes computation (None if not present)
-    shapes_data: dict | None = None
+    shapes_data: dict[str, Any] | None = None
     if shapes_present:
         try:
             shapes_data = json.loads(shapes_json.read_text(encoding="utf-8"))
