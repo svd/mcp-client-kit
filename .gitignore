@@ -5,6 +5,9 @@ deep-research-wf_*.js
 *.pyc
 __pycache__/
 .venv/
+.coverage
+.coverage.*
+htmlcov/
 .mcp.json
 eval_preflight.py
 eval/
