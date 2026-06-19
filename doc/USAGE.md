@@ -74,8 +74,8 @@ uv add mcp-client-kit            # or: pip install mcp-client-kit
 
 | Command | Purpose | Key flags |
 |---------|---------|-----------|
-| `codegen <server>` | Emit typed wrappers | `--out`, `--shapes <path>`, `--probe <tool>` / `--probe-args` |
-| `list <server>` | Tools as JSON `[{name, description}]`; discriminator advisory on stderr | — |
+| `codegen <server>` | Emit typed wrappers | `--out`, `--shapes <path>`, `--probe <tool>` / `--probe-args`, `--embed-schema` |
+| `list <server>` | Tools as JSON `[{name, description}]` (add `--schema` for `inputSchema` per tool); discriminator advisory on stderr | `--schema` |
 | `probe <server> <tool>` | Live call(s) → shape skeleton | `--args` (repeatable), `--emit-shape <path>` (writes `.parts/`) |
 | `call <server> <tool>` | One live call, raw payload to disk — bootstrap ids / inspect output | `--out <path>` (required) |
 | `merge <server>` | Consolidate `.parts/` → `<server>.shapes.json`; emit gitignored `verify.json` | `--out <path>` |
@@ -419,6 +419,15 @@ pos = await mod.get_entity(caller, entityId="y", entityType=2)  # typed Position
 Caveats: the discriminator is **always required** (even if the tool schema marks
 it optional). An unmodeled discriminator value hits the `int` impl and returns the
 union — it never raises.
+
+### Enum params → `Literal[...]`
+
+Any input param whose `inputSchema` carries an `enum` array is automatically typed as
+`Literal[<v1>, <v2>, ...]` — no flag required. This applies to all scalar enums
+(string, int, …). Use `mcpgen list <server> --schema` to inspect the raw `enum` arrays
+before generating. Do not widen enum params to `str` in your calling code; if the server
+accepts values outside the declared enum, the appropriate fix is to update the shape-spec
+`input_overrides` for that param rather than loosening the call site.
 
 ---
 

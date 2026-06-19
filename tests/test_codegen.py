@@ -961,3 +961,165 @@ def test_detect_discriminators_denylist_camelcase_compound_forms():
     result = codegen.detect_discriminators(tools)
     for param in compound_params:
         assert param not in result, f"compound param {param!r} must be in denylist"
+
+
+# ---------------------------------------------------------------------------
+# Task C — enum → Literal[...] in py_type and render_module
+# ---------------------------------------------------------------------------
+
+
+def test_py_type_enum_string_literal():
+    assert codegen.py_type({"type": "string", "enum": ["asc", "desc"]}) == "Literal['asc', 'desc']"
+
+
+def test_py_type_enum_int_literal():
+    assert codegen.py_type({"enum": [1, 2, 3]}) == "Literal[1, 2, 3]"
+
+
+def test_py_type_enum_nullable():
+    assert codegen.py_type({"type": ["string", "null"], "enum": ["a", "b"]}) == "Literal['a', 'b'] | None"
+
+
+def test_py_type_enum_empty_falls_through():
+    # Empty enum list must not produce Literal[] (syntax error); fall through to scalar.
+    assert codegen.py_type({"type": "string", "enum": []}) == "str"
+
+
+def test_py_type_enum_float_falls_through_to_type():
+    # Floats are not PEP 586-safe; fall through to declared type.
+    assert codegen.py_type({"type": "number", "enum": [1.5, 2.5]}) == "float"
+
+
+def test_py_type_enum_float_no_type_falls_through_to_any():
+    # No type key + unsafe enum members → Any.
+    assert codegen.py_type({"enum": [1.5, 2.5]}) == "Any"
+
+
+def test_py_type_enum_list_members_falls_through():
+    # List values are not valid Literal parameters.
+    assert codegen.py_type({"enum": [[1, 2], [3, 4]]}) == "Any"
+
+
+def test_py_type_enum_dict_members_falls_through():
+    # Dict values are not valid Literal parameters.
+    assert codegen.py_type({"enum": [{"a": 1}]}) == "Any"
+
+
+def test_py_type_enum_mixed_safe_unsafe_falls_through():
+    # Mixed scalars + float: all-or-nothing, fall through.
+    assert codegen.py_type({"type": "string", "enum": ["ok", 1.5]}) == "str"
+
+
+def test_render_module_enum_param_imports_literal():
+    tools = [
+        {
+            "name": "sort_items",
+            "description": "Sort items.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "enum": ["asc", "desc"]},
+                },
+                "required": ["direction"],
+            },
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert "from typing import Any, Literal" in src
+
+
+def test_render_tool_enum_param_uses_literal():
+    tool = {
+        "name": "sort_items",
+        "description": "Sort items.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "direction": {"type": "string", "enum": ["asc", "desc"]},
+            },
+            "required": ["direction"],
+        },
+    }
+    src = codegen.render_tool(tool)
+    assert "Literal[" in src
+    assert "Literal['asc', 'desc']" in src
+    # Generated source must be valid Python when embedded in a module.
+    tools = [tool]
+    module_src = codegen.render_module("demo", tools)
+    ast.parse(module_src)
+
+
+# ── --embed-schema tests ──────────────────────────────────────────────────────
+
+_EMBED_TOOL = {
+    "name": "get_item",
+    "description": "Fetch an item.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "item_id": {"type": "string", "description": "The item identifier"},
+            "format": {"type": "string", "enum": ["json", "xml"], "default": "json", "description": "Output format"},
+            "verbose": {"type": "boolean"},
+        },
+        "required": ["item_id"],
+    },
+}
+
+
+def test_render_tool_embed_schema_adds_schema_attr():
+    src = codegen.render_tool(_EMBED_TOOL, embed_schema=True)
+    assert ".__schema__ = " in src
+    # Must be valid Python and the attribute must be accessible.
+    ns: dict = {}
+    # Wrap in a module-like context so the async def can be exec'd.
+    module_src = (
+        "from __future__ import annotations\n"
+        "from typing import Any\n"
+        "from mcpgen.seam import McpCaller\n"
+        "SERVER = 'demo'\n\n" + src
+    )
+    exec(compile(module_src, "<test>", "exec"), ns)
+    fn = ns["get_item"]
+    assert hasattr(fn, "__schema__")
+    assert fn.__schema__ == (_EMBED_TOOL.get("inputSchema") or {})
+
+
+def test_render_tool_embed_schema_adds_args_docstring():
+    src = codegen.render_tool(_EMBED_TOOL, embed_schema=True)
+    assert "Args:" in src
+    assert "item_id:" in src
+    assert "The item identifier" in src
+    assert "One of:" in src
+    assert "'json'" in src
+    assert "Default:" in src
+    # Tighten assertion to check exact indentation
+    assert "    Args:" in src  # 4 spaces (not 8)
+    assert "        item_id:" in src  # 8 spaces (not 12)
+
+
+def test_render_tool_no_embed_schema_unchanged():
+    src_default = codegen.render_tool(_EMBED_TOOL)
+    src_false = codegen.render_tool(_EMBED_TOOL, embed_schema=False)
+    src_no_flag = codegen.render_tool(_EMBED_TOOL)
+    assert src_default == src_false == src_no_flag
+    assert ".__schema__" not in src_default
+    assert "Args:" not in src_default
+
+
+def test_render_module_embed_schema_passes_through():
+    tools = [_EMBED_TOOL]
+    src = codegen.render_module("demo", tools, embed_schema=True)
+    ast.parse(src)
+    assert ".__schema__ = " in src
+
+
+def test_render_tool_embed_schema_no_args_no_args_section():
+    tool = {
+        "name": "ping",
+        "description": "Ping the server.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    }
+    src = codegen.render_tool(tool, embed_schema=True)
+    assert "Args:" not in src
+    # __schema__ attr should still be present (empty dict).
+    assert ".__schema__ = " in src

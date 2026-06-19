@@ -127,8 +127,8 @@ A companion skill, `generate-mcp-runner`, writes a standalone smoke-test `run.py
 
 | Command | What it does |
 |---------|--------------|
-| `codegen <server>` | Emit typed wrappers; `--shapes` applies the shape-spec, `--probe` records a response shape inline. |
-| `list <server>` | Print a server's tools as JSON. |
+| `codegen <server>` | Emit typed wrappers; `--shapes` applies the shape-spec, `--probe` records a response shape inline, `--embed-schema` embeds `fn.__schema__` + Args docstring per function. |
+| `list <server>` | Print a server's tools as JSON; `--schema` adds raw `inputSchema` per tool. |
 | `probe <server> <tool>` | Live call(s) → response-shape skeleton. |
 | `call <server> <tool> --out <p>` | One live call, raw payload to disk — bootstrap ids or inspect output. |
 | `merge <server>` | Consolidate probe parts into `<server>.shapes.json`. |
