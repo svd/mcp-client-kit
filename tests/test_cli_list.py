@@ -6,8 +6,6 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from mcpgen.cli import _cmd_list
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -86,13 +84,10 @@ def test_list_without_schema_no_inputschema_in_output(capsys):
 
 
 def test_list_without_schema_empty_description_fallback(capsys):
-    """When description is missing, it should fallback to empty string."""
+    """When description is None or absent, it should fallback to empty string."""
     tools = [
-        {
-            "name": "no_desc",
-            "description": None,
-            "inputSchema": {}
-        }
+        {"name": "no_desc_none", "description": None, "inputSchema": {}},
+        {"name": "no_desc_absent", "inputSchema": {}},
     ]
     ns = _ns("acme", schema=False)
 
@@ -102,7 +97,8 @@ def test_list_without_schema_empty_description_fallback(capsys):
     out = capsys.readouterr().out
     result = json.loads(out)
 
-    assert result[0] == {"name": "no_desc", "description": ""}
+    assert result[0] == {"name": "no_desc_none", "description": ""}
+    assert result[1] == {"name": "no_desc_absent", "description": ""}
 
 
 # ── with --schema ─────────────────────────────────────────────────────────────
@@ -142,13 +138,10 @@ def test_list_with_schema_includes_name_and_description(capsys):
 
 
 def test_list_with_schema_empty_inputschema_fallback(capsys):
-    """When inputSchema is missing, it should fallback to empty dict."""
+    """When inputSchema is None or absent, it should fallback to empty dict."""
     tools = [
-        {
-            "name": "no_schema",
-            "description": "A tool",
-            "inputSchema": None
-        }
+        {"name": "no_schema_none", "description": "A tool", "inputSchema": None},
+        {"name": "no_schema_absent", "description": "A tool"},
     ]
     ns = _ns("acme", schema=True)
 
@@ -159,6 +152,7 @@ def test_list_with_schema_empty_inputschema_fallback(capsys):
     result = json.loads(out)
 
     assert result[0]["inputSchema"] == {}
+    assert result[1]["inputSchema"] == {}
 
 
 def test_list_with_schema_all_fields_present(capsys):
