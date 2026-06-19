@@ -67,3 +67,20 @@ The skill is `/mcp-client-kit:generate-mcp-wrappers`. It requires `mcpgen` on PA
 ## Credentials
 
 Stored at `~/.mcpgen/credentials.json` (chmod 0600) or OS keychain via `--cred-backend keyring`. `migrate-creds` moves between backends.
+
+## Versioning & release
+
+Two artifacts, independent versions — see `doc/DISTRIBUTION.md` for full spec.
+
+| Artifact | Tag form | Source of truth | Effect |
+|---|---|---|---|
+| engine (CLI) | `vX.Y.Z` | `pyproject.toml` | triggers PyPI publish |
+| plugin (skill) | `plugin-vX.Y.Z` | `.claude-plugin/plugin.json` + `marketplace.json` | marketplace ref only, no publish |
+
+```bash
+# Plugin-only release (skill/SKILL.md change, no engine code change)
+git tag plugin-vX.Y.Z origin/main   # tag on main after PR merge
+git push origin plugin-vX.Y.Z
+
+# Engine release — see doc/DISTRIBUTION.md:108 (fires PyPI publish workflow)
+```
