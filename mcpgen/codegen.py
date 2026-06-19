@@ -219,6 +219,9 @@ def _docstring_with_args(tool: dict, ordered: list[tuple[str, dict]], indent: st
     for pname, pschema in ordered:
         py = sanitize(pname)
         parts: list[str] = []
+        if not isinstance(pschema, dict):
+            props_lines.append(f"    {py}:")
+            continue
         pdesc = (pschema.get("description") or "").strip()
         if pdesc:
             parts.append(pdesc)
@@ -457,8 +460,17 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None, pr
     has_disc = any(s.get("discriminator") and s.get("variants") for s in shapes.values())
     needs_json = bool(shapes) and any((shapes.get(t["name"]) or {}).get("unwrap") for t in tools)
     has_typed_return = has_disc or any(s.get("return_model") for s in shapes.values())
+    def _schema_has_enum(s: dict | None) -> bool:
+        if not isinstance(s, dict):
+            return False
+        if s.get("enum"):
+            return True
+        # recurse into array items (py_type can emit Literal for nested enums)
+        items = s.get("items")
+        return isinstance(items, dict) and bool(items.get("enum"))
+
     has_enum = any(
-        any(isinstance(pschema, dict) and pschema.get("enum")
+        any(_schema_has_enum(pschema)
             for pschema in (((t.get("inputSchema") or {}).get("properties") or {}).values()))
         for t in tools
     )
