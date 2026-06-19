@@ -1,0 +1,132 @@
+{
+  "echo": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "message": "hello world"
+    }
+  },
+  "get-annotated-message": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": [
+      {
+        "messageType": "error"
+      },
+      {
+        "messageType": "success"
+      },
+      {
+        "messageType": "debug"
+      }
+    ]
+  },
+  "get-env": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {}
+  },
+  "get-resource-links": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "count": 3
+    }
+  },
+  "get-resource-reference": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": [
+      {
+        "resourceType": "Text",
+        "resourceId": 1
+      },
+      {
+        "resourceType": "Blob",
+        "resourceId": 1
+      }
+    ]
+  },
+  "get-structured-content": {
+    "unwrap": [],
+    "return_model": "WeatherContent",
+    "return_container": null,
+    "input_overrides": {},
+    "fields": {
+      "temperature": "int",
+      "conditions": "str",
+      "humidity": "int"
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "location": "New York"
+      },
+      {
+        "location": "Chicago"
+      },
+      {
+        "location": "Los Angeles"
+      }
+    ]
+  },
+  "get-sum": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "a": 3,
+      "b": 4
+    }
+  },
+  "get-tiny-image": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {}
+  },
+  "gzip-file-as-resource": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": [
+      {
+        "outputType": "resourceLink"
+      },
+      {
+        "outputType": "resource"
+      }
+    ]
+  },
+  "simulate-research-query": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "topic": "climate change"
+    }
+  }
+}

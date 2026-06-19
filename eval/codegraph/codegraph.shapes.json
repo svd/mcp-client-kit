@@ -1,0 +1,53 @@
+{
+  "codegraph_context": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "task": "how does the eval harness verify generated wrappers"
+    }
+  },
+  "codegraph_explore": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "ServerSpec manifest verify"
+    }
+  },
+  "codegraph_node": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "symbol": "verify"
+    }
+  },
+  "codegraph_search": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "manifest"
+    }
+  },
+  "codegraph_trace": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "from": "verify",
+      "to": "ast"
+    }
+  }
+}

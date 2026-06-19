@@ -1,0 +1,133 @@
+{
+  "get_commit": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "sha": "main",
+    "detail": "stats"
+  },
+  "get_file_contents": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "path": "README.md"
+  },
+  "get_label": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "name": "bug"
+  },
+  "get_latest_release": {
+    "owner": "microsoft",
+    "repo": "vscode"
+  },
+  "get_release_by_tag": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "tag": "1.100.2"
+  },
+  "get_tag": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "tag": "1.100.2"
+  },
+  "get_team_members": {
+    "org": "microsoft",
+    "team_slug": "vscode"
+  },
+  "issue_read": [
+    {
+      "method": "get",
+      "owner": "microsoft",
+      "repo": "vscode",
+      "issue_number": 248765
+    },
+    {
+      "method": "get_comments",
+      "owner": "microsoft",
+      "repo": "vscode",
+      "issue_number": 248765,
+      "perPage": 3
+    }
+  ],
+  "list_branches": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "perPage": 5
+  },
+  "list_commits": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "perPage": 5
+  },
+  "list_issue_fields": {
+    "owner": "microsoft"
+  },
+  "list_issue_types": {
+    "owner": "microsoft"
+  },
+  "list_issues": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "perPage": 3,
+    "state": "OPEN"
+  },
+  "list_pull_requests": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "perPage": 3,
+    "state": "open"
+  },
+  "list_releases": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "perPage": 5
+  },
+  "list_repository_collaborators": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "perPage": 3
+  },
+  "list_tags": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "perPage": 5
+  },
+  "pull_request_read": [
+    {
+      "method": "get",
+      "owner": "microsoft",
+      "repo": "vscode",
+      "pullNumber": 247000
+    },
+    {
+      "method": "get_files",
+      "owner": "microsoft",
+      "repo": "vscode",
+      "pullNumber": 247000,
+      "perPage": 3
+    }
+  ],
+  "search_code": {
+    "query": "McpCaller repo:microsoft/vscode",
+    "perPage": 3
+  },
+  "search_commits": {
+    "query": "repo:microsoft/vscode fix bug",
+    "perPage": 3
+  },
+  "search_issues": {
+    "query": "repo:microsoft/vscode is:issue label:bug",
+    "perPage": 3
+  },
+  "search_pull_requests": {
+    "query": "repo:microsoft/vscode is:pr is:open",
+    "perPage": 3
+  },
+  "search_repositories": {
+    "query": "vscode language:typescript stars:>10000",
+    "perPage": 3
+  },
+  "search_users": {
+    "query": "svd",
+    "perPage": 3
+  }
+}

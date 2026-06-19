@@ -1,0 +1,18 @@
+{
+  "describe_table": [
+    {
+      "table_name": "users"
+    },
+    {
+      "table_name": "products"
+    }
+  ],
+  "read_query": [
+    {
+      "query": "SELECT * FROM users LIMIT 2"
+    },
+    {
+      "query": "SELECT * FROM products LIMIT 2"
+    }
+  ]
+}

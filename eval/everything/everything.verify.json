@@ -1,0 +1,55 @@
+{
+  "echo": {
+    "message": "hello world"
+  },
+  "get-annotated-message": [
+    {
+      "messageType": "error"
+    },
+    {
+      "messageType": "success"
+    },
+    {
+      "messageType": "debug"
+    }
+  ],
+  "get-resource-links": {
+    "count": 3
+  },
+  "get-resource-reference": [
+    {
+      "resourceType": "Text",
+      "resourceId": 1
+    },
+    {
+      "resourceType": "Blob",
+      "resourceId": 1
+    }
+  ],
+  "get-structured-content": [
+    {
+      "location": "New York"
+    },
+    {
+      "location": "Chicago"
+    },
+    {
+      "location": "Los Angeles"
+    }
+  ],
+  "get-sum": {
+    "a": 3,
+    "b": 4
+  },
+  "gzip-file-as-resource": [
+    {
+      "outputType": "resourceLink"
+    },
+    {
+      "outputType": "resource"
+    }
+  ],
+  "simulate-research-query": {
+    "topic": "climate change"
+  }
+}

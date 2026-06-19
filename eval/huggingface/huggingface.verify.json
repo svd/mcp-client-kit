@@ -1,0 +1,31 @@
+{
+  "hf_doc_fetch": {
+    "doc_url": "https://huggingface.co/docs/transformers/index"
+  },
+  "hf_doc_search": {
+    "query": ""
+  },
+  "hub_repo_details": {
+    "repo_ids": [
+      "google-bert/bert-base-uncased"
+    ],
+    "repo_type": "model",
+    "operations": [
+      "overview"
+    ]
+  },
+  "hub_repo_search": {
+    "query": "bert",
+    "repo_types": [
+      "model"
+    ],
+    "limit": 5
+  },
+  "paper_search": {
+    "query": "attention is all you need",
+    "results_limit": 3
+  },
+  "space_search": {
+    "query": "machine learning"
+  }
+}

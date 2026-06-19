@@ -1,0 +1,27 @@
+{
+  "git_branch": {
+    "repo_path": "/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval",
+    "branch_type": "local"
+  },
+  "git_diff": {
+    "repo_path": "/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval",
+    "target": "HEAD~1"
+  },
+  "git_diff_staged": {
+    "repo_path": "/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval"
+  },
+  "git_diff_unstaged": {
+    "repo_path": "/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval"
+  },
+  "git_log": {
+    "repo_path": "/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval",
+    "max_count": 5
+  },
+  "git_show": {
+    "repo_path": "/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval",
+    "revision": "HEAD"
+  },
+  "git_status": {
+    "repo_path": "/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval"
+  }
+}

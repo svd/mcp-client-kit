@@ -1,0 +1,12 @@
+{
+  "fetch": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "url": "https://example.com"
+    }
+  }
+}

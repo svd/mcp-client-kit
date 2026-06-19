@@ -1,0 +1,90 @@
+{
+  "git_branch": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>",
+      "branch_type": "local"
+    },
+    "probe_args_scrubbed": true,
+    "_observed_shape": "str"
+  },
+  "git_diff": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>",
+      "target": "HEAD~1"
+    },
+    "probe_args_scrubbed": true,
+    "_observed_shape": "str"
+  },
+  "git_diff_staged": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>"
+    },
+    "probe_args_scrubbed": true,
+    "_observed_shape": "str"
+  },
+  "git_diff_unstaged": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>"
+    },
+    "probe_args_scrubbed": true,
+    "_observed_shape": "str"
+  },
+  "git_log": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>",
+      "max_count": 5
+    },
+    "probe_args_scrubbed": true,
+    "_observed_shape": "str"
+  },
+  "git_show": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>",
+      "revision": "HEAD"
+    },
+    "probe_args_scrubbed": true,
+    "_observed_shape": "str"
+  },
+  "git_status": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_path": "<example-repo-path>"
+    },
+    "probe_args_scrubbed": true,
+    "_observed_shape": "str"
+  }
+}

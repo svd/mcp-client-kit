@@ -1,0 +1,52 @@
+{
+  "describe_table": {
+    "unwrap": [],
+    "return_model": "ColumnInfo",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {
+      "cid": "int",
+      "name": "str",
+      "type": "str",
+      "notnull": "int",
+      "dflt_value": "Any | None",
+      "pk": "int"
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "table_name": "users"
+      },
+      {
+        "table_name": "products"
+      }
+    ]
+  },
+  "list_tables": {
+    "unwrap": [],
+    "return_model": "TableName",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {
+      "name": "str"
+    },
+    "source": "live",
+    "probed_args": {}
+  },
+  "read_query": {
+    "unwrap": [],
+    "return_model": null,
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": [
+      {
+        "query": "SELECT * FROM users LIMIT 2"
+      },
+      {
+        "query": "SELECT * FROM products LIMIT 2"
+      }
+    ]
+  }
+}

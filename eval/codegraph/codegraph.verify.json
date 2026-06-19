@@ -1,0 +1,18 @@
+{
+  "codegraph_context": {
+    "task": "how does the eval harness verify generated wrappers"
+  },
+  "codegraph_explore": {
+    "query": "ServerSpec manifest verify"
+  },
+  "codegraph_node": {
+    "symbol": "verify"
+  },
+  "codegraph_search": {
+    "query": "manifest"
+  },
+  "codegraph_trace": {
+    "from": "verify",
+    "to": "ast"
+  }
+}

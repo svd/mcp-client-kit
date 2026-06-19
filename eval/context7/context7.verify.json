@@ -1,0 +1,10 @@
+{
+  "query-docs": {
+    "libraryId": "/psf/requests",
+    "query": "How to make a GET request"
+  },
+  "resolve-library-id": {
+    "query": "HTTP client library for Python",
+    "libraryName": "requests"
+  }
+}

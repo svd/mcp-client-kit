@@ -1,0 +1,12 @@
+{
+  "ask_question": {
+    "repoName": "microsoft/vscode",
+    "question": "What is the main architecture?"
+  },
+  "read_wiki_contents": {
+    "repoName": "microsoft/vscode"
+  },
+  "read_wiki_structure": {
+    "repoName": "microsoft/vscode"
+  }
+}

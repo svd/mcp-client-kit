@@ -1,0 +1,33 @@
+{
+  "ask_question": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repoName": "microsoft/vscode",
+      "question": "What is the main architecture?"
+    }
+  },
+  "read_wiki_contents": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repoName": "microsoft/vscode"
+    }
+  },
+  "read_wiki_structure": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repoName": "microsoft/vscode"
+    }
+  }
+}

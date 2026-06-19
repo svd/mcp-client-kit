@@ -1,0 +1,88 @@
+{
+  "hf_doc_fetch": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "doc_url": "https://huggingface.co/docs/transformers/index"
+    },
+    "_observed_shape": "str"
+  },
+  "hf_doc_search": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": ""
+    },
+    "_observed_shape": "str"
+  },
+  "hf_whoami": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {},
+    "_observed_shape": "str"
+  },
+  "hub_repo_details": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "repo_ids": [
+        "google-bert/bert-base-uncased"
+      ],
+      "repo_type": "model",
+      "operations": [
+        "overview"
+      ]
+    },
+    "_observed_shape": "str"
+  },
+  "hub_repo_search": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "bert",
+      "repo_types": [
+        "model"
+      ],
+      "limit": 5
+    },
+    "_observed_shape": "str"
+  },
+  "paper_search": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "attention is all you need",
+      "results_limit": 3
+    },
+    "_observed_shape": "str"
+  },
+  "space_search": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "machine learning"
+    },
+    "_observed_shape": "str"
+  }
+}

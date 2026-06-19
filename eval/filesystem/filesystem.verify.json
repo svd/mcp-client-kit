@@ -1,0 +1,29 @@
+{
+  "directory_tree": {
+    "path": "/private/tmp"
+  },
+  "get_file_info": {
+    "path": "/private/tmp"
+  },
+  "list_directory": {
+    "path": "/private/tmp"
+  },
+  "list_directory_with_sizes": {
+    "path": "/private/tmp"
+  },
+  "read_file": {
+    "path": "/private/tmp/mcpgen-eval-test.txt"
+  },
+  "read_multiple_files": {
+    "paths": [
+      "/private/tmp/mcpgen-eval-test.txt"
+    ]
+  },
+  "read_text_file": {
+    "path": "/private/tmp/mcpgen-eval-test.txt"
+  },
+  "search_files": {
+    "path": "/private/tmp",
+    "pattern": "*.json"
+  }
+}

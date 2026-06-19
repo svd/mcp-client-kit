@@ -1,0 +1,21 @@
+{
+  "sequentialthinking": {
+    "unwrap": [],
+    "return_model": "ThoughtResult",
+    "input_overrides": {},
+    "fields": {
+      "thoughtNumber": "int",
+      "totalThoughts": "int",
+      "nextThoughtNeeded": "bool",
+      "branches": "list",
+      "thoughtHistoryLength": "int"
+    },
+    "source": "live",
+    "probed_args": {
+      "thought": "This is the first step of solving the problem.",
+      "nextThoughtNeeded": false,
+      "thoughtNumber": 1,
+      "totalThoughts": 1
+    }
+  }
+}

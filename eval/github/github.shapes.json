@@ -1,0 +1,432 @@
+{
+  "get_commit": {
+    "unwrap": [],
+    "return_model": "CommitDetail",
+    "input_overrides": {},
+    "fields": {
+      "sha": "str",
+      "html_url": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "sha": "main",
+      "detail": "stats"
+    }
+  },
+  "get_file_contents": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "path": "README.md"
+    }
+  },
+  "get_label": {
+    "unwrap": [],
+    "return_model": "Label",
+    "input_overrides": {},
+    "fields": {
+      "color": "str",
+      "description": "str",
+      "id": "str",
+      "name": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "name": "bug"
+    }
+  },
+  "get_latest_release": {
+    "unwrap": [],
+    "return_model": "Release",
+    "input_overrides": {},
+    "fields": {
+      "tag_name": "str",
+      "target_commitish": "str",
+      "name": "str",
+      "body": "str",
+      "draft": "bool",
+      "prerelease": "bool",
+      "id": "int",
+      "created_at": "str",
+      "published_at": "str",
+      "url": "str",
+      "html_url": "str",
+      "assets_url": "str",
+      "upload_url": "str",
+      "zipball_url": "str",
+      "tarball_url": "str",
+      "node_id": "str",
+      "immutable": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode"
+    }
+  },
+  "get_me": {
+    "unwrap": [],
+    "return_model": "GitHubUser",
+    "input_overrides": {},
+    "fields": {
+      "login": "str",
+      "id": "int",
+      "profile_url": "str",
+      "avatar_url": "str"
+    },
+    "source": "live",
+    "probed_args": {}
+  },
+  "get_release_by_tag": {
+    "unwrap": [],
+    "return_model": "Release",
+    "input_overrides": {},
+    "fields": {
+      "tag_name": "str",
+      "target_commitish": "str",
+      "name": "str",
+      "body": "str",
+      "draft": "bool",
+      "prerelease": "bool",
+      "id": "int",
+      "created_at": "str",
+      "published_at": "str",
+      "url": "str",
+      "html_url": "str",
+      "assets_url": "str",
+      "upload_url": "str",
+      "zipball_url": "str",
+      "tarball_url": "str",
+      "node_id": "str",
+      "immutable": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "tag": "1.100.2"
+    }
+  },
+  "get_tag": {
+    "unwrap": [],
+    "return_model": "GitTag",
+    "input_overrides": {},
+    "fields": {
+      "ref": "str",
+      "url": "str",
+      "node_id": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "tag": "1.100.2"
+    }
+  },
+  "get_team_members": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "org": "microsoft",
+      "team_slug": "vscode"
+    },
+    "_probe_status": "inconclusive"
+  },
+  "get_teams": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {}
+  },
+  "issue_read": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": [
+      {
+        "method": "get",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "issue_number": 248765
+      },
+      {
+        "method": "get_comments",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "issue_number": 248765,
+        "perPage": 3
+      }
+    ]
+  },
+  "list_branches": {
+    "unwrap": [],
+    "return_model": "Branch",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {
+      "name": "str",
+      "sha": "str",
+      "protected": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "perPage": 5
+    }
+  },
+  "list_commits": {
+    "unwrap": [],
+    "return_model": "CommitSummary",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {
+      "sha": "str",
+      "html_url": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "perPage": 5
+    }
+  },
+  "list_issue_fields": {
+    "unwrap": [],
+    "return_model": null,
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft"
+    }
+  },
+  "list_issue_types": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft"
+    }
+  },
+  "list_issues": {
+    "unwrap": ["issues"],
+    "return_model": "IssueSummary",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {
+      "number": "int",
+      "title": "str",
+      "body": "str",
+      "state": "str",
+      "created_at": "str",
+      "updated_at": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "perPage": 3,
+      "state": "OPEN"
+    }
+  },
+  "list_pull_requests": {
+    "unwrap": [],
+    "return_model": "PullRequestSummary",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {
+      "number": "int",
+      "title": "str",
+      "body": "str",
+      "state": "str",
+      "draft": "bool",
+      "merged": "bool",
+      "html_url": "str",
+      "created_at": "str",
+      "updated_at": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "perPage": 3,
+      "state": "open"
+    }
+  },
+  "list_releases": {
+    "unwrap": [],
+    "return_model": "ReleaseSummary",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {
+      "id": "int",
+      "tag_name": "str",
+      "name": "str",
+      "body": "str",
+      "html_url": "str",
+      "published_at": "str",
+      "prerelease": "bool",
+      "draft": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "perPage": 5
+    }
+  },
+  "list_repository_collaborators": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "perPage": 3
+    }
+  },
+  "list_tags": {
+    "unwrap": [],
+    "return_model": "TagSummary",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {
+      "name": "str",
+      "sha": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "perPage": 5
+    }
+  },
+  "pull_request_read": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": [
+      {
+        "method": "get",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "pullNumber": 247000
+      },
+      {
+        "method": "get_files",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "pullNumber": 247000,
+        "perPage": 3
+      }
+    ]
+  },
+  "search_code": {
+    "unwrap": [],
+    "return_model": "SearchCodeResult",
+    "input_overrides": {},
+    "fields": {
+      "total_count": "int",
+      "incomplete_results": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "McpCaller repo:microsoft/vscode",
+      "perPage": 3
+    }
+  },
+  "search_commits": {
+    "unwrap": [],
+    "return_model": "SearchCommitsResult",
+    "input_overrides": {},
+    "fields": {
+      "total_count": "int",
+      "incomplete_results": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "repo:microsoft/vscode fix bug",
+      "perPage": 3
+    }
+  },
+  "search_issues": {
+    "unwrap": [],
+    "return_model": "SearchIssuesResult",
+    "input_overrides": {},
+    "fields": {
+      "total_count": "int",
+      "incomplete_results": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "repo:microsoft/vscode is:issue label:bug",
+      "perPage": 3
+    }
+  },
+  "search_pull_requests": {
+    "unwrap": [],
+    "return_model": "SearchPRsResult",
+    "input_overrides": {},
+    "fields": {
+      "total_count": "int",
+      "incomplete_results": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "repo:microsoft/vscode is:pr is:open",
+      "perPage": 3
+    }
+  },
+  "search_repositories": {
+    "unwrap": [],
+    "return_model": "SearchReposResult",
+    "input_overrides": {},
+    "fields": {
+      "total_count": "int",
+      "incomplete_results": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "vscode language:typescript stars:>10000",
+      "perPage": 3
+    }
+  },
+  "search_users": {
+    "unwrap": [],
+    "return_model": "SearchUsersResult",
+    "input_overrides": {},
+    "fields": {
+      "total_count": "int",
+      "incomplete_results": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "svd",
+      "perPage": 3
+    }
+  }
+}

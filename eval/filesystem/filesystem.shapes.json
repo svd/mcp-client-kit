@@ -1,0 +1,98 @@
+{
+  "directory_tree": {
+    "unwrap": [],
+    "return_model": "DirectoryEntry",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {
+      "name": "str",
+      "type": "str",
+      "children": "list"
+    },
+    "source": "live",
+    "probed_args": {
+      "path": "/private/tmp"
+    }
+  },
+  "get_file_info": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "path": "/private/tmp"
+    }
+  },
+  "list_allowed_directories": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {}
+  },
+  "list_directory": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "path": "/private/tmp"
+    }
+  },
+  "list_directory_with_sizes": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "path": "/private/tmp"
+    }
+  },
+  "read_file": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "path": "/private/tmp/mcpgen-eval-test.txt"
+    }
+  },
+  "read_multiple_files": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "paths": [
+        "/private/tmp/mcpgen-eval-test.txt"
+      ]
+    }
+  },
+  "read_text_file": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "path": "/private/tmp/mcpgen-eval-test.txt"
+    }
+  },
+  "search_files": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "path": "/private/tmp",
+      "pattern": "*.json"
+    }
+  }
+}

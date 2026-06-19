@@ -1,0 +1,24 @@
+{
+  "query-docs": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "libraryId": "/psf/requests",
+      "query": "How to make a GET request"
+    }
+  },
+  "resolve-library-id": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "HTTP client library for Python",
+      "libraryName": "requests"
+    }
+  }
+}

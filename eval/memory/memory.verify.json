@@ -1,0 +1,11 @@
+{
+  "open_nodes": {
+    "names": [
+      "Alice",
+      "ProjectX"
+    ]
+  },
+  "search_nodes": {
+    "query": "Alice"
+  }
+}
