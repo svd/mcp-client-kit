@@ -1077,7 +1077,7 @@ def test_render_tool_embed_schema_adds_schema_attr():
         "from __future__ import annotations\n"
         "from typing import Any\n"
         "from mcpgen.seam import McpCaller\n"
-        f"SERVER = 'demo'\n\n"
+        "SERVER = 'demo'\n\n"
         + src
     )
     exec(compile(module_src, "<test>", "exec"), ns)
