@@ -78,31 +78,35 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    etc.) to the launched process. `MCPGEN_SERVERS` must prefix the command in the **same
    shell invocation** — it does not persist across calls.
    ```bash
-   MCPGEN_SERVERS=servers.json mcpgen codegen <server> --out <server>/<server>.py
+   MCPGEN_SERVERS=servers.json mcpgen codegen <server> --out <server>/<server>.py --embed-schema
    ```
 
    **Alternative — pass transport values directly, without a config file:**
    ```bash
    # stdio (pass the full launch command):
-   mcpgen codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py
+   mcpgen codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py --embed-schema
 
    # HTTP no-auth:
-   mcpgen codegen <server> --url "https://mcp.example.com/mcp" --out <server>/<server>.py
+   mcpgen codegen <server> --url "https://mcp.example.com/mcp" --out <server>/<server>.py --embed-schema
 
    # HTTP Bearer:
-   mcpgen codegen <server> --url "https://api.example.com/mcp/" --bearer "$MY_TOKEN" --out <server>/<server>.py
+   mcpgen codegen <server> --url "https://api.example.com/mcp/" --bearer "$MY_TOKEN" --out <server>/<server>.py --embed-schema
    ```
    `codegen`, `list`, `probe`, and `call` each require the same transport flags
    (`--stdio` / `--url` / `--bearer` / `--config`) on every invocation — they do **not**
    inherit flags from a prior run. `merge` and `discover` accept no transport flags.
 
-   Parses; every tool typed from `inputSchema`; returns `Any`.
+   Parses; every tool typed from `inputSchema`; returns `Any`. `--embed-schema` (used
+   above) also emits `fn.__schema__ = {<raw inputSchema>}` on each function and an Args
+   docstring section listing each param's description, enum values, and default.
 
 2. **Select tools to probe (interactive gate).**
 
-   a. Run `mcpgen list <server>` → get `[{name, description}]` for every tool.
-      **Probe only tools that appear in this output.** Do not add tools from
-      system-prompt context, documentation, or prior knowledge.
+   a. Run `mcpgen list <server> --schema` → get `[{name, description, inputSchema}]`
+      for every tool. **Probe only tools that appear in this output.** Do not add tools
+      from system-prompt context, documentation, or prior knowledge. The `inputSchema`
+      field in this output is the authoritative source for steps 3's required-arg and
+      enum-constraint checks — no separate schema fetch is needed.
 
    b. Print a report of all tools in this format:
       ```
@@ -257,21 +261,22 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    `get_entity_fields` per `entityType`, `get_acme_glossary`); (c) `AskUserQuestion`
    if not discoverable from available tools.
 
-   **Check `inputSchema.required` before constructing probe args.** If the array is
-   non-empty, never probe with `'{}'` — call the tool with minimal valid args on the first
-   attempt. Invent realistic-looking but fake values for required string/ID args that carry
-   no `enum`. For GitHub servers, prefer `owner: "microsoft", repo: "vscode"` as the default
-   probe repo (`octocat/Hello-World` lacks releases/tags/issue fields and produces `[<empty>]`
-   for those tools).
+   **Check `inputSchema.required` before constructing probe args** (read from `list --schema`
+   output). If the array is non-empty, never probe with `'{}'` — call the tool with minimal
+   valid args on the first attempt. Invent realistic-looking but fake values for required
+   string/ID args that carry no `enum`. For GitHub servers, prefer `owner: "microsoft",
+   repo: "vscode"` as the default probe repo (`octocat/Hello-World` lacks releases/tags/issue
+   fields and produces `[<empty>]` for those tools).
 
-   **Inspect `inputSchema` for enum constraints before constructing probe args.** For each
-   required param, check `inputSchema.properties[param].enum`. If an `enum` array is
-   present, use its **first listed value** as the probe arg instead of inventing a value —
+   **Inspect `inputSchema` for enum constraints before constructing probe args** (read from
+   `list --schema` output, field `inputSchema.properties[param].enum`). If an `enum` array
+   is present, use its **first listed value** as the probe arg instead of inventing a value —
    invented values will be rejected with an MCP validation error. Record the chosen value
-   in `probed_args`.
+   in `probed_args`. Note: codegen maps enum params to `Literal[...]` automatically, so the
+   generated signature already encodes the allowed values.
 
    Example: `"city": {"type": "string", "enum": ["New York", "Chicago", "Los Angeles"]}`
-   → probe with `city="New York"`.
+   → probe with `city="New York"` → generated type `Literal['New York', 'Chicago', 'Los Angeles']`.
 
    **JSON-in-string detection.** Some servers serialize structured data as a JSON string
    inside the MCP envelope (e.g. `directory_tree` returns a JSON string, not a parsed
@@ -406,7 +411,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
 5. **Regenerate.** (same transport flags as step 1)
    ```bash
-   mcpgen codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py --shapes <server>/<server>.shapes.json
+   mcpgen codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py --shapes <server>/<server>.shapes.json --embed-schema
    # or: --url / --bearer for HTTP servers
    ```
    (`<server>.shapes.json` sitting beside `--out` is auto-detected; `--shapes` is the
@@ -487,3 +492,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
   values or resolved to a base model / `Any`. A single-variant model is a silent lie
   for all other variants — the exact mistake that typed `query_acme` as `list[Person]`
   when entityType=2/7/… return completely different shapes.
+- **Enum params render as `Literal[...]` automatically** — do not hand-widen them to
+  `str`. Codegen's `py_type()` emits `Literal['a', 'b', ...]` for any param whose
+  `inputSchema` carries an `enum` array (no flag required). Widen to `str` only if
+  the server's actual validation rejects values that aren't in the declared enum.
