@@ -290,7 +290,8 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         shape_json = json.dumps(shape, indent=2)
         probe_note = f"\nObserved response shape of {ns.probe!r} (keys/types/nesting only):\n" + shape_json
 
-    source = codegen.render_module(ns.server, tools, shapes=shapes, probe_note=probe_note)
+    source = codegen.render_module(ns.server, tools, shapes=shapes, probe_note=probe_note,
+                                   embed_schema=getattr(ns, "embed_schema", False))
     if ns.out:
         Path(ns.out).write_text(source)
         print(f"[codegen] wrote {ns.out} ({len(source)} bytes)", file=sys.stderr)
@@ -746,6 +747,8 @@ def main(argv: list[str] | None = None) -> int:
     cg.add_argument("--probe", help="tool to call live and record response shape (docstring note only)")
     cg.add_argument("--probe-args", help="JSON args for --probe (default: {})")
     cg.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    cg.add_argument("--embed-schema", action="store_true", dest="embed_schema",
+                    help="embed raw inputSchema as __schema__ attribute and Args docstring per tool")
     _add_conn_args(cg)
     cg.set_defaults(func=_cmd_codegen)
 

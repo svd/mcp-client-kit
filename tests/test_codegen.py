@@ -1022,3 +1022,78 @@ def test_render_tool_enum_param_uses_literal():
     tools = [tool]
     module_src = codegen.render_module("demo", tools)
     ast.parse(module_src)
+
+
+# ── --embed-schema tests ──────────────────────────────────────────────────────
+
+_EMBED_TOOL = {
+    "name": "get_item",
+    "description": "Fetch an item.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "item_id": {"type": "string", "description": "The item identifier"},
+            "format": {"type": "string", "enum": ["json", "xml"], "default": "json",
+                       "description": "Output format"},
+            "verbose": {"type": "boolean"},
+        },
+        "required": ["item_id"],
+    },
+}
+
+
+def test_render_tool_embed_schema_adds_schema_attr():
+    src = codegen.render_tool(_EMBED_TOOL, embed_schema=True)
+    assert ".__schema__ = " in src
+    # Must be valid Python and the attribute must be accessible.
+    ns: dict = {}
+    # Wrap in a module-like context so the async def can be exec'd.
+    module_src = (
+        "from __future__ import annotations\n"
+        "from typing import Any\n"
+        "from mcpgen.seam import McpCaller\n"
+        f"SERVER = 'demo'\n\n"
+        + src
+    )
+    exec(compile(module_src, "<test>", "exec"), ns)
+    fn = ns["get_item"]
+    assert hasattr(fn, "__schema__")
+    assert fn.__schema__ == (_EMBED_TOOL.get("inputSchema") or {})
+
+
+def test_render_tool_embed_schema_adds_args_docstring():
+    src = codegen.render_tool(_EMBED_TOOL, embed_schema=True)
+    assert "Args:" in src
+    assert "item_id:" in src
+    assert "The item identifier" in src
+    assert "One of:" in src
+    assert "'json'" in src
+    assert "Default:" in src
+
+
+def test_render_tool_no_embed_schema_unchanged():
+    src_default = codegen.render_tool(_EMBED_TOOL)
+    src_false = codegen.render_tool(_EMBED_TOOL, embed_schema=False)
+    src_no_flag = codegen.render_tool(_EMBED_TOOL)
+    assert src_default == src_false == src_no_flag
+    assert ".__schema__" not in src_default
+    assert "Args:" not in src_default
+
+
+def test_render_module_embed_schema_passes_through():
+    tools = [_EMBED_TOOL]
+    src = codegen.render_module("demo", tools, embed_schema=True)
+    ast.parse(src)
+    assert ".__schema__ = " in src
+
+
+def test_render_tool_embed_schema_no_args_no_args_section():
+    tool = {
+        "name": "ping",
+        "description": "Ping the server.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    }
+    src = codegen.render_tool(tool, embed_schema=True)
+    assert "Args:" not in src
+    # __schema__ attr should still be present (empty dict).
+    assert ".__schema__ = " in src

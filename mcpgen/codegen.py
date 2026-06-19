@@ -212,7 +212,49 @@ _DIG_LIST = '''def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
     return cur'''
 
 
-def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict, required: set, shape: dict) -> str:
+def _docstring_with_args(tool: dict, ordered: list[tuple[str, dict]], indent: str) -> str:
+    """Build docstring with description + Args section from inputSchema properties."""
+    desc = (tool.get("description") or "").strip()
+    props_lines = []
+    for pname, pschema in ordered:
+        py = sanitize(pname)
+        parts: list[str] = []
+        pdesc = (pschema.get("description") or "").strip()
+        if pdesc:
+            parts.append(pdesc)
+        if pschema.get("enum"):
+            parts.append(f"One of: {', '.join(repr(v) for v in pschema['enum'])}")
+        if "default" in pschema:
+            parts.append(f"Default: {pschema['default']!r}")
+        detail = ". ".join(parts)
+        if detail:
+            props_lines.append(f"{indent}    {py}: {detail}")
+        else:
+            props_lines.append(f"{indent}    {py}:")
+
+    if not props_lines:
+        return _docstring(desc or None, indent)
+
+    if desc:
+        body = desc + "\n\n" + indent + "Args:\n" + "\n".join(props_lines)
+    else:
+        body = indent + "Args:\n" + "\n".join(props_lines)
+
+    # Use repr() to ensure injection safety (description is server-controlled text)
+    # But we want multi-line docstring format where possible.
+    # Fall back to repr() only if text contains backslash, triple-quotes, or trailing quote.
+    text = body.strip()
+    if "\\" in text or '"""' in text or text.endswith('"'):
+        return f"{indent}{repr(text)}"
+    lines_list = text.splitlines()
+    if len(lines_list) == 1:
+        return f'{indent}"""{lines_list[0]}"""'
+    joined = f"\n{indent}".join(lines_list)
+    return f'{indent}"""{joined}\n{indent}"""'
+
+
+def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict, required: set, shape: dict,
+                       embed_schema: bool = False, schema: dict | None = None) -> str:
     """Emit @overload stubs (one per discriminator value) + impl signature."""
     disc: str = shape["discriminator"]
     variants: dict = shape["variants"]
@@ -253,7 +295,10 @@ def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict, required
 
     impl_ret = f"list[{union_ret}]" if container == "list" else union_ret
     impl_lines = [f"async def {fn}({_sig(_build_params('int'))}) -> {impl_ret}:"]
-    impl_lines.append(_docstring(tool.get("description"), "    "))
+    if embed_schema:
+        impl_lines.append(_docstring_with_args(tool, ordered, "    "))
+    else:
+        impl_lines.append(_docstring(tool.get("description"), "    "))
 
     body_args = [(sanitize(pname), pname, pname in required or pname == disc) for pname, _ in ordered]
     req_pairs = [(py, pname) for py, pname, is_req in body_args if is_req]
@@ -282,11 +327,15 @@ def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict, required
     else:
         impl_lines.append(f'    return cast("{impl_ret}", {call})')
 
-    blocks.append("\n".join(impl_lines))
+    impl_block = "\n".join(impl_lines)
+    if embed_schema:
+        _schema = schema if schema is not None else {}
+        impl_block += f"\n{fn}.__schema__ = {repr(_schema)}"
+    blocks.append(impl_block)
     return "\n\n".join(blocks)
 
 
-def render_tool(tool: dict, shape: dict | None = None) -> str:
+def render_tool(tool: dict, shape: dict | None = None, embed_schema: bool = False) -> str:
     """Render one MCP tool into a typed `async def` against the McpCaller seam.
 
     With a probe-derived `shape` (unwrap path / return model / input overrides),
@@ -301,7 +350,8 @@ def render_tool(tool: dict, shape: dict | None = None) -> str:
 
     shape = shape or {}
     if shape.get("discriminator") and shape.get("variants"):
-        return _render_overloaded(tool, fn, raw_name, props, required, shape)
+        return _render_overloaded(tool, fn, raw_name, props, required, shape,
+                                  embed_schema=embed_schema, schema=schema)
 
     unwrap: list = shape.get("unwrap") or []
     return_model: str | None = shape.get("return_model")
@@ -335,7 +385,10 @@ def render_tool(tool: dict, shape: dict | None = None) -> str:
     sig = ", ".join(sig_params)
 
     lines = [f"async def {fn}({sig}) -> {ret_ann}:"]
-    lines.append(_docstring(tool.get("description"), "    "))
+    if embed_schema:
+        lines.append(_docstring_with_args(tool, ordered, "    "))
+    else:
+        lines.append(_docstring(tool.get("description"), "    "))
 
     req_pairs = [(py, pname) for py, pname, is_req in body_args if is_req]
     opt_pairs = [(py, pname) for py, pname, is_req in body_args if not is_req]
@@ -366,7 +419,10 @@ def render_tool(tool: dict, shape: dict | None = None) -> str:
     else:
         lines.append(f"    return {call}")
 
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    if embed_schema:
+        result += f"\n{fn}.__schema__ = {repr(schema)}"
+    return result
 
 
 _HEADER = '''"""Generated MCP wrappers for the {server!r} server. DO NOT hand-edit signatures.
@@ -388,7 +444,8 @@ SERVER = {server!r}
 _PY_BUILTINS = frozenset({"str", "int", "float", "list", "dict", "bool", "bytes", "object", "type", "set", "tuple"})
 
 
-def render_module(server: str, tools: list[dict], shapes: dict | None = None, probe_note: str = "") -> str:
+def render_module(server: str, tools: list[dict], shapes: dict | None = None, probe_note: str = "",
+                  embed_schema: bool = False) -> str:
     """Render a full wrapper module.
 
     `shapes` maps tool name -> probe-derived shape-spec (see render_tool). When
@@ -464,7 +521,7 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None, pr
             parts.append(_DIG_LIST)
 
     for tool in sorted(tools, key=lambda t: t["name"]):
-        parts.append(render_tool(tool, shapes.get(tool["name"])))
+        parts.append(render_tool(tool, shapes.get(tool["name"]), embed_schema=embed_schema))
     return "\n\n\n".join(parts) + "\n"
 
 
