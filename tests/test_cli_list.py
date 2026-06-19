@@ -29,23 +29,12 @@ FAKE_TOOLS = [
     {
         "name": "get_user",
         "description": "Get user by ID",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "user_id": {"type": "string"}
-            },
-            "required": ["user_id"]
-        }
+        "inputSchema": {"type": "object", "properties": {"user_id": {"type": "string"}}, "required": ["user_id"]},
     },
     {
         "name": "list_users",
         "description": "List all users",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer"}
-            }
-        }
+        "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}},
     },
 ]
 

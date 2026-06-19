@@ -1058,8 +1058,7 @@ _EMBED_TOOL = {
         "type": "object",
         "properties": {
             "item_id": {"type": "string", "description": "The item identifier"},
-            "format": {"type": "string", "enum": ["json", "xml"], "default": "json",
-                       "description": "Output format"},
+            "format": {"type": "string", "enum": ["json", "xml"], "default": "json", "description": "Output format"},
             "verbose": {"type": "boolean"},
         },
         "required": ["item_id"],
@@ -1077,8 +1076,7 @@ def test_render_tool_embed_schema_adds_schema_attr():
         "from __future__ import annotations\n"
         "from typing import Any\n"
         "from mcpgen.seam import McpCaller\n"
-        "SERVER = 'demo'\n\n"
-        + src
+        "SERVER = 'demo'\n\n" + src
     )
     exec(compile(module_src, "<test>", "exec"), ns)
     fn = ns["get_item"]
@@ -1095,8 +1093,8 @@ def test_render_tool_embed_schema_adds_args_docstring():
     assert "'json'" in src
     assert "Default:" in src
     # Tighten assertion to check exact indentation
-    assert '    Args:' in src       # 4 spaces (not 8)
-    assert '        item_id:' in src  # 8 spaces (not 12)
+    assert "    Args:" in src  # 4 spaces (not 8)
+    assert "        item_id:" in src  # 8 spaces (not 12)
 
 
 def test_render_tool_no_embed_schema_unchanged():

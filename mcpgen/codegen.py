@@ -260,8 +260,16 @@ def _docstring_with_args(tool: dict, ordered: list[tuple[str, dict]], indent: st
     return f'{indent}"""{joined}\n{indent}"""'
 
 
-def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict, required: set, shape: dict,
-                       embed_schema: bool = False, schema: dict | None = None) -> str:
+def _render_overloaded(
+    tool: dict,
+    fn: str,
+    raw_name: str,
+    props: dict,
+    required: set,
+    shape: dict,
+    embed_schema: bool = False,
+    schema: dict | None = None,
+) -> str:
     """Emit @overload stubs (one per discriminator value) + impl signature."""
     disc: str = shape["discriminator"]
     variants: dict = shape["variants"]
@@ -357,8 +365,7 @@ def render_tool(tool: dict, shape: dict | None = None, embed_schema: bool = Fals
 
     shape = shape or {}
     if shape.get("discriminator") and shape.get("variants"):
-        return _render_overloaded(tool, fn, raw_name, props, required, shape,
-                                  embed_schema=embed_schema, schema=schema)
+        return _render_overloaded(tool, fn, raw_name, props, required, shape, embed_schema=embed_schema, schema=schema)
 
     unwrap: list = shape.get("unwrap") or []
     return_model: str | None = shape.get("return_model")
@@ -451,8 +458,9 @@ SERVER = {server!r}
 _PY_BUILTINS = frozenset({"str", "int", "float", "list", "dict", "bool", "bytes", "object", "type", "set", "tuple"})
 
 
-def render_module(server: str, tools: list[dict], shapes: dict | None = None, probe_note: str = "",
-                  embed_schema: bool = False) -> str:
+def render_module(
+    server: str, tools: list[dict], shapes: dict | None = None, probe_note: str = "", embed_schema: bool = False
+) -> str:
     """Render a full wrapper module.
 
     `shapes` maps tool name -> probe-derived shape-spec (see render_tool). When
@@ -475,8 +483,7 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None, pr
         return isinstance(items, dict) and bool(items.get("enum"))
 
     has_enum = any(
-        any(_schema_has_enum(pschema)
-            for pschema in (((t.get("inputSchema") or {}).get("properties") or {}).values()))
+        any(_schema_has_enum(pschema) for pschema in (((t.get("inputSchema") or {}).get("properties") or {}).values()))
         for t in tools
     )
     if has_disc:
