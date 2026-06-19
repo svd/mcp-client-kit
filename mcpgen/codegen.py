@@ -32,13 +32,16 @@ def py_type(schema: dict | None) -> str:
     if any(k in schema for k in ("anyOf", "oneOf", "allOf")):
         return "Any"
 
-    # Enum: emit Literal[...] when the enum list is non-empty.
+    # Enum: emit Literal[...] only when every member is a PEP 586-safe scalar.
+    # Floats, lists, and dicts are not valid Literal parameters; fall through to
+    # the type-based path so we emit the declared type (or Any) instead.
     enum_vals = schema.get("enum")
     if isinstance(enum_vals, list) and enum_vals:
-        t = schema.get("type")
-        nullable = isinstance(t, list) and "null" in t
-        inner = "Literal[" + ", ".join(repr(v) for v in enum_vals) + "]"
-        return f"{inner} | None" if nullable else inner
+        if all(type(v) in (str, bool, int, bytes, type(None)) for v in enum_vals):
+            t = schema.get("type")
+            nullable = isinstance(t, list) and "null" in t
+            inner = "Literal[" + ", ".join(repr(v) for v in enum_vals) + "]"
+            return f"{inner} | None" if nullable else inner
 
     t = schema.get("type")
     if isinstance(t, list):  # e.g. ["string", "null"]

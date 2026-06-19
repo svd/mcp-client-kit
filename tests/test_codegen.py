@@ -985,6 +985,31 @@ def test_py_type_enum_empty_falls_through():
     assert codegen.py_type({"type": "string", "enum": []}) == "str"
 
 
+def test_py_type_enum_float_falls_through_to_type():
+    # Floats are not PEP 586-safe; fall through to declared type.
+    assert codegen.py_type({"type": "number", "enum": [1.5, 2.5]}) == "float"
+
+
+def test_py_type_enum_float_no_type_falls_through_to_any():
+    # No type key + unsafe enum members → Any.
+    assert codegen.py_type({"enum": [1.5, 2.5]}) == "Any"
+
+
+def test_py_type_enum_list_members_falls_through():
+    # List values are not valid Literal parameters.
+    assert codegen.py_type({"enum": [[1, 2], [3, 4]]}) == "Any"
+
+
+def test_py_type_enum_dict_members_falls_through():
+    # Dict values are not valid Literal parameters.
+    assert codegen.py_type({"enum": [{"a": 1}]}) == "Any"
+
+
+def test_py_type_enum_mixed_safe_unsafe_falls_through():
+    # Mixed scalars + float: all-or-nothing, fall through.
+    assert codegen.py_type({"type": "string", "enum": ["ok", 1.5]}) == "str"
+
+
 def test_render_module_enum_param_imports_literal():
     tools = [
         {
