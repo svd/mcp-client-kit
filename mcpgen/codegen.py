@@ -228,17 +228,17 @@ def _docstring_with_args(tool: dict, ordered: list[tuple[str, dict]], indent: st
             parts.append(f"Default: {pschema['default']!r}")
         detail = ". ".join(parts)
         if detail:
-            props_lines.append(f"{indent}    {py}: {detail}")
+            props_lines.append(f"    {py}: {detail}")
         else:
-            props_lines.append(f"{indent}    {py}:")
+            props_lines.append(f"    {py}:")
 
     if not props_lines:
         return _docstring(desc or None, indent)
 
     if desc:
-        body = desc + "\n\n" + indent + "Args:\n" + "\n".join(props_lines)
+        body = desc + "\n\nArgs:\n" + "\n".join(props_lines)
     else:
-        body = indent + "Args:\n" + "\n".join(props_lines)
+        body = "Args:\n" + "\n".join(props_lines)
 
     # Use repr() to ensure injection safety (description is server-controlled text)
     # But we want multi-line docstring format where possible.
@@ -330,7 +330,7 @@ def _render_overloaded(tool: dict, fn: str, raw_name: str, props: dict, required
     impl_block = "\n".join(impl_lines)
     if embed_schema:
         _schema = schema if schema is not None else {}
-        impl_block += f"\n{fn}.__schema__ = {repr(_schema)}"
+        impl_block += f"\n\n{fn}.__schema__ = {repr(_schema)}"
     blocks.append(impl_block)
     return "\n\n".join(blocks)
 
@@ -421,7 +421,7 @@ def render_tool(tool: dict, shape: dict | None = None, embed_schema: bool = Fals
 
     result = "\n".join(lines)
     if embed_schema:
-        result += f"\n{fn}.__schema__ = {repr(schema)}"
+        result += f"\n\n{fn}.__schema__ = {repr(schema)}"
     return result
 
 

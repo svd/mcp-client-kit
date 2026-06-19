@@ -1069,6 +1069,9 @@ def test_render_tool_embed_schema_adds_args_docstring():
     assert "One of:" in src
     assert "'json'" in src
     assert "Default:" in src
+    # Tighten assertion to check exact indentation
+    assert '    Args:' in src       # 4 spaces (not 8)
+    assert '        item_id:' in src  # 8 spaces (not 12)
 
 
 def test_render_tool_no_embed_schema_unchanged():
