@@ -961,3 +961,64 @@ def test_detect_discriminators_denylist_camelcase_compound_forms():
     result = codegen.detect_discriminators(tools)
     for param in compound_params:
         assert param not in result, f"compound param {param!r} must be in denylist"
+
+
+# ---------------------------------------------------------------------------
+# Task C — enum → Literal[...] in py_type and render_module
+# ---------------------------------------------------------------------------
+
+
+def test_py_type_enum_string_literal():
+    assert codegen.py_type({"type": "string", "enum": ["asc", "desc"]}) == "Literal['asc', 'desc']"
+
+
+def test_py_type_enum_int_literal():
+    assert codegen.py_type({"enum": [1, 2, 3]}) == "Literal[1, 2, 3]"
+
+
+def test_py_type_enum_nullable():
+    assert codegen.py_type({"type": ["string", "null"], "enum": ["a", "b"]}) == "Literal['a', 'b'] | None"
+
+
+def test_py_type_enum_empty_falls_through():
+    # Empty enum list must not produce Literal[] (syntax error); fall through to scalar.
+    assert codegen.py_type({"type": "string", "enum": []}) == "str"
+
+
+def test_render_module_enum_param_imports_literal():
+    tools = [
+        {
+            "name": "sort_items",
+            "description": "Sort items.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "enum": ["asc", "desc"]},
+                },
+                "required": ["direction"],
+            },
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert "from typing import Any, Literal" in src
+
+
+def test_render_tool_enum_param_uses_literal():
+    tool = {
+        "name": "sort_items",
+        "description": "Sort items.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "direction": {"type": "string", "enum": ["asc", "desc"]},
+            },
+            "required": ["direction"],
+        },
+    }
+    src = codegen.render_tool(tool)
+    assert "Literal[" in src
+    assert "Literal['asc', 'desc']" in src
+    # Generated source must be valid Python when embedded in a module.
+    tools = [tool]
+    module_src = codegen.render_module("demo", tools)
+    ast.parse(module_src)

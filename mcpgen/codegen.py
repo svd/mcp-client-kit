@@ -32,6 +32,14 @@ def py_type(schema: dict | None) -> str:
     if any(k in schema for k in ("anyOf", "oneOf", "allOf")):
         return "Any"
 
+    # Enum: emit Literal[...] when the enum list is non-empty.
+    enum_vals = schema.get("enum")
+    if isinstance(enum_vals, list) and enum_vals:
+        t = schema.get("type")
+        nullable = isinstance(t, list) and "null" in t
+        inner = "Literal[" + ", ".join(repr(v) for v in enum_vals) + "]"
+        return f"{inner} | None" if nullable else inner
+
     t = schema.get("type")
     if isinstance(t, list):  # e.g. ["string", "null"]
         non_null = [x for x in t if x != "null"]
@@ -392,10 +400,19 @@ def render_module(server: str, tools: list[dict], shapes: dict | None = None, pr
     has_disc = any(s.get("discriminator") and s.get("variants") for s in shapes.values())
     needs_json = bool(shapes) and any((shapes.get(t["name"]) or {}).get("unwrap") for t in tools)
     has_typed_return = has_disc or any(s.get("return_model") for s in shapes.values())
+    has_enum = any(
+        any(isinstance(pschema, dict) and pschema.get("enum")
+            for pschema in (((t.get("inputSchema") or {}).get("properties") or {}).values()))
+        for t in tools
+    )
     if has_disc:
         type_imports = "from typing import Any, Literal, TypedDict, cast, overload"
+    elif has_typed_return and has_enum:
+        type_imports = "from typing import Any, Literal, TypedDict, cast"
     elif has_typed_return:
         type_imports = "from typing import Any, TypedDict, cast"
+    elif has_enum:
+        type_imports = "from typing import Any, Literal"
     else:
         type_imports = "from typing import Any"
     imports = ("import json\n" + type_imports) if needs_json else type_imports
