@@ -1019,9 +1019,10 @@ def _summarize_content_item(item: Any) -> dict:
             "has_blob": bool(getattr(resource, "blob", None)),
         }
     if item_type == "resource_link":
+        uri = getattr(item, "uri", None)
         return {
             "type": "resource_link",
-            "uri": getattr(item, "uri", None),
+            "uri": str(uri) if uri is not None else None,
             "name": getattr(item, "name", None),
         }
     return {"type": item_type, "text": getattr(item, "text", "")}

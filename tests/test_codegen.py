@@ -3,6 +3,8 @@
 import ast
 import asyncio
 
+import pytest
+
 from mcpgen import codegen
 
 # A representative get_entity shape-spec (the double-envelope differentiator, codified).
@@ -440,6 +442,210 @@ def test_render_tool_discriminated_string_keys_emits_overloads():
 def test_render_module_discriminated_string_keys_parses():
     src = codegen.render_module("github", [_ISSUE_READ_TOOL], shapes={"issue_read": _ISSUE_READ_SHAPE})
     ast.parse(src)
+
+
+def test_render_tool_discriminated_numeric_looking_string_variants_stay_str():
+    """A `type: "string"` discriminator whose enum values look numeric ("1", "2")
+    must NOT be misclassified as an int discriminator by sniffing shape keys."""
+    tool = {
+        "name": "get_level",
+        "description": "Fetch by level.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "level": {"type": "string", "enum": ["1", "2"]},
+            },
+            "required": ["level"],
+        },
+    }
+    shape = {
+        "discriminator": "level",
+        "variants": {
+            "1": {"return_model": "Basic", "fields": {}, "source": "fixture"},
+            "2": {"return_model": "Advanced", "fields": {}, "source": "fixture"},
+        },
+    }
+    src = codegen.render_tool(tool, shape)
+    assert "level: Literal['1']" in src
+    assert "level: Literal['2']" in src
+    assert "level: str" in src  # impl signature — must not be `level: int`
+    assert "level: int" not in src
+
+
+def test_render_tool_discriminator_nullable_string_type_stays_str():
+    """JSON Schema `type` may be a list (e.g. `["string", "null"]`) — must not
+    fall through to numeric key-sniffing just because `type` isn't a bare string."""
+    tool = {
+        "name": "get_level",
+        "description": "Fetch by level.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "level": {"type": ["string", "null"], "enum": ["1", "2"]},
+            },
+            "required": ["level"],
+        },
+    }
+    shape = {
+        "discriminator": "level",
+        "variants": {
+            "1": {"return_model": "Basic", "fields": {}, "source": "fixture"},
+            "2": {"return_model": "Advanced", "fields": {}, "source": "fixture"},
+        },
+    }
+    src = codegen.render_tool(tool, shape)
+    assert "level: str" in src
+    assert "level: int" not in src
+
+
+def test_render_tool_discriminator_float_override_rejected():
+    """`typing.Literal` can't hold float values, so an explicit float override on
+    a discriminator must fail loudly at codegen time instead of crashing on
+    `int()` or silently mistyping the discriminator as `int`."""
+    tool = {
+        "name": "get_rate",
+        "description": "Fetch by rate.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"rate": {"type": "number"}},
+            "required": ["rate"],
+        },
+    }
+    shape = {
+        "discriminator": "rate",
+        "variants": {
+            "1.5": {"return_model": "Low", "fields": {}, "source": "fixture"},
+            "2.5": {"return_model": "High", "fields": {}, "source": "fixture"},
+        },
+        "input_overrides": {"rate": "float"},
+    }
+    with pytest.raises(ValueError, match="float"):
+        codegen.render_tool(tool, shape)
+
+
+def test_render_tool_malformed_input_overrides_raises_clear_error():
+    """A hand-edited shape-spec that sets `input_overrides` to the wrong JSON type
+    (e.g. a list instead of a dict) must fail with a clear ValueError, not an
+    opaque AttributeError from `.get()` deep inside signature rendering."""
+    tool = {
+        "name": "get_thing",
+        "description": "Fetch a thing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+    }
+    shape = {"return_model": "Thing", "fields": {}, "input_overrides": ["not", "a", "dict"]}
+    with pytest.raises(ValueError, match="input_overrides must be a dict"):
+        codegen.render_tool(tool, shape)
+
+
+def test_render_tool_discriminator_number_schema_with_float_keys_stays_str():
+    """A bare `type: "number"` schema (no override) permits floats — variant keys
+    that don't parse as int must fall back to `str`, not crash on `int()`."""
+    tool = {
+        "name": "get_rate",
+        "description": "Fetch by rate.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"rate": {"type": "number"}},
+            "required": ["rate"],
+        },
+    }
+    shape = {
+        "discriminator": "rate",
+        "variants": {
+            "1.5": {"return_model": "Low", "fields": {}, "source": "fixture"},
+            "2.5": {"return_model": "High", "fields": {}, "source": "fixture"},
+        },
+    }
+    src = codegen.render_tool(tool, shape)
+    assert "rate: str" in src
+    assert "rate: int" not in src
+
+
+def test_render_tool_discriminator_str_override_wins_over_conflicting_int_schema():
+    """`input_overrides` is documented as taking priority over the declared schema
+    type. A `"str"` override on a discriminator whose schema says `type: "integer"`
+    must produce `str`-typed Literals/signature, not `int`."""
+    tool = {
+        "name": "get_level",
+        "description": "Fetch by level.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"level": {"type": "integer"}},
+            "required": ["level"],
+        },
+    }
+    shape = {
+        "discriminator": "level",
+        "variants": {
+            "1": {"return_model": "Basic", "fields": {}, "source": "fixture"},
+            "2": {"return_model": "Advanced", "fields": {}, "source": "fixture"},
+        },
+        "input_overrides": {"level": "str"},
+    }
+    src = codegen.render_tool(tool, shape)
+    assert "level: Literal['1']" in src
+    assert "level: Literal['2']" in src
+    assert "level: str" in src
+    assert "level: int" not in src
+
+
+def test_render_tool_discriminator_int_schema_with_non_numeric_key_raises():
+    """A schema-declared `type: "integer"` discriminator whose variant keys don't
+    all parse as int (a shape-spec/schema mismatch) must fail loudly at codegen
+    time with context, not crash on a bare `int()` ValueError."""
+    tool = {
+        "name": "get_level",
+        "description": "Fetch by level.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "level": {"type": "integer"},
+            },
+            "required": ["level"],
+        },
+    }
+    shape = {
+        "discriminator": "level",
+        "variants": {
+            "1": {"return_model": "Basic", "fields": {}, "source": "fixture"},
+            "abc": {"return_model": "Bogus", "fields": {}, "source": "fixture"},
+        },
+    }
+    with pytest.raises(ValueError, match="level.*abc"):
+        codegen.render_tool(tool, shape)
+
+
+def test_render_module_discriminator_model_order_matches_overload_typing():
+    """Model-registration order (render_module) and overload/Literal typing
+    (render_tool) must classify the same discriminator identically — a `type:
+    "string"` discriminator with numeric-looking keys must not be int-sorted
+    for model registration while being str-typed for overloads."""
+    tool = {
+        "name": "get_level",
+        "description": "Fetch by level.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "level": {"type": "string", "enum": ["1", "10", "2"]},
+            },
+            "required": ["level"],
+        },
+    }
+    shape = {
+        "discriminator": "level",
+        "variants": {
+            "1": {"return_model": "M1", "fields": {"a": "str"}, "source": "fixture"},
+            "10": {"return_model": "M10", "fields": {"a": "str"}, "source": "fixture"},
+            "2": {"return_model": "M2", "fields": {"a": "str"}, "source": "fixture"},
+        },
+    }
+    src = codegen.render_module("acme", [tool], shapes={"get_level": shape})
+    # str-sorted order is M1, M10, M2 — int-sorted (the pre-fix bug) would be M1, M2, M10.
+    assert src.index("class M1(") < src.index("class M10(") < src.index("class M2(")
 
 
 def test_summarize_shape_of_image_content_marker_is_not_str():

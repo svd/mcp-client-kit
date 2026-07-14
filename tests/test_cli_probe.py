@@ -7,11 +7,13 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from mcpgen.cli import _cmd_probe
+from mcpgen.cli import _cmd_probe, _probe
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -191,3 +193,24 @@ def test_probe_records_observed_bytes_in_skeleton(tmp_path):
     part = next(parts_dir.glob("*.json"))
     skeleton = json.loads(part.read_text())
     assert skeleton["read_wiki_contents"]["_observed_bytes"] == 675000
+
+
+def test_probe_size_measures_utf8_bytes_not_escaped_char_count():
+    """Non-ASCII content must be measured as real UTF-8 bytes, not the inflated
+    character count `json.dumps` produces with its default ensure_ascii escaping."""
+    text = "héllo wörld" * 100
+    expected_len = len(json.dumps(text, ensure_ascii=False).encode("utf-8"))
+    inflated_escaped_len = len(json.dumps(text))  # what the old buggy code measured
+    assert inflated_escaped_len > expected_len * 1.5, "fixture must actually exercise the escaping blowup"
+
+    mock_session = MagicMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[MagicMock(type="text", text=json.dumps(text))]))
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        yield mock_session
+
+    with patch("mcpgen._bridge.session", fake_session):
+        _shape, size = asyncio.run(_probe("acme", "get_text", {}))
+
+    assert size == expected_len

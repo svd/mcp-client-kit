@@ -85,7 +85,7 @@ async def _probe(
         env=env,
     )
     raw = await caller.call(server, tool, args)
-    size = len(json.dumps(raw, default=str))
+    size = len(json.dumps(raw, default=str, ensure_ascii=False).encode("utf-8"))
     return codegen.summarize_shape(raw), size
 
 

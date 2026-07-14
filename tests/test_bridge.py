@@ -1295,3 +1295,19 @@ def test_mcp_bridge_caller_resource_link_content_captured():
     assert result["type"] == "resource_link"
     assert result["uri"] == "file:///tmp/x.txt"
     assert result["name"] == "x.txt"
+
+
+def test_mcp_bridge_caller_resource_link_uri_is_json_serializable():
+    """Real MCP SDK ResourceLink.uri is a pydantic AnyUrl, not a str — the summary
+    dict must convert it, or json.dumps (called by _cmd_call/_probe) crashes."""
+    from pydantic import AnyUrl
+
+    result = _run_call_with_content(_FakeResourceLinkItem(uri=AnyUrl("file:///tmp/x.txt"), name="x.txt"))
+    assert isinstance(result["uri"], str)
+    json.dumps(result)  # must not raise TypeError
+
+
+def test_mcp_bridge_caller_resource_link_missing_uri_stays_none():
+    result = _run_call_with_content(_FakeResourceLinkItem(uri=None, name="x.txt"))
+    assert result["uri"] is None
+    json.dumps(result)  # must not raise TypeError

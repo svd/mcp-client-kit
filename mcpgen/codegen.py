@@ -283,10 +283,10 @@ def _docstring_with_args(tool: dict, ordered: list[tuple[str, dict]], indent: st
 def _variants_are_numeric(variants: dict) -> bool:
     """True iff every discriminator variant key parses as an int.
 
-    Shape-spec variant keys are always strings (JSON object keys), but the
-    underlying discriminator argument may be genuinely numeric (`entityType: 1`)
-    or genuinely a string (`method: "get"`). Sniff from the keys themselves so
-    callers can type the discriminator param correctly either way.
+    Fallback only — used when the discriminator's declared schema type can't be
+    determined (see `_discriminator_type`). Sniffing keys alone is unsound:
+    a `type: "string"` discriminator can have numeric-looking enum values
+    (e.g. `"1"`, `"2"`), which would be misclassified as int.
     """
     if not variants:
         return True
@@ -296,6 +296,90 @@ def _variants_are_numeric(variants: dict) -> bool:
         except ValueError:
             return False
     return True
+
+
+def _discriminator_type(disc: str, props: dict, overrides: dict, variants: dict) -> str:
+    """The discriminator argument's Python type — `"int"` or `"str"` — schema/override first.
+
+    Priority: an explicit `input_overrides` entry for the discriminator, then the
+    tool's declared `inputSchema` type for that property (a JSON Schema `type` may
+    also be a list, e.g. `["string", "null"]` — if the list names both `"integer"`
+    and `"string"`, `"integer"` wins), then (only if neither is available) a
+    best-effort sniff of the shape-spec's variant keys.
+
+    `float` is deliberately unsupported: `typing.Literal` cannot hold float values,
+    so a float discriminator can't be expressed as `@overload` stubs. An explicit
+    `"float"` override raises; a schema `type: "number"` (which permits floats)
+    falls back to key-sniffing rather than assuming int, so real float variant
+    keys (e.g. `"1.5"`) resolve to `"str"` instead of crashing on `int()`.
+
+    Any other explicit override (not `int`/`str`/`float`) also raises — a
+    discriminator's `Literal` type can only ever be `int` or `str`, so silently
+    ignoring an unrecognized override (e.g. a typo like `"strr"`) would drop
+    the user's intent without warning.
+    """
+    override = overrides.get(disc)
+    if override == "int":
+        return "int"
+    if override == "str":
+        return "str"
+    if override is not None:
+        raise ValueError(
+            f"discriminator {disc!r} has unsupported input_overrides type {override!r} — "
+            "only 'int' or 'str' are valid for a discriminator (Literal can't hold floats "
+            "or other types)"
+        )
+    pschema = props.get(disc)
+    if isinstance(pschema, dict):
+        t = pschema.get("type")
+        types = t if isinstance(t, list) else [t]
+        if "integer" in types:
+            return "int"
+        if "string" in types:
+            return "str"
+        if "number" in types:
+            return "int" if _variants_are_numeric(variants) else "str"
+    return "int" if _variants_are_numeric(variants) else "str"
+
+
+def _variant_key(k: str, disc: str, numeric: bool) -> int | str:
+    """Coerce a variant key to the discriminator's resolved type, erroring with context on mismatch."""
+    if not numeric:
+        return k
+    try:
+        return int(k)
+    except ValueError:
+        raise ValueError(
+            f"discriminator {disc!r} resolved to int, but variant key {k!r} isn't a valid int — "
+            "fix the shape-spec's input_overrides/variant keys or the tool's inputSchema type"
+        ) from None
+
+
+def _get_overrides(shape: dict) -> dict:
+    """`input_overrides` sidecar entry, validated as a dict.
+
+    A hand-edited shape-spec can set this to the wrong JSON type (e.g. a list,
+    from a typo); failing here with a clear message beats a confusing
+    `AttributeError` from `.get()` deep inside signature rendering.
+    """
+    overrides = shape.get("input_overrides") or {}
+    if not isinstance(overrides, dict):
+        raise ValueError(f"shape-spec input_overrides must be a dict, got {type(overrides).__name__}: {overrides!r}")
+    return overrides
+
+
+def _discriminator_context(tool: dict, shape: dict) -> tuple[str, bool]:
+    """Resolve (discriminator name, is-numeric) for a discriminated-union shape-spec.
+
+    Shared by `_render_overloaded` (signature/Literal generation) and
+    `render_module` (return-model registration) so the two call sites can't
+    drift on discriminator-type resolution.
+    """
+    disc: str = shape["discriminator"]
+    variants: dict = shape["variants"]
+    props = (tool.get("inputSchema") or {}).get("properties") or {}
+    numeric = _discriminator_type(disc, props, _get_overrides(shape), variants) == "int"
+    return disc, numeric
 
 
 def _render_overloaded(
@@ -309,17 +393,18 @@ def _render_overloaded(
     schema: dict | None = None,
 ) -> str:
     """Emit @overload stubs (one per discriminator value) + impl signature."""
-    disc: str = shape["discriminator"]
     variants: dict = shape["variants"]
     unwrap: list = shape.get("unwrap") or []
-    overrides: dict = shape.get("input_overrides") or {}
+    overrides: dict = _get_overrides(shape)
     container: str | None = shape.get("return_container")
 
-    numeric = _variants_are_numeric(variants)
+    disc, numeric = _discriminator_context(tool, shape)
     disc_type = "int" if numeric else "str"
 
     ordered = sorted(props.items(), key=lambda kv: kv[0] not in required)
-    sorted_variants = sorted(variants.items(), key=lambda kv: int(kv[0]) if numeric else kv[0])
+    coerced_variants = sorted(
+        ((_variant_key(k, disc, numeric), v) for k, v in variants.items()), key=lambda kv: kv[0]
+    )
 
     def _build_params(disc_type: str) -> list[str]:
         out = []
@@ -340,7 +425,7 @@ def _render_overloaded(
         return ", ".join(all_p)
 
     variant_models = [
-        (int(k) if numeric else k, v.get("return_model", "Any")) for k, v in sorted_variants if v.get("return_model")
+        (val, v.get("return_model", "Any")) for val, v in coerced_variants if v.get("return_model")
     ]
     union_ret = " | ".join(m for _, m in variant_models) if variant_models else "Any"
 
@@ -413,7 +498,7 @@ def render_tool(tool: dict, shape: dict | None = None, embed_schema: bool = Fals
 
     unwrap: list = shape.get("unwrap") or []
     return_model: str | None = shape.get("return_model")
-    overrides: dict = shape.get("input_overrides") or {}
+    overrides: dict = _get_overrides(shape)
     # return_container="list" => the unwrapped value is a LIST of return_model
     # records (e.g. query_acme's data.results). Annotation/cast become
     # list[Model] and the body digs via _dig_list. Default (None) = dict/scalar.
@@ -577,8 +662,8 @@ def render_module(
                 continue
             if sp.get("discriminator") and sp.get("variants"):
                 variants = sp["variants"]
-                numeric = _variants_are_numeric(variants)
-                for _, variant in sorted(variants.items(), key=lambda kv: int(kv[0]) if numeric else kv[0]):
+                disc, numeric = _discriminator_context(tool, sp)
+                for _, variant in sorted(variants.items(), key=lambda kv: _variant_key(kv[0], disc, numeric)):
                     if variant.get("return_model"):
                         _append_model(variant["return_model"], variant.get("fields") or {})
             elif sp.get("return_model"):
