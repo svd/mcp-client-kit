@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from mcpgen.cli import _cmd_list
+from mcpgen.cli import _cmd_list, _list_tools
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -156,6 +158,113 @@ def test_list_with_schema_all_fields_present(capsys):
 
     for item in result:
         assert set(item.keys()) == {"name", "description", "inputSchema"}
+
+
+# ── annotations / readOnlyHint ────────────────────────────────────────────────
+
+
+def _mock_tool(name: str, description: str, annotations=None):
+    t = MagicMock()
+    t.name = name
+    t.description = description
+    t.inputSchema = {}
+    t.annotations = annotations
+    return t
+
+
+def test_list_tools_surfaces_readonly_hint_annotation():
+    """_list_tools must not drop the MCP `annotations` object (readOnlyHint lives there)."""
+    annotations = MagicMock()
+    annotations.model_dump.return_value = {"readOnlyHint": True}
+    tool = _mock_tool("whoami", "Return caller identity", annotations=annotations)
+
+    mock_session = MagicMock()
+    mock_session.list_tools = AsyncMock(return_value=MagicMock(tools=[tool]))
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        yield mock_session
+
+    with patch("mcpgen.cli._bridge.session", fake_session):
+        result = asyncio.run(_list_tools("acme"))
+
+    assert result[0]["annotations"] == {"readOnlyHint": True}
+
+
+def test_list_tools_annotations_absent_is_none():
+    """A tool with no annotations object surfaces annotations: None (not dropped)."""
+    tool = _mock_tool("get_user", "Get user", annotations=None)
+
+    mock_session = MagicMock()
+    mock_session.list_tools = AsyncMock(return_value=MagicMock(tools=[tool]))
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        yield mock_session
+
+    with patch("mcpgen.cli._bridge.session", fake_session):
+        result = asyncio.run(_list_tools("acme"))
+
+    assert result[0]["annotations"] is None
+
+
+def test_list_with_schema_surfaces_readonly_hint(capsys):
+    """`mcpgen list --schema` output includes annotations when _list_tools provides them."""
+    tools = [
+        {
+            "name": "delete_repo",
+            "description": "Delete a repo",
+            "inputSchema": {},
+            "annotations": {"readOnlyHint": False},
+        },
+        {
+            "name": "get_repo",
+            "description": "Get a repo",
+            "inputSchema": {},
+            "annotations": {"readOnlyHint": True},
+        },
+    ]
+    ns = _ns("acme", schema=True)
+
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=tools):
+        _cmd_list(ns)
+
+    out = capsys.readouterr().out
+    result = json.loads(out)
+
+    assert result[0]["annotations"] == {"readOnlyHint": False}
+    assert result[1]["annotations"] == {"readOnlyHint": True}
+
+
+def test_list_without_schema_surfaces_readonly_hint(capsys):
+    """`mcpgen list` (no --schema) still surfaces annotations when present."""
+    tools = [
+        {"name": "delete_repo", "description": "Delete a repo", "annotations": {"readOnlyHint": False}},
+    ]
+    ns = _ns("acme", schema=False)
+
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=tools):
+        _cmd_list(ns)
+
+    out = capsys.readouterr().out
+    result = json.loads(out)
+
+    assert result[0]["annotations"] == {"readOnlyHint": False}
+
+
+def test_list_annotations_omitted_when_absent(capsys):
+    """Tools with no annotations key must not gain one in the printed output
+    (keeps the existing {name, description[, inputSchema]} contract intact)."""
+    ns = _ns("acme", schema=True)
+
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=FAKE_TOOLS):
+        _cmd_list(ns)
+
+    out = capsys.readouterr().out
+    result = json.loads(out)
+
+    for item in result:
+        assert "annotations" not in item
 
 
 # ── error handling ────────────────────────────────────────────────────────────

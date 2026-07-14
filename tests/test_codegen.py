@@ -402,6 +402,56 @@ def test_discriminator_always_required_in_body():
     assert "if entityType is not None" not in src
 
 
+# ── discriminator with string-valued keys (e.g. github issue_read `method`) ──
+
+_ISSUE_READ_TOOL = {
+    "name": "issue_read",
+    "description": "Read an issue.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "method": {"type": "string"},
+            "issue_number": {"type": "integer"},
+        },
+        "required": ["method", "issue_number"],
+    },
+}
+_ISSUE_READ_SHAPE = {
+    "discriminator": "method",
+    "variants": {
+        "get": {"return_model": "Issue", "fields": {"title": "str"}, "source": "fixture"},
+        "get_comments": {"return_model": "Comments", "fields": {"items": "list"}, "source": "fixture"},
+    },
+    "input_overrides": {"method": "str"},
+}
+
+
+def test_render_tool_discriminated_string_keys_emits_overloads():
+    src = codegen.render_tool(_ISSUE_READ_TOOL, _ISSUE_READ_SHAPE)
+    assert "@overload" in src
+    assert "method: Literal['get']" in src
+    assert "method: Literal['get_comments']" in src
+    assert ") -> Issue: ..." in src
+    assert ") -> Comments: ..." in src
+    assert "method: str" in src  # impl signature types the discriminator as str
+    assert ") -> Issue | Comments:" in src
+
+
+def test_render_module_discriminated_string_keys_parses():
+    src = codegen.render_module("github", [_ISSUE_READ_TOOL], shapes={"issue_read": _ISSUE_READ_SHAPE})
+    ast.parse(src)
+
+
+def test_summarize_shape_of_image_content_marker_is_not_str():
+    """A parsed image/resource content marker (a dict) must not collapse to `"str"`
+    the way an empty-string fallback used to."""
+    marker = {"type": "image", "mimeType": "image/png", "has_data": True}
+    shape = codegen.summarize_shape(marker)
+    assert shape != "str"
+    assert shape["type"] == "str"  # the marker's own `type` field, correctly typed
+    assert shape["has_data"] == "bool"
+
+
 def test_summarize_shape_collapses_lists_and_records_types():
     obj = {"success": True, "data": {"items": [{"id": "x"}, {"id": "y"}], "n": 3}}
     shape = codegen.summarize_shape(obj)
@@ -551,6 +601,55 @@ def test_probe_skeleton_structure():
         assert key in entry
     assert entry["unwrap"] == []
     assert entry["source"] == "live"
+
+
+def test_probe_skeleton_omits_observed_bytes_by_default():
+    """Byte-stable: no observed_bytes arg → no `_observed_bytes` key."""
+    skeleton = codegen.probe_skeleton("whoami", [{}], [{}])
+    assert "_observed_bytes" not in skeleton["whoami"]
+
+
+def test_probe_skeleton_records_max_observed_bytes():
+    """Multiple probes → `_observed_bytes` records the largest observed size."""
+    skeleton = codegen.probe_skeleton("read_wiki", [{}, {}], [{}, {}], observed_bytes=[1200, 675000])
+    assert skeleton["read_wiki"]["_observed_bytes"] == 675000
+
+
+# ── docstring size note (deepwiki-style large payloads) ──────────────────────
+
+
+def test_render_tool_docstring_notes_large_observed_payload():
+    tool = {
+        "name": "read_wiki",
+        "description": "Read full wiki contents.",
+        "inputSchema": {"type": "object", "properties": {}},
+    }
+    shape = {"_observed_bytes": 675000}
+    src = codegen.render_tool(tool, shape)
+    assert "~659 KB observed" in src
+    assert "prefer narrower queries" in src
+
+
+def test_render_tool_docstring_omits_note_below_threshold():
+    tool = {
+        "name": "get_user",
+        "description": "Get a user.",
+        "inputSchema": {"type": "object", "properties": {}},
+    }
+    shape = {"_observed_bytes": 500}
+    src = codegen.render_tool(tool, shape)
+    assert "observed" not in src
+    assert "prefer narrower queries" not in src
+
+
+def test_render_tool_docstring_omits_note_when_absent():
+    tool = {
+        "name": "get_user",
+        "description": "Get a user.",
+        "inputSchema": {"type": "object", "properties": {}},
+    }
+    src = codegen.render_tool(tool, {})
+    assert "observed" not in src
 
 
 # ── detect_discriminators ─────────────────────────────────────────────────────

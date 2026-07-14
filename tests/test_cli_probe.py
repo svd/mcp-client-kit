@@ -34,6 +34,7 @@ def _ns(server: str, tool: str, args: list[str] | None, emit_shape: str | None =
 
 
 _FAKE_SHAPE = {"names": "list"}
+_FAKE_PROBE_RESULT = (_FAKE_SHAPE, 42)  # (_probe now returns (shape, observed_byte_size))
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +52,7 @@ def test_probe_list_arg_exits_zero(tmp_path):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
         rc = _cmd_probe(ns)
 
     assert rc == 0, "exit code must be 0 even when arg values are lists"
@@ -67,7 +68,7 @@ def test_probe_list_arg_writes_part_file(tmp_path):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
         _cmd_probe(ns)
 
     parts_dir = shapes_file.parent / (shapes_file.name + ".parts")
@@ -87,7 +88,7 @@ def test_probe_scalar_discriminator_advisory_printed(tmp_path, capsys):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
         rc = _cmd_probe(ns)
 
     assert rc == 0
@@ -105,7 +106,7 @@ def test_probe_scalar_single_discriminator_value_warns(tmp_path, capsys):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
         rc = _cmd_probe(ns)
 
     assert rc == 0
@@ -153,7 +154,7 @@ def test_probe_advisory_exception_still_exits_zero(tmp_path, capsys):
         return result
 
     with (
-        patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE),
+        patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT),
         patch("mcpgen.cli.json.loads", side_effect=_patched_loads),
     ):
         rc = _cmd_probe(ns)
@@ -161,3 +162,32 @@ def test_probe_advisory_exception_still_exits_zero(tmp_path, capsys):
     assert rc == 0, "exit 0 even when advisory block raises"
     err = capsys.readouterr().err
     assert "advisory skipped" in err or "injected advisory failure" in err
+
+
+# ---------------------------------------------------------------------------
+# #3 — observed byte size threads through to the emitted skeleton (#6)
+# ---------------------------------------------------------------------------
+
+
+def test_probe_records_observed_bytes_in_skeleton(tmp_path):
+    """The larger of multiple probes' observed byte sizes lands in `_observed_bytes`."""
+    shapes_file = tmp_path / "deepwiki.shapes.json"
+    ns = _ns(
+        server="deepwiki",
+        tool="read_wiki_contents",
+        args=["{}", "{}"],
+        emit_shape=str(shapes_file),
+    )
+
+    with patch(
+        "mcpgen.cli._probe",
+        new_callable=AsyncMock,
+        side_effect=[(_FAKE_SHAPE, 1200), (_FAKE_SHAPE, 675000)],
+    ):
+        rc = _cmd_probe(ns)
+
+    assert rc == 0
+    parts_dir = shapes_file.parent / (shapes_file.name + ".parts")
+    part = next(parts_dir.glob("*.json"))
+    skeleton = json.loads(part.read_text())
+    assert skeleton["read_wiki_contents"]["_observed_bytes"] == 675000

@@ -1190,3 +1190,108 @@ def test_parse_repr_not_exec_unsafe():
     result = _bridge.parse([_item("__import__('os').system('true')")])
     # Must fall back to str, not execute.
     assert isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# parse() / call() — non-text content blocks (image/resource/resource_link)
+# must not collapse to an empty string (#4)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_image_block_returns_marker_not_empty_string():
+    """An image block (no .text) must not fall through to `""`."""
+    item = {"type": "image", "mimeType": "image/png", "has_data": True}
+    result = _bridge.parse([item])
+    assert result != ""
+    assert result["type"] == "image"
+    assert result["mimeType"] == "image/png"
+
+
+def test_parse_resource_block_returns_marker_not_empty_string():
+    """A resource block carrying only a blob (no text) must not collapse to `""`."""
+    item = {"type": "resource", "mimeType": "application/gzip", "has_text": False, "has_blob": True}
+    result = _bridge.parse([item])
+    assert result != ""
+    assert result["type"] == "resource"
+    assert result["has_blob"] is True
+
+
+def test_parse_resource_link_block_returns_marker():
+    item = {"type": "resource_link", "uri": "file:///tmp/x.txt", "name": "x.txt"}
+    result = _bridge.parse([item])
+    assert result["type"] == "resource_link"
+    assert result["uri"] == "file:///tmp/x.txt"
+
+
+def test_parse_text_block_unaffected_by_marker_handling():
+    """Regression: ordinary text blocks still JSON-parse as before."""
+    result = _bridge.parse([{"type": "text", "text": '{"a": 1}'}])
+    assert result == {"a": 1}
+
+
+class _FakeImageItem:
+    def __init__(self, mimeType, data):
+        self.type = "image"
+        self.mimeType = mimeType
+        self.data = data
+
+
+class _FakeResource:
+    def __init__(self, mimeType=None, text=None, blob=None):
+        self.mimeType = mimeType
+        self.text = text
+        self.blob = blob
+
+
+class _FakeResourceItem:
+    def __init__(self, resource):
+        self.type = "resource"
+        self.resource = resource
+
+
+class _FakeResourceLinkItem:
+    def __init__(self, uri, name):
+        self.type = "resource_link"
+        self.uri = uri
+        self.name = name
+
+
+def _run_call_with_content(item):
+    mock_session = MagicMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[item]))
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        yield mock_session
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller()
+            return await caller.call("s", "t", {})
+
+    return asyncio.run(run())
+
+
+def test_mcp_bridge_caller_image_content_not_collapsed_to_empty_string():
+    result = _run_call_with_content(_FakeImageItem(mimeType="image/png", data="abc123=="))
+    assert result != ""
+    assert result["type"] == "image"
+    assert result["mimeType"] == "image/png"
+    assert result["has_data"] is True
+
+
+def test_mcp_bridge_caller_resource_content_not_collapsed_to_empty_string():
+    """gzip-file-as-resource with no `.text` alongside the blob — must not vanish to `""`."""
+    result = _run_call_with_content(_FakeResourceItem(_FakeResource(mimeType="application/gzip", blob="H4sIAAAA")))
+    assert result != ""
+    assert result["type"] == "resource"
+    assert result["mimeType"] == "application/gzip"
+    assert result["has_blob"] is True
+    assert result["has_text"] is False
+
+
+def test_mcp_bridge_caller_resource_link_content_captured():
+    result = _run_call_with_content(_FakeResourceLinkItem(uri="file:///tmp/x.txt", name="x.txt"))
+    assert result["type"] == "resource_link"
+    assert result["uri"] == "file:///tmp/x.txt"
+    assert result["name"] == "x.txt"

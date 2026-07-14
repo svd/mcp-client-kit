@@ -116,6 +116,26 @@ def _str_literal(s: str) -> str:
     return repr(s)
 
 
+_LARGE_PAYLOAD_THRESHOLD_BYTES = 64 * 1024
+
+
+def _size_note(shape: dict | None) -> str | None:
+    """Docstring note when a probe recorded an unusually large response size."""
+    n = (shape or {}).get("_observed_bytes")
+    if not isinstance(n, (int, float)) or n < _LARGE_PAYLOAD_THRESHOLD_BYTES:
+        return None
+    kb = round(n / 1024)
+    return f"Returns a large payload (~{kb} KB observed) — prefer narrower queries where available."
+
+
+def _with_size_note(desc: str | None, shape: dict | None) -> str | None:
+    note = _size_note(shape)
+    if not note:
+        return desc
+    desc = (desc or "").strip()
+    return f"{desc}\n\n{note}" if desc else note
+
+
 def _docstring(text: str | None, indent: str) -> str:
     text = (text or "").strip()
     if not text:
@@ -215,9 +235,9 @@ _DIG_LIST = '''def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
     return cur'''
 
 
-def _docstring_with_args(tool: dict, ordered: list[tuple[str, dict]], indent: str) -> str:
+def _docstring_with_args(tool: dict, ordered: list[tuple[str, dict]], indent: str, shape: dict | None = None) -> str:
     """Build docstring with description + Args section from inputSchema properties."""
-    desc = (tool.get("description") or "").strip()
+    desc = _with_size_note((tool.get("description") or "").strip(), shape) or ""
     props_lines = []
     for pname, pschema in ordered:
         py = sanitize(pname)
@@ -260,6 +280,24 @@ def _docstring_with_args(tool: dict, ordered: list[tuple[str, dict]], indent: st
     return f'{indent}"""{joined}\n{indent}"""'
 
 
+def _variants_are_numeric(variants: dict) -> bool:
+    """True iff every discriminator variant key parses as an int.
+
+    Shape-spec variant keys are always strings (JSON object keys), but the
+    underlying discriminator argument may be genuinely numeric (`entityType: 1`)
+    or genuinely a string (`method: "get"`). Sniff from the keys themselves so
+    callers can type the discriminator param correctly either way.
+    """
+    if not variants:
+        return True
+    for k in variants:
+        try:
+            int(k)
+        except ValueError:
+            return False
+    return True
+
+
 def _render_overloaded(
     tool: dict,
     fn: str,
@@ -277,8 +315,11 @@ def _render_overloaded(
     overrides: dict = shape.get("input_overrides") or {}
     container: str | None = shape.get("return_container")
 
+    numeric = _variants_are_numeric(variants)
+    disc_type = "int" if numeric else "str"
+
     ordered = sorted(props.items(), key=lambda kv: kv[0] not in required)
-    sorted_variants = sorted(variants.items(), key=lambda kv: int(kv[0]))
+    sorted_variants = sorted(variants.items(), key=lambda kv: int(kv[0]) if numeric else kv[0])
 
     def _build_params(disc_type: str) -> list[str]:
         out = []
@@ -298,22 +339,25 @@ def _render_overloaded(
         all_p = ["caller: McpCaller", "*", *params] if params else ["caller: McpCaller"]
         return ", ".join(all_p)
 
-    variant_models = [(int(k), v.get("return_model", "Any")) for k, v in sorted_variants if v.get("return_model")]
+    variant_models = [
+        (int(k) if numeric else k, v.get("return_model", "Any")) for k, v in sorted_variants if v.get("return_model")
+    ]
     union_ret = " | ".join(m for _, m in variant_models) if variant_models else "Any"
 
     blocks: list[str] = []
 
     for val, model in variant_models:
         ret = f"list[{model}]" if container == "list" else model
-        params = _build_params(f"Literal[{val}]")
+        literal = str(val) if numeric else repr(val)
+        params = _build_params(f"Literal[{literal}]")
         blocks.append(f"@overload\nasync def {fn}({_sig(params)}) -> {ret}: ...")
 
     impl_ret = f"list[{union_ret}]" if container == "list" else union_ret
-    impl_lines = [f"async def {fn}({_sig(_build_params('int'))}) -> {impl_ret}:"]
+    impl_lines = [f"async def {fn}({_sig(_build_params(disc_type))}) -> {impl_ret}:"]
     if embed_schema:
-        impl_lines.append(_docstring_with_args(tool, ordered, "    "))
+        impl_lines.append(_docstring_with_args(tool, ordered, "    ", shape=shape))
     else:
-        impl_lines.append(_docstring(tool.get("description"), "    "))
+        impl_lines.append(_docstring(_with_size_note(tool.get("description"), shape), "    "))
 
     body_args = [(sanitize(pname), pname, pname in required or pname == disc) for pname, _ in ordered]
     req_pairs = [(py, pname) for py, pname, is_req in body_args if is_req]
@@ -400,9 +444,9 @@ def render_tool(tool: dict, shape: dict | None = None, embed_schema: bool = Fals
 
     lines = [f"async def {fn}({sig}) -> {ret_ann}:"]
     if embed_schema:
-        lines.append(_docstring_with_args(tool, ordered, "    "))
+        lines.append(_docstring_with_args(tool, ordered, "    ", shape=shape))
     else:
-        lines.append(_docstring(tool.get("description"), "    "))
+        lines.append(_docstring(_with_size_note(tool.get("description"), shape), "    "))
 
     req_pairs = [(py, pname) for py, pname, is_req in body_args if is_req]
     opt_pairs = [(py, pname) for py, pname, is_req in body_args if not is_req]
@@ -532,7 +576,9 @@ def render_module(
             if not sp:
                 continue
             if sp.get("discriminator") and sp.get("variants"):
-                for _, variant in sorted(sp["variants"].items(), key=lambda kv: int(kv[0])):
+                variants = sp["variants"]
+                numeric = _variants_are_numeric(variants)
+                for _, variant in sorted(variants.items(), key=lambda kv: int(kv[0]) if numeric else kv[0]):
                     if variant.get("return_model"):
                         _append_model(variant["return_model"], variant.get("fields") or {})
             elif sp.get("return_model"):
@@ -742,11 +788,17 @@ def merge_skeletons(skeletons: list[dict]) -> dict:
     return out
 
 
-def probe_skeleton(tool: str, args_list: list[dict], shapes: list[Any]) -> dict:
+def probe_skeleton(
+    tool: str, args_list: list[dict], shapes: list[Any], observed_bytes: list[int] | None = None
+) -> dict:
     """Build a shape-spec skeleton from N probe calls.
 
-    args_list  — the N arg-dicts passed to the tool (one per probe).
-    shapes     — the N summarize_shape() results from those calls.
+    args_list      — the N arg-dicts passed to the tool (one per probe).
+    shapes         — the N summarize_shape() results from those calls.
+    observed_bytes — optional raw response sizes (one per probe); the largest
+                     is recorded as `_observed_shape` so the generated docstring
+                     can warn callers about outsized payloads. Omitted entirely
+                     when not passed (byte-stable with existing shapes.json).
 
     When args_list has a single entry, probed_args is that dict (byte-stable
     with current single-probe output). With multiple entries, probed_args is
@@ -759,14 +811,15 @@ def probe_skeleton(tool: str, args_list: list[dict], shapes: list[Any]) -> dict:
         {k: _merge_scalar({v}) for k, v in merged.items() if isinstance(v, str)} if isinstance(merged, dict) else {}
     )
     probed_args: Any = args_list[0] if len(args_list) == 1 else list(args_list)
-    return {
-        tool: {
-            "unwrap": [],
-            "return_model": None,
-            "input_overrides": {},
-            "fields": fields,
-            "source": "live",
-            "probed_args": probed_args,
-            "_observed_shape": merged,
-        }
+    entry: dict[str, Any] = {
+        "unwrap": [],
+        "return_model": None,
+        "input_overrides": {},
+        "fields": fields,
+        "source": "live",
+        "probed_args": probed_args,
+        "_observed_shape": merged,
     }
+    if observed_bytes:
+        entry["_observed_bytes"] = max(observed_bytes)
+    return {tool: entry}

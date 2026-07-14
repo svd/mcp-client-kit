@@ -990,8 +990,41 @@ class McpBridgeCaller:
             env=self._env,
         ) as s:
             result = await s.call_tool(tool, arguments)
-            content = [{"type": item.type, "text": getattr(item, "text", "")} for item in result.content]
+            content = [_summarize_content_item(item) for item in result.content]
             return parse(content)
+
+
+def _summarize_content_item(item: Any) -> dict:
+    """Reduce one MCP content block to a compact, JSON-safe dict.
+
+    ``text`` blocks keep today's shape ({"type", "text"}). ``image`` / ``resource`` /
+    ``resource_link`` blocks carry no useful `.text` — capturing only `.text` (as the
+    old code did) silently degrades them to an empty string, hiding the payload from
+    shape inference entirely. Record presence/metadata instead (never the raw
+    base64/blob bytes, to keep shape-specs small).
+    """
+    item_type = getattr(item, "type", None)
+    if item_type == "image":
+        return {
+            "type": "image",
+            "mimeType": getattr(item, "mimeType", None),
+            "has_data": bool(getattr(item, "data", None)),
+        }
+    if item_type == "resource":
+        resource = getattr(item, "resource", None)
+        return {
+            "type": "resource",
+            "mimeType": getattr(resource, "mimeType", None),
+            "has_text": bool(getattr(resource, "text", None)),
+            "has_blob": bool(getattr(resource, "blob", None)),
+        }
+    if item_type == "resource_link":
+        return {
+            "type": "resource_link",
+            "uri": getattr(item, "uri", None),
+            "name": getattr(item, "name", None),
+        }
+    return {"type": item_type, "text": getattr(item, "text", "")}
 
 
 def parse(content_items: list) -> Any:
@@ -1000,10 +1033,17 @@ def parse(content_items: list) -> Any:
     Falls back to ``ast.literal_eval`` for Python-repr payloads (e.g. servers
     that return single-quoted dicts like sqlite), then to a plain string as a
     last resort so callers can still inspect the response.
+
+    Non-text content blocks (image / resource / resource_link) carry no `.text`
+    to parse — return the block's own summary dict as-is rather than falling
+    through to an empty string, so the shape-spec records something real.
     """
     if not content_items:
         raise ValueError("MCP tool result has empty content")
     item = content_items[0]
+    item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+    if item_type in ("image", "resource", "resource_link"):
+        return item if isinstance(item, dict) else _summarize_content_item(item)
     text = item.get("text", "") if isinstance(item, dict) else getattr(item, "text", "")
     try:
         return json.loads(text)

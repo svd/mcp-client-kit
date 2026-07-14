@@ -371,9 +371,13 @@ def test_merge_verify_sidecar_omits_no_arg_tools(tmp_path):
 
 
 def test_merge_verify_sidecar_overlays_existing(tmp_path):
-    """Partial re-probe: existing sidecar entries for un-probed tools are preserved."""
+    """Partial re-probe: existing sidecar entries for tools still live in the
+    base shapes.json (just not re-probed this run) are preserved."""
     target = tmp_path / "acme.shapes.json"
     verify = tmp_path / "acme.verify.json"
+
+    # tool_a is a live tool from a prior merge, sitting in the accumulated base.
+    target.write_text(json.dumps({"tool_a": {"source": "live"}}))
 
     # Simulate a prior run that produced a sidecar with tool_a.
     verify.write_text(json.dumps({"tool_a": {"owner": "prior"}}))
@@ -391,6 +395,52 @@ def test_merge_verify_sidecar_overlays_existing(tmp_path):
     data = json.loads(verify.read_text())
     assert data["tool_a"] == {"owner": "prior"}, "prior sidecar entry must be preserved"
     assert data["tool_b"] == {"repo": "kit"}, "new part must overlay sidecar"
+
+
+def test_merge_verify_sidecar_prunes_tool_dropped_from_merged(tmp_path):
+    """A tool removed from the server's surface (absent from base AND parts,
+    i.e. absent from `merged`) must have its stale verify.json entry dropped —
+    not carried forward forever."""
+    target = tmp_path / "acme.shapes.json"
+    verify = tmp_path / "acme.verify.json"
+
+    # Base shapes.json no longer has "dead_tool" — it was dropped by the server.
+    target.write_text(json.dumps({"tool_a": {"source": "live"}}))
+
+    # Stale sidecar still carries dead_tool from a much earlier probe.
+    verify.write_text(json.dumps({"dead_tool": {"query": "stale"}, "tool_a": {"id": "1"}}))
+
+    # This run re-probes tool_a only; dead_tool is not in parts either.
+    _seed_parts(
+        target,
+        {
+            "tool_a": {"source": "live", "probed_args": {"id": "1"}},
+        },
+    )
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    data = json.loads(verify.read_text())
+    assert "dead_tool" not in data, "stale entry for a tool absent from merged shapes must be pruned"
+    assert data["tool_a"] == {"id": "1"}
+
+
+def test_merge_verify_sidecar_removed_when_all_entries_stale(tmp_path):
+    """If every verify.json entry belongs to a tool no longer in merged shapes,
+    the stale sidecar file itself must not linger with dead content."""
+    target = tmp_path / "acme.shapes.json"
+    verify = tmp_path / "acme.verify.json"
+
+    target.write_text(json.dumps({"tool_a": {"source": "live"}}))
+    verify.write_text(json.dumps({"dead_tool": {"query": "stale"}}))
+
+    # This run's part carries no probed_args (no-arg tool) — verify_map gets
+    # no fresh additions, only the stale dead_tool base to prune away.
+    _seed_parts(target, {"tool_a": {"source": "live", "probed_args": {}}})
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    assert not verify.exists(), "verify sidecar must not linger once all entries are stale"
 
 
 def test_merge_verify_sidecar_from_parts_not_scrubbed_base(tmp_path):
