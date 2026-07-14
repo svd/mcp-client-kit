@@ -2,6 +2,21 @@
 
 ## [Unreleased] — 0.3.0
 
+### Fixed
+
+- **`mcpgen login` — OAuth token exchange failed with `400 invalid_request`** on authorization
+  servers that strictly enforce RFC 6749 §2.3 (`"Client must not use multiple authentication
+  methods"`). Dynamic client registration omitted `token_endpoint_auth_method`, so the server
+  defaulted us to `client_secret_basic` and issued a `client_secret`; the MCP SDK then sent an
+  `Authorization: Basic` header *and* `client_id` in the form body — two client authentication
+  methods in one request. mcpgen now registers as a public client
+  (`token_endpoint_auth_method: "none"`), which is the correct posture for a distributed CLI
+  (RFC 8252 §8.4) and is fully secured by the PKCE (S256) the SDK already performs on every
+  authorization code grant. No security regression: the discarded `client_secret` was issued
+  per-install by dynamic registration and stored in the same `credentials.json` as the refresh
+  token, so anyone who could read the secret could already read the token — it never added a
+  layer of defense.
+
 ## [0.2.0] — 2026-06-20
 
 ### Added

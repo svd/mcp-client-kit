@@ -58,7 +58,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 from mcp import ClientSession
-from mcp.client.auth import OAuthClientProvider, TokenStorage
+from mcp.client.auth import OAuthClientProvider, OAuthRegistrationError, TokenStorage
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
@@ -328,6 +328,44 @@ def _resolve_client_name(server_name: str) -> str:
     if _servers_cache is None:
         servers()
     return _client_names_cache.get(server_name) or f"mcpgen ({server_name})"
+
+
+def _client_metadata(server_name: str, callback_uri: str, client_name: str | None = None) -> OAuthClientMetadata:
+    """Dynamic-registration metadata (RFC 7591). Shared by both OAuth entry points.
+
+    `token_endpoint_auth_method="none"` is load-bearing. Omit it and the AS applies
+    the RFC 7591 §2 default of `client_secret_basic` and issues a `client_secret`;
+    the SDK then sends an `Authorization: Basic` header *and* `client_id` in the form
+    body — two client authentication methods in one request, which servers that
+    enforce RFC 6749 §2.3 reject with `400 invalid_request`. Registering as a public
+    client (RFC 8252 §8.4) is the correct posture for a distributed CLI anyway, and
+    the SDK's PKCE (S256, unconditional) is what actually secures the flow.
+    """
+    return OAuthClientMetadata(
+        client_name=client_name or _resolve_client_name(server_name),
+        redirect_uris=[callback_uri],  # type: ignore[list-item]  # Pydantic coerces str→AnyUrl
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        token_endpoint_auth_method="none",
+    )
+
+
+def _explain_registration_error(exc: OAuthRegistrationError) -> OAuthRegistrationError:
+    """Annotate `invalid_client_metadata` with its most likely cause.
+
+    An AS that does not support public clients MUST reject our registration
+    (RFC 7591 §2) rather than downgrade it. No such server is known, so rather than
+    carry a speculative override flag we make the failure legible if one turns up.
+    """
+    if "invalid_client_metadata" not in str(exc):
+        return exc
+    return OAuthRegistrationError(
+        f"{exc}\n\n"
+        "Likely cause: mcpgen registers as a public client "
+        "(token_endpoint_auth_method=none), and this authorization server appears to "
+        "require a client_secret. Please report this at "
+        "https://github.com/svd/mcp-client-kit/issues with the message above."
+    )
 
 
 # Treat a cached token as expired this many seconds before its real expiry.
@@ -782,6 +820,12 @@ async def _http_session(
     storage = FileTokenStorage(server_name, backend=resolve_cred_backend(cred_backend))
     await _pre_flight_refresh(server_name, storage)
 
+    # Unlike login(), this does NOT clear a stale confidential-client registration,
+    # and must not: a pre-fix credential still refreshes fine here, because
+    # _pre_flight_refresh sends client_id + client_secret in the body — that is
+    # client_secret_post, a *single* auth method, so it never hit the double-auth
+    # bug. Once the refresh token dies, _no_browser raises ReauthenticationRequired
+    # → "Run: mcpgen login" → which does clear and re-register as a public client.
     data = storage._load()
     redirect_uris = data.get(server_name, {}).get("client_info", {}).get("redirect_uris", [])
     callback_uri = redirect_uris[0] if redirect_uris else "http://localhost:0/callback"
@@ -794,12 +838,7 @@ async def _http_session(
 
     provider = OAuthClientProvider(
         server_url=server_url,
-        client_metadata=OAuthClientMetadata(
-            client_name=client_name or _resolve_client_name(server_name),
-            redirect_uris=[callback_uri],  # type: ignore[list-item]  # Pydantic coerces str→AnyUrl
-            grant_types=["authorization_code", "refresh_token"],
-            response_types=["code"],
-        ),
+        client_metadata=_client_metadata(server_name, callback_uri, client_name),
         storage=storage,
         redirect_handler=_no_browser,
         callback_handler=_no_callback,
@@ -1067,35 +1106,33 @@ async def login(
 
         provider = OAuthClientProvider(
             server_url=server_url,
-            client_metadata=OAuthClientMetadata(
-                client_name=client_name or _resolve_client_name(server_name),
-                redirect_uris=[callback_uri],  # type: ignore[list-item]  # Pydantic coerces str→AnyUrl
-                grant_types=["authorization_code", "refresh_token"],
-                response_types=["code"],
-            ),
+            client_metadata=_client_metadata(server_name, callback_uri, client_name),
             storage=storage,
             redirect_handler=redirect_handler,
             callback_handler=callback_handler,
         )
 
         try:
-            async with _open_http(server_url, auth=provider) as (read, write, _):
-                async with ClientSession(read, write) as s:
-                    await s.initialize()
+            try:
+                async with _open_http(server_url, auth=provider) as (read, write, _):
+                    async with ClientSession(read, write) as s:
+                        await s.initialize()
 
-                    # Persist the token endpoint for later pre-flight refresh. Do this
-                    # independently of any tool call — not every server exposes `whoami`.
-                    if provider.context.oauth_metadata is not None:
-                        endpoint_url = str(provider.context.oauth_metadata.token_endpoint)
-                        creds_data = storage._load()
-                        creds_data.setdefault(server_name, {})["token_endpoint"] = endpoint_url
-                        storage._save(creds_data)
+                        # Persist the token endpoint for later pre-flight refresh. Do this
+                        # independently of any tool call — not every server exposes `whoami`.
+                        if provider.context.oauth_metadata is not None:
+                            endpoint_url = str(provider.context.oauth_metadata.token_endpoint)
+                            creds_data = storage._load()
+                            creds_data.setdefault(server_name, {})["token_endpoint"] = endpoint_url
+                            storage._save(creds_data)
 
-                    # Confirm the authenticated session works with a server-agnostic
-                    # call. `list_tools` is part of the MCP protocol — every server
-                    # supports it, unlike any specific tool name.
-                    tools = await s.list_tools()
-                    print(f"Login OK ({server_name}); {len(tools.tools)} tool(s) available")
+                        # Confirm the authenticated session works with a server-agnostic
+                        # call. `list_tools` is part of the MCP protocol — every server
+                        # supports it, unlike any specific tool name.
+                        tools = await s.list_tools()
+                        print(f"Login OK ({server_name}); {len(tools.tools)} tool(s) available")
+            except OAuthRegistrationError as e:
+                raise _explain_registration_error(e) from e
         finally:
             if not callback_future.done():
                 callback_future.set_result((None, None))
