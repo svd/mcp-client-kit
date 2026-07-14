@@ -590,6 +590,7 @@ def _cmd_list(ns: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as exc:
         print(f"[list] error: {exc}", file=sys.stderr)
         return 1
+
     def _entry(t: dict) -> dict:
         entry = {"name": t["name"], "description": t.get("description") or ""}
         if getattr(ns, "schema", False):

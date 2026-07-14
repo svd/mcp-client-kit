@@ -402,9 +402,7 @@ def _render_overloaded(
     disc_type = "int" if numeric else "str"
 
     ordered = sorted(props.items(), key=lambda kv: kv[0] not in required)
-    coerced_variants = sorted(
-        ((_variant_key(k, disc, numeric), v) for k, v in variants.items()), key=lambda kv: kv[0]
-    )
+    coerced_variants = sorted(((_variant_key(k, disc, numeric), v) for k, v in variants.items()), key=lambda kv: kv[0])
 
     def _build_params(disc_type: str) -> list[str]:
         out = []
@@ -424,9 +422,7 @@ def _render_overloaded(
         all_p = ["caller: McpCaller", "*", *params] if params else ["caller: McpCaller"]
         return ", ".join(all_p)
 
-    variant_models = [
-        (val, v.get("return_model", "Any")) for val, v in coerced_variants if v.get("return_model")
-    ]
+    variant_models = [(val, v.get("return_model", "Any")) for val, v in coerced_variants if v.get("return_model")]
     union_ret = " | ".join(m for _, m in variant_models) if variant_models else "Any"
 
     blocks: list[str] = []
