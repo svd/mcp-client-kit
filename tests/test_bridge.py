@@ -932,6 +932,214 @@ def test_login_no_prior_credential_does_not_create_on_failure(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Public-client registration (token_endpoint_auth_method="none")
+# ---------------------------------------------------------------------------
+
+
+def _fake_callback_server_factory():
+    async def fake_callback_server():
+        fut = asyncio.get_running_loop().create_future()
+        fut.set_result(("code", "state"))
+        return 9999, fut
+
+    return fake_callback_server
+
+
+@asynccontextmanager
+async def _fake_http_fail(*args, **kwargs):
+    raise RuntimeError("network error")
+    yield  # makes this an async generator; unreachable
+
+
+def test_registration_request_body_says_none():
+    """The public-client declaration must survive serialization into the DCR body.
+
+    The tests below stop at mcpgen's boundary: they assert on the OAuthClientMetadata
+    we hand the SDK. This one goes one layer further and pins the actual wire contract,
+    because the SDK is pinned only to `mcp<2` — a future release that changed the alias,
+    the exclude_none behaviour, or the field itself would leave those tests green while
+    mcpgen silently regressed to the double-auth bug. create_client_registration_request
+    is pure, so this costs no network.
+    """
+    from mcp.client.auth.utils import create_client_registration_request
+
+    metadata = _bridge._client_metadata("acme", "http://localhost:9999/callback")
+    request = create_client_registration_request(None, metadata, "https://acme.example.com/")
+
+    body = json.loads(request.content)
+    assert body["token_endpoint_auth_method"] == "none"
+
+
+def test_login_registers_public_client(tmp_path):
+    """login() must ask to be registered as a public client.
+
+    Omitting token_endpoint_auth_method makes the AS default the client to
+    client_secret_basic (RFC 7591 §2). The SDK then sends both an
+    Authorization: Basic header and client_id in the form body, which strict
+    servers reject with 400 "Client must not use multiple authentication
+    methods" (RFC 6749 §2.3). PKCE already secures the flow.
+
+    This pins the metadata mcpgen *requests*; test_registration_request_body_says_none
+    pins that it reaches the wire.
+    """
+    creds = tmp_path / "credentials.json"
+    provider_cls = MagicMock()
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", _fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", provider_cls),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+    metadata = provider_cls.call_args.kwargs["client_metadata"]
+    assert metadata.token_endpoint_auth_method == "none"
+
+
+def test_http_session_registers_public_client(tmp_path):
+    """_http_session() must request a public client too — the other OAuth entry point."""
+    creds = tmp_path / "credentials.json"
+    provider_cls = MagicMock()
+
+    seen_backend: dict = {}
+
+    class _TmpStorage(_bridge.FileTokenStorage):
+        """Real FileTokenStorage pinned to tmp_path.
+
+        _http_session() takes no creds_path, so it uses FileTokenStorage's
+        DEFAULT_CREDS_PATH default — bound at def time, hence not redirectable
+        by patching the module attribute. Only the path is overridden; the backend
+        is passed through so this cannot mask a regression in cred_backend routing.
+        """
+
+        def __init__(self, server_name, credentials_path=None, backend="file"):
+            seen_backend["backend"] = backend
+            super().__init__(server_name, creds, backend=backend)
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.FileTokenStorage", _TmpStorage),
+            patch("mcpgen._bridge._open_http", _fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", provider_cls),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                async with _bridge._http_session("acme", "https://acme.example.com/mcp"):
+                    pass
+
+    asyncio.run(run())
+    metadata = provider_cls.call_args.kwargs["client_metadata"]
+    assert metadata.token_endpoint_auth_method == "none"
+    assert seen_backend["backend"] == "file", "_http_session must route cred_backend into storage"
+
+
+def test_login_hands_provider_no_stale_client_info(tmp_path):
+    """login() must never let the SDK reuse a stored client registration.
+
+    The SDK skips registration when client_info is already in storage
+    (`if not self.context.client_info`). login() stashes and clears the whole
+    entry first, so a credential registered before the public-client fix cannot
+    poison a fresh login — it is always re-registered. This pins that invariant;
+    without it, existing users would keep failing after the fix.
+    """
+    creds = tmp_path / "credentials.json"
+    stale_entry = {
+        "tokens": {"access_token": "orig_tok", "token_type": "bearer"},
+        "client_info": {
+            "client_id": "old_id",
+            "client_secret": "shh",
+            "token_endpoint_auth_method": "client_secret_basic",
+        },
+    }
+    creds.write_text(json.dumps({"acme": stale_entry}))
+    os.chmod(creds, 0o600)
+
+    seen: dict = {}
+
+    def fake_provider(**kwargs):
+        # Read through the real storage seam at the moment the SDK would.
+        seen["client_info"] = kwargs["storage"]._load().get("acme", {}).get("client_info")
+        return MagicMock()
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", _fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", fake_provider),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+    assert seen["client_info"] is None, "stale client registration must not survive into a login"
+    # …and the failed login must still restore it, so the user is not locked out.
+    assert json.loads(creds.read_text())["acme"] == stale_entry
+
+
+def test_login_explains_public_client_rejection(tmp_path):
+    """An AS that refuses public clients must produce a legible error, not a bare 400.
+
+    Registering as a public client is unconditional, so an AS that requires a
+    client_secret rejects us with invalid_client_metadata (RFC 7591 §2 — it must
+    reject rather than downgrade). No such server is known, so instead of carrying a
+    speculative override flag we name the cause if one ever turns up.
+    """
+    from mcp.client.auth import OAuthRegistrationError
+
+    creds = tmp_path / "credentials.json"
+
+    @asynccontextmanager
+    async def _fail_registration(*args, **kwargs):
+        raise OAuthRegistrationError(
+            'Registration failed: 400 {"error":"invalid_client_metadata",'
+            '"error_description":"client_secret is required"}'
+        )
+        yield  # unreachable; makes this an async generator
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", _fail_registration),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(OAuthRegistrationError) as exc:
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+        return str(exc.value)
+
+    message = asyncio.run(run())
+    assert "invalid_client_metadata" in message, "the server's own error must be preserved"
+    assert "token_endpoint_auth_method=none" in message, "the likely cause must be named"
+
+
+def test_login_does_not_explain_unrelated_registration_error(tmp_path):
+    """Only invalid_client_metadata gets the public-client annotation — no over-claiming."""
+    from mcp.client.auth import OAuthRegistrationError
+
+    creds = tmp_path / "credentials.json"
+
+    @asynccontextmanager
+    async def _fail_registration(*args, **kwargs):
+        raise OAuthRegistrationError("Registration failed: 503 upstream unavailable")
+        yield  # unreachable; makes this an async generator
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", _fail_registration),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(OAuthRegistrationError) as exc:
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+        return str(exc.value)
+
+    message = asyncio.run(run())
+    assert "503 upstream unavailable" in message
+    assert "token_endpoint_auth_method" not in message
+
+
+# ---------------------------------------------------------------------------
 # parse() — JSON, repr, and plain-text payloads  (#4)
 # ---------------------------------------------------------------------------
 
@@ -982,3 +1190,124 @@ def test_parse_repr_not_exec_unsafe():
     result = _bridge.parse([_item("__import__('os').system('true')")])
     # Must fall back to str, not execute.
     assert isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# parse() / call() — non-text content blocks (image/resource/resource_link)
+# must not collapse to an empty string (#4)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_image_block_returns_marker_not_empty_string():
+    """An image block (no .text) must not fall through to `""`."""
+    item = {"type": "image", "mimeType": "image/png", "has_data": True}
+    result = _bridge.parse([item])
+    assert result != ""
+    assert result["type"] == "image"
+    assert result["mimeType"] == "image/png"
+
+
+def test_parse_resource_block_returns_marker_not_empty_string():
+    """A resource block carrying only a blob (no text) must not collapse to `""`."""
+    item = {"type": "resource", "mimeType": "application/gzip", "has_text": False, "has_blob": True}
+    result = _bridge.parse([item])
+    assert result != ""
+    assert result["type"] == "resource"
+    assert result["has_blob"] is True
+
+
+def test_parse_resource_link_block_returns_marker():
+    item = {"type": "resource_link", "uri": "file:///tmp/x.txt", "name": "x.txt"}
+    result = _bridge.parse([item])
+    assert result["type"] == "resource_link"
+    assert result["uri"] == "file:///tmp/x.txt"
+
+
+def test_parse_text_block_unaffected_by_marker_handling():
+    """Regression: ordinary text blocks still JSON-parse as before."""
+    result = _bridge.parse([{"type": "text", "text": '{"a": 1}'}])
+    assert result == {"a": 1}
+
+
+class _FakeImageItem:
+    def __init__(self, mimeType, data):
+        self.type = "image"
+        self.mimeType = mimeType
+        self.data = data
+
+
+class _FakeResource:
+    def __init__(self, mimeType=None, text=None, blob=None):
+        self.mimeType = mimeType
+        self.text = text
+        self.blob = blob
+
+
+class _FakeResourceItem:
+    def __init__(self, resource):
+        self.type = "resource"
+        self.resource = resource
+
+
+class _FakeResourceLinkItem:
+    def __init__(self, uri, name):
+        self.type = "resource_link"
+        self.uri = uri
+        self.name = name
+
+
+def _run_call_with_content(item):
+    mock_session = MagicMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[item]))
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        yield mock_session
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller()
+            return await caller.call("s", "t", {})
+
+    return asyncio.run(run())
+
+
+def test_mcp_bridge_caller_image_content_not_collapsed_to_empty_string():
+    result = _run_call_with_content(_FakeImageItem(mimeType="image/png", data="abc123=="))
+    assert result != ""
+    assert result["type"] == "image"
+    assert result["mimeType"] == "image/png"
+    assert result["has_data"] is True
+
+
+def test_mcp_bridge_caller_resource_content_not_collapsed_to_empty_string():
+    """gzip-file-as-resource with no `.text` alongside the blob — must not vanish to `""`."""
+    result = _run_call_with_content(_FakeResourceItem(_FakeResource(mimeType="application/gzip", blob="H4sIAAAA")))
+    assert result != ""
+    assert result["type"] == "resource"
+    assert result["mimeType"] == "application/gzip"
+    assert result["has_blob"] is True
+    assert result["has_text"] is False
+
+
+def test_mcp_bridge_caller_resource_link_content_captured():
+    result = _run_call_with_content(_FakeResourceLinkItem(uri="file:///tmp/x.txt", name="x.txt"))
+    assert result["type"] == "resource_link"
+    assert result["uri"] == "file:///tmp/x.txt"
+    assert result["name"] == "x.txt"
+
+
+def test_mcp_bridge_caller_resource_link_uri_is_json_serializable():
+    """Real MCP SDK ResourceLink.uri is a pydantic AnyUrl, not a str — the summary
+    dict must convert it, or json.dumps (called by _cmd_call/_probe) crashes."""
+    from pydantic import AnyUrl
+
+    result = _run_call_with_content(_FakeResourceLinkItem(uri=AnyUrl("file:///tmp/x.txt"), name="x.txt"))
+    assert isinstance(result["uri"], str)
+    json.dumps(result)  # must not raise TypeError
+
+
+def test_mcp_bridge_caller_resource_link_missing_uri_stays_none():
+    result = _run_call_with_content(_FakeResourceLinkItem(uri=None, name="x.txt"))
+    assert result["uri"] is None
+    json.dumps(result)  # must not raise TypeError

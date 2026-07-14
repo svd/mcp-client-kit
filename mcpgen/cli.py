@@ -48,11 +48,14 @@ async def _list_tools(
         result = await s.list_tools()
     tools = []
     for t in result.tools:
+        raw_annotations = getattr(t, "annotations", None)
+        annotations = raw_annotations.model_dump(exclude_none=True) if raw_annotations else None
         tools.append(
             {
                 "name": t.name,
                 "description": t.description,
                 "inputSchema": t.inputSchema,
+                "annotations": annotations,
             }
         )
     return tools
@@ -70,7 +73,8 @@ async def _probe(
     config_path: str | None = None,
     cred_backend: str | None = None,
     env: dict[str, str] | None = None,
-) -> Any:
+) -> tuple[Any, int]:
+    """Return `(observed_shape, observed_byte_size)` for one live probe call."""
     caller = _bridge.McpBridgeCaller(
         cmd=cmd,
         url=url,
@@ -81,7 +85,8 @@ async def _probe(
         env=env,
     )
     raw = await caller.call(server, tool, args)
-    return codegen.summarize_shape(raw)
+    size = len(json.dumps(raw, default=str, ensure_ascii=False).encode("utf-8"))
+    return codegen.summarize_shape(raw), size
 
 
 async def _call(
@@ -283,7 +288,7 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         args = json.loads(ns.probe_args) if ns.probe_args else {}
         print(f"[codegen] probing {ns.probe}({args}) …", file=sys.stderr)
         try:
-            shape = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, **conn))
+            shape, _size = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[codegen] error: {exc}", file=sys.stderr)
             return 1
@@ -327,17 +332,19 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         env=_parse_env(ns),
     )
     shapes = []
+    sizes = []
     for i, args in enumerate(args_list):
         print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
         # one session per probe (prototype); pooling is out of scope
         try:
-            shape = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
+            shape, size = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[probe] error: {exc}", file=sys.stderr)
             return 1
         shapes.append(shape)
+        sizes.append(size)
 
-    skeleton = codegen.probe_skeleton(ns.tool, args_list, shapes)
+    skeleton = codegen.probe_skeleton(ns.tool, args_list, shapes, observed_bytes=sizes)
     out = json.dumps(skeleton, indent=2)
     if ns.emit_shape:
         target = Path(ns.emit_shape)
@@ -470,6 +477,9 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
                 pa = entry.get("probed_args")
                 if pa:  # non-empty dict or non-empty list
                     verify_map[tool_name] = pa
+    # Prune entries for tools no longer part of the merged shapes (e.g. the
+    # server dropped the tool) — otherwise dead entries persist forever.
+    verify_map = {k: v for k, v in verify_map.items() if k in merged}
     if verify_map:
         _atomic_write_text(verify_target, json.dumps(verify_map, indent=2) + "\n")
         print(
@@ -477,6 +487,10 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
             " — ⚠  raw args/PII, git-ignored (verify sidecar)",
             file=sys.stderr,
         )
+    elif verify_target.is_file():
+        # Every entry was pruned as stale — don't leave dead content on disk.
+        verify_target.unlink()
+        print(f"[merge] removed {verify_target} (all entries stale)", file=sys.stderr)
 
     if not ns.keep_parts:
         shutil.rmtree(parts_d)
@@ -576,13 +590,17 @@ def _cmd_list(ns: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as exc:
         print(f"[list] error: {exc}", file=sys.stderr)
         return 1
-    if getattr(ns, "schema", False):
-        out = [
-            {"name": t["name"], "description": t.get("description") or "", "inputSchema": t.get("inputSchema") or {}}
-            for t in tools
-        ]
-    else:
-        out = [{"name": t["name"], "description": t.get("description") or ""} for t in tools]
+
+    def _entry(t: dict) -> dict:
+        entry = {"name": t["name"], "description": t.get("description") or ""}
+        if getattr(ns, "schema", False):
+            entry["inputSchema"] = t.get("inputSchema") or {}
+        annotations = t.get("annotations")
+        if annotations is not None:
+            entry["annotations"] = annotations
+        return entry
+
+    out = [_entry(t) for t in tools]
     sys.stdout.write(json.dumps(out, indent=2) + "\n")
 
     candidates = codegen.detect_discriminators(tools)

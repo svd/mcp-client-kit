@@ -1,6 +1,40 @@
 # Changelog
 
-## [Unreleased] — 0.3.0
+## [Unreleased] — 0.4.0
+
+## [0.3.0] — 2026-07-14
+
+### Fixed
+
+- **`mcpgen login` — OAuth token exchange failed with `400 invalid_request`** on authorization
+  servers that strictly enforce RFC 6749 §2.3 (`"Client must not use multiple authentication
+  methods"`). Dynamic client registration omitted `token_endpoint_auth_method`, so the server
+  defaulted us to `client_secret_basic` and issued a `client_secret`; the MCP SDK then sent an
+  `Authorization: Basic` header *and* `client_id` in the form body — two client authentication
+  methods in one request. mcpgen now registers as a public client
+  (`token_endpoint_auth_method: "none"`), which is the correct posture for a distributed CLI
+  (RFC 8252 §8.4) and is fully secured by the PKCE (S256) the SDK already performs on every
+  authorization code grant. No security regression: the discarded `client_secret` was issued
+  per-install by dynamic registration and stored in the same `credentials.json` as the refresh
+  token, so anyone who could read the secret could already read the token — it never added a
+  layer of defense.
+
+- **Discriminated-union codegen mistyped `string` discriminators with numeric-looking
+  enum values as `int`.** Discriminator type was inferred solely by sniffing whether
+  shape-spec variant keys looked numeric (e.g. `"1"`, `"2"`), so a genuinely
+  `type: "string"` discriminator with those enum values got a wrong `int` `Literal`
+  in the generated `@overload` stubs. Discriminator type is now resolved from an
+  explicit `input_overrides` entry, then the tool's declared `inputSchema` type,
+  and only falls back to key-sniffing when neither is available.
+
+- **`mcpgen call`/`probe` crashed on `resource_link` content items** — real MCP SDK
+  `ResourceLink.uri` is a pydantic `AnyUrl`, not `str`; `json.dumps` on the summarized
+  content raised `TypeError`. The summary now coerces `uri` to `str`.
+
+- **`mcpgen probe` reported inflated payload sizes for non-ASCII content** — size was
+  measured as the character count of `json.dumps`'s default `ensure_ascii=True`
+  output, which escapes every non-ASCII character to a `\uXXXX` sequence. Size is
+  now measured as real UTF-8 byte length.
 
 ## [0.2.0] — 2026-06-20
 

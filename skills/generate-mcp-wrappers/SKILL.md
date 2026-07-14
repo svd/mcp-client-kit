@@ -102,11 +102,11 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
 2. **Select tools to probe (interactive gate).**
 
-   a. Run `mcpgen list <server> --schema` → get `[{name, description, inputSchema}]`
-      for every tool. **Probe only tools that appear in this output.** Do not add tools
-      from system-prompt context, documentation, or prior knowledge. The `inputSchema`
-      field in this output is the authoritative source for steps 3's required-arg and
-      enum-constraint checks — no separate schema fetch is needed.
+   a. Run `mcpgen list <server> --schema` → get `[{name, description, inputSchema,
+      annotations}]` for every tool. **Probe only tools that appear in this output.**
+      Do not add tools from system-prompt context, documentation, or prior knowledge.
+      The `inputSchema` field in this output is the authoritative source for step 3's
+      required-arg and enum-constraint checks — no separate schema fetch is needed.
 
    b. Print a report of all tools in this format:
       ```
@@ -117,10 +117,21 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
         ⚠ create_entity — Create a new entity [MUTATING]
         ...
       ```
-      Flag likely-mutating tools with `⚠ ... [MUTATING]` using a name/description
-      heuristic: names or descriptions containing `create`, `update`, `delete`,
-      `remove`, `send`, `set`, `write`, `post`, `patch`, `put`, `cancel`,
-      `approve`, `submit`, `assign` — probing these makes a **real** live call.
+      Flag likely-mutating tools with `⚠ ... [MUTATING]` using this **fallback order**:
+
+      1. **Primary — `annotations.readOnlyHint`.** If a tool's `annotations` object
+         (from step 2a's `mcpgen list --schema` output) has `readOnlyHint`, trust it
+         outright: `readOnlyHint: true` → safe to probe; `readOnlyHint: false` (or a
+         write-shaped tool with the hint absent) → mutating. Do not second-guess this
+         signal with the keyword heuristic below.
+      2. **Fallback — keyword heuristic + semantic read.** Only when `annotations` is
+         absent or lacks `readOnlyHint` (common — many servers don't set it): flag
+         names or descriptions containing `create`, `update`, `delete`, `remove`,
+         `send`, `set`, `write`, `post`, `patch`, `put`, `cancel`, `approve`, `submit`,
+         `assign` — **and** read the description semantically for mutating verbs the
+         keyword list misses (e.g. "records changes", "switches branches", "writes a
+         memo"). The keyword list is a last resort, not a sufficient safety net on its
+         own — probing makes a **real** live call, so when in doubt, treat as mutating.
 
       Note for focus: the goal is to shape-spec tools that carry real records and
       whose payloads you want out of model context ("big dump" tools). Mutations and
@@ -132,9 +143,8 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
       - **I'll specify the tools** — user names them (free-text via "Other").
 
       > **Subagent fallback (when `AskUserQuestion` is unavailable):** Probe all
-      > non-mutating tools. Treat a tool as mutating if its name or description
-      > contains any of the keywords from the heuristic list below (step 2b). Skip
-      > mutating tools entirely.
+      > non-mutating tools, using the same fallback order as step 2b (`readOnlyHint`
+      > first, then the keyword list + semantic read). Skip mutating tools entirely.
 
    d. If **"Confirm in batches"**: emit `AskUserQuestion` multi-select questions,
       **≤4 options per question**, each option `label = tool name` and
@@ -216,10 +226,17 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      --emit-shape <shapes-path>
    ```
    **Quota / rate-limit / auth errors during probing.** If a probe returns an HTTP
-   429/401/403, a quota-exceeded message, a rate-limit string, or an auth/credentials
-   error (detectable by phrases like `"quota exceeded"`, `"rate limit"`, `"try again
-   later"`, `"unauthorized"`, `"forbidden"`, `"invalid api key"`, `"authentication"`,
-   `"not authenticated"`):
+   429/401/403, a JSON `"error"` key, or a payload that is *itself* an error message
+   (the whole text is the failure, not prose that happens to mention one) — phrases
+   like `"quota exceeded"`, `"rate limit"`, `"try again later"`, `"unauthorized"`,
+   `"forbidden"`, `"invalid api key"`, `"not authenticated"` — treat it as a probe
+   failure. Require the phrase to be the error itself (status code, error-shaped JSON,
+   or the entire response is the complaint), not a bare substring match anywhere in a
+   successful payload: a library description that happens to contain the word
+   "authentication" is not an auth error — read the surrounding content before
+   concluding a probe failed.
+
+   When a probe genuinely fails this way:
    - Set `_observed_shape: "str"` — the error payload is a `str`, which is honest.
    - Leave `return_model: null`.
    - Note in `session-overview.md` that the shape is an error string, not a success
@@ -465,11 +482,12 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
   Need a raw payload? That's `mcpgen call … --out *.probe-raw.json` (git-ignored).
 
 - **Probing is a live call — mutating tools mutate.** The default selects every
-  tool, but probing a `create`/`update`/`delete`/`send` (etc.) tool executes it for
-  real against the server. Flag likely-mutating tools in the step 2 report and
-  recommend the user deselect them unless they explicitly want to probe them.
-  Never probe a destructive tool "to see its shape" without explicit user
-  confirmation.
+  tool, but probing a mutating tool (`create`/`update`/`delete`/`send`/etc., or
+  `annotations.readOnlyHint: false`) executes it for real against the server. Flag
+  likely-mutating tools in the step 2 report — `readOnlyHint` first, keyword+semantic
+  heuristic as fallback, per step 2b — and recommend the user deselect them unless
+  they explicitly want to probe them. Never probe a destructive tool "to see its
+  shape" without explicit user confirmation.
 
 - **The type is a hint, not validation.** A `TypedDict` from one probe is partial
   knowledge stated honestly. Don't reach for Pydantic to "enforce" it — a model built

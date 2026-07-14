@@ -7,11 +7,13 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from mcpgen.cli import _cmd_probe
+from mcpgen.cli import _cmd_probe, _probe
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -34,6 +36,7 @@ def _ns(server: str, tool: str, args: list[str] | None, emit_shape: str | None =
 
 
 _FAKE_SHAPE = {"names": "list"}
+_FAKE_PROBE_RESULT = (_FAKE_SHAPE, 42)  # (_probe now returns (shape, observed_byte_size))
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +54,7 @@ def test_probe_list_arg_exits_zero(tmp_path):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
         rc = _cmd_probe(ns)
 
     assert rc == 0, "exit code must be 0 even when arg values are lists"
@@ -67,7 +70,7 @@ def test_probe_list_arg_writes_part_file(tmp_path):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
         _cmd_probe(ns)
 
     parts_dir = shapes_file.parent / (shapes_file.name + ".parts")
@@ -87,7 +90,7 @@ def test_probe_scalar_discriminator_advisory_printed(tmp_path, capsys):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
         rc = _cmd_probe(ns)
 
     assert rc == 0
@@ -105,7 +108,7 @@ def test_probe_scalar_single_discriminator_value_warns(tmp_path, capsys):
         emit_shape=str(shapes_file),
     )
 
-    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
         rc = _cmd_probe(ns)
 
     assert rc == 0
@@ -153,7 +156,7 @@ def test_probe_advisory_exception_still_exits_zero(tmp_path, capsys):
         return result
 
     with (
-        patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_SHAPE),
+        patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT),
         patch("mcpgen.cli.json.loads", side_effect=_patched_loads),
     ):
         rc = _cmd_probe(ns)
@@ -161,3 +164,53 @@ def test_probe_advisory_exception_still_exits_zero(tmp_path, capsys):
     assert rc == 0, "exit 0 even when advisory block raises"
     err = capsys.readouterr().err
     assert "advisory skipped" in err or "injected advisory failure" in err
+
+
+# ---------------------------------------------------------------------------
+# #3 — observed byte size threads through to the emitted skeleton (#6)
+# ---------------------------------------------------------------------------
+
+
+def test_probe_records_observed_bytes_in_skeleton(tmp_path):
+    """The larger of multiple probes' observed byte sizes lands in `_observed_bytes`."""
+    shapes_file = tmp_path / "deepwiki.shapes.json"
+    ns = _ns(
+        server="deepwiki",
+        tool="read_wiki_contents",
+        args=["{}", "{}"],
+        emit_shape=str(shapes_file),
+    )
+
+    with patch(
+        "mcpgen.cli._probe",
+        new_callable=AsyncMock,
+        side_effect=[(_FAKE_SHAPE, 1200), (_FAKE_SHAPE, 675000)],
+    ):
+        rc = _cmd_probe(ns)
+
+    assert rc == 0
+    parts_dir = shapes_file.parent / (shapes_file.name + ".parts")
+    part = next(parts_dir.glob("*.json"))
+    skeleton = json.loads(part.read_text())
+    assert skeleton["read_wiki_contents"]["_observed_bytes"] == 675000
+
+
+def test_probe_size_measures_utf8_bytes_not_escaped_char_count():
+    """Non-ASCII content must be measured as real UTF-8 bytes, not the inflated
+    character count `json.dumps` produces with its default ensure_ascii escaping."""
+    text = "héllo wörld" * 100
+    expected_len = len(json.dumps(text, ensure_ascii=False).encode("utf-8"))
+    inflated_escaped_len = len(json.dumps(text))  # what the old buggy code measured
+    assert inflated_escaped_len > expected_len * 1.5, "fixture must actually exercise the escaping blowup"
+
+    mock_session = MagicMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[MagicMock(type="text", text=json.dumps(text))]))
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        yield mock_session
+
+    with patch("mcpgen._bridge.session", fake_session):
+        _shape, size = asyncio.run(_probe("acme", "get_text", {}))
+
+    assert size == expected_len
