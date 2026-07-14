@@ -361,10 +361,15 @@ def check_roundtrip(
         )
 
     probed_args = candidate_shape.get("probed_args", {})
+    if isinstance(probed_args, list):
+        # Multi-probe: several arg-variants were used to surface field variance.
+        # Any single variant is a valid live call, so use the first one instead
+        # of skipping roundtrip coverage outright.
+        probed_args = probed_args[0] if probed_args else {}
     if not isinstance(probed_args, dict):
         return skip_(
             "roundtrip",
-            "probed_args is not a dict (multi-probe list not supported for live call)",
+            f"probed_args has unexpected type {type(probed_args).__name__}",
         )
     # Prefer real pre-scrub args from a gitignored sidecar when available, so the
     # live call uses values the server accepts instead of <example-*> placeholders.
@@ -372,10 +377,13 @@ def check_roundtrip(
     if verify_args_path.exists():
         try:
             overrides = json.loads(verify_args_path.read_text(encoding="utf-8"))
-            if isinstance(overrides, dict) and isinstance(
-                overrides.get(candidate_name), dict
-            ):
-                probed_args = overrides[candidate_name]
+            override_val = (
+                overrides.get(candidate_name) if isinstance(overrides, dict) else None
+            )
+            if isinstance(override_val, list):
+                override_val = override_val[0] if override_val else None
+            if isinstance(override_val, dict):
+                probed_args = override_val
         except (OSError, json.JSONDecodeError):
             pass  # unreadable sidecar — fall through to placeholder guard
     if any(isinstance(v, str) and _is_placeholder(v) for v in probed_args.values()):

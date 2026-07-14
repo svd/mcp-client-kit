@@ -2,12 +2,12 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-06-19T22:46:35Z
-- **Duration:** 1m 32s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-07-14T08:28:25Z
+- **Duration:** 2m 3s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
 
 ## Server Summary
 
-The `sequential-thinking` MCP server exposes a single tool: `sequentialthinking`. It implements a structured chain-of-thought reasoning loop, accepting a thought string and metadata (step number, total estimate, revision/branching flags) and returning a status record tracking how far through the thinking sequence the caller has progressed.
+The `sequential-thinking` MCP server exposes a single tool: `sequentialthinking`. It implements a structured chain-of-thought reasoning loop, accepting a thought string and metadata (step number, total estimate, revision/branching flags) and returning a status record tracking progress through the thinking sequence.
 
 ## Tool Coverage
 
@@ -16,52 +16,34 @@ The `sequential-thinking` MCP server exposes a single tool: `sequentialthinking`
 - **Skipped:** 0
 - **Mutating tools flagged:** 0
 
-No discriminator candidates were detected (only one tool exists, so no shared params across sibling tools).
+No discriminator candidates were detected — only one tool exists, so there are no shared params across sibling tools to disambiguate.
 
 ## Probe Findings
 
-The tool required four mandatory args: `thought`, `nextThoughtNeeded`, `thoughtNumber`, and `totalThoughts`. A minimal single-step call was made:
+`inputSchema.required` listed `thought`, `thoughtNumber`, `totalThoughts` (note: `nextThoughtNeeded` is not schema-required despite the tool description implying it always matters). Two live calls were made in one probe session, chained so the second call could exercise the branching path the first run's empty-list probe couldn't reach:
 
 ```json
-{
-  "thought": "This is the first step of solving the problem.",
-  "nextThoughtNeeded": false,
-  "thoughtNumber": 1,
-  "totalThoughts": 1
-}
+[
+  {"thought": "Step 1: identify the problem.", "nextThoughtNeeded": true, "thoughtNumber": 1, "totalThoughts": 2},
+  {"thought": "Step 2 (branch): explore an alternative approach.", "nextThoughtNeeded": false, "thoughtNumber": 2, "totalThoughts": 2, "branchFromThought": 1, "branchId": "alt-approach"}
+]
 ```
 
-The server responded with a structured dict — no vendor envelope, no wrapping layer:
-
-```json
-{
-  "thoughtNumber": 1,
-  "totalThoughts": 1,
-  "nextThoughtNeeded": false,
-  "branches": [],
-  "thoughtHistoryLength": 1
-}
-```
-
-No surprising or unexpected schema was observed. The response fields map cleanly to the input params (echoed back) plus two state fields: `branches` (a list tracking any branching paths) and `thoughtHistoryLength` (count of thoughts submitted so far in the session).
+The server responded with a flat dict, no vendor envelope, for both calls. The second (branching) call surfaced a previously-unobserved detail: `branches` is a **list of strings** (branch id labels, e.g. `"alt-approach"`), not an opaque empty list as a single-call probe would show. Multi-probing across a stateful branch call was the key to resolving this field's element type.
 
 ## Shape Decisions
 
-**`sequentialthinking` → `ThoughtResult`**
+**`sequentialthinking` -> `ThoughtResult`**
 
-- **Unwrap path:** `[]` — no envelope to unwrap; the response is a flat dict at the top level.
-- **Return model:** `ThoughtResult` (TypedDict) — the response has stable scalar fields that warrant a typed model.
+- **Unwrap path:** `[]` — no envelope; the response is a flat dict at the top level.
+- **Return model:** `ThoughtResult` (TypedDict) — stable scalar/list-of-scalar fields warrant a typed model.
 - **Fields included:**
-  - `thoughtNumber: int` — echoed back from input
-  - `totalThoughts: int` — echoed back from input
-  - `nextThoughtNeeded: bool` — echoed back from input
-  - `branches: list` — a list of branch records; the probe returned an empty list so the inner element shape is unobservable. Typed as `list` (generic) pending a branching probe.
+  - `thoughtNumber: int`, `totalThoughts: int`, `nextThoughtNeeded: bool` — echoed back from input
+  - `branches: list[str]` — branch id labels; resolved from `str` after the branching probe (previously unobservable with an empty-list result)
   - `thoughtHistoryLength: int` — running count of submitted thoughts
-- **`input_overrides`:** none needed; all schema types are correct.
-- **PII scrub:** `probed_args` contains only a generic placeholder sentence — no emails, UUIDs, numeric IDs, or personal names. No scrubbing required.
-
-Note: The `branches` field inner element model is unobservable from this probe since the server returned `[]`. To capture branch record shape, re-run `mcpgen probe` with a call that includes `branchFromThought` and `branchId` args on a subsequent thought to trigger a branching path.
+- **`input_overrides`:** none needed; schema types are correct as declared.
+- **PII scrub:** `probed_args` contains only generic placeholder sentences and a descriptive branch slug (`"alt-approach"`) — no emails, UUIDs, numeric ids, or personal names. No scrubbing required.
 
 ## Generated Module
 
-The regenerated `sequential-thinking.py` parsed cleanly (`ast.parse` success). The `sequentialthinking` function signature reads `-> ThoughtResult` rather than `-> Any`, confirming the shape-spec was correctly applied by codegen.
+The regenerated `sequential-thinking.py` parsed cleanly (`ast.parse` success). `sequentialthinking` now returns `-> ThoughtResult` with `branches: list[str]`, an improvement over a prior run that left `branches` as generic `list` due to an empty-list probe. `eval-kit verify` reports all checks passing (`ast`, `signatures`, `idempotency`, `pii`); `roundtrip` is skipped because `probed_args` is a multi-probe list, which the roundtrip verifier does not call live.

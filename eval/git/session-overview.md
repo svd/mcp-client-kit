@@ -2,40 +2,31 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-06-19T22:46:13Z
-- **Duration:** 2m 47s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-07-14T08:28:13Z
+- **Duration:** 3m 33s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
 
 ## Server and Tool Inventory
 
-The `git` MCP server (`uvx mcp-server-git`) exposes 12 tools covering the full local git workflow: status, diff (unstaged, staged, diff-to-target), log, show, branch listing, add, reset, commit, checkout, and create-branch.
+The `git` MCP server (`uvx mcp-server-git`) exposes 12 tools covering the local git workflow: status, diff (unstaged, staged, diff-to-target), log, show, branch listing, add, reset, commit, checkout, and create-branch.
 
-Of the 12 tools, 5 were identified as mutating via name/description heuristics and skipped: `git_add`, `git_reset`, `git_commit`, `git_checkout`, and `git_create_branch`. The remaining 7 non-mutating tools were probed: `git_status`, `git_diff_unstaged`, `git_diff_staged`, `git_diff`, `git_log`, `git_show`, and `git_branch`.
+5 tools were judged mutating and skipped without probing: `git_add`, `git_reset`, `git_commit`, `git_checkout`, `git_create_branch`. Most don't literally match the mutating-keyword heuristic, but their descriptions ("Records changes to the repository", "Switches branches", etc.) make plain a live call would mutate this repo's working tree or history, so they were excluded on judgment. The remaining 7 read-only tools were probed against this repo itself (`repo_path` = the eval-kit working directory): `git_status`, `git_diff_unstaged`, `git_diff_staged`, `git_diff`, `git_log`, `git_show`, `git_branch`.
 
 ## Discriminator Analysis
 
-The `mcpgen list` advisory flagged two discriminator candidates:
-
-- `branch_name` → `git_checkout`, `git_create_branch` — both are mutating tools and were skipped entirely, so this discriminator had no impact on the probe set.
-- `repo_path` → all 12 tools — auto-disqualified by Pass 1 as a `repo_path`/path identity input-only parameter. It is a context arg (which local repository to operate on), not a response shape switch. No response-level discriminator survived to Pass 2.
+`mcpgen list` flagged two candidates: `branch_name` (spans only the two skipped mutating tools, so never reached a probe) and `repo_path` (spans all 12 tools but is auto-disqualified under Pass 1 as a path/repo-identity input parameter — it selects which repository to operate on, not the response shape). No true response-shape discriminator survived to step 4.
 
 ## Shape Decisions
 
-All 7 probed tools returned plain strings (`_observed_shape: "str"`). The `git` MCP server formats its output as human-readable text — a status summary, diff patch text, formatted commit log lines, branch names — rather than structured JSON. This is the expected design for a local git tool surface.
+All 7 probed tools returned plain strings (`_observed_shape: "str"`), confirmed by direct raw-payload calls for `git_status`, `git_log`, and `git_branch` — each response was human-readable text (a status block, formatted commit-log lines with an `Actor` repr, a `*`-marked branch list), none of which parsed as JSON, so the JSON-unwrap check didn't apply to any tool.
 
-For each probed tool:
+Per-tool decisions (all `unwrap: []`, `return_model: null`, `fields: {}` — no structured record to extract): `git_status` returns a formatted status block; `git_diff_unstaged`/`git_diff_staged`/`git_diff` return unified diff text; `git_log` returns formatted commit-history lines (hash, author repr, date, message); `git_show` returns commit contents as text; `git_branch` returns a newline-separated, `*`-marked branch listing.
 
-- **`git_status`**: Returns a formatted `git status` text block (e.g. "On branch eval / Your branch is ahead..."). `return_model: null`, no unwrap needed.
-- **`git_diff_unstaged`** / **`git_diff_staged`** / **`git_diff`**: All return unified diff text. `return_model: null`.
-- **`git_log`**: Returns formatted commit history lines with commit hash, author object repr, date, and message. Not JSON. `return_model: null`.
-- **`git_show`**: Returns commit contents as formatted text. `return_model: null`.
-- **`git_branch`**: Returns branch listing with `*` marking the active branch. `return_model: null`.
-
-The JSON-unwrap check was applied: none of the string responses parsed as JSON (`json.loads()` would fail on all of them). The `_json_unwrap` annotation was not applied to any entry.
+This matches the server's design: a human-readable text surface over local git rather than a JSON API, so `-> Any` is the honest, final shape here — not a gap to close.
 
 ## PII Scrubbing
 
-All `probed_args` entries contained the local filesystem path `/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval`, which includes the user's home directory name. These were replaced with `<example-repo-path>` placeholders, and `"probe_args_scrubbed": true` was added to each entry. The gitignored `git.verify.json` sidecar retains the original paths for the roundtrip verifier.
+Every `probed_args` entry carried the real absolute repo path, which embeds the local username. Each was replaced with `<example-repo-path>` and `"probe_args_scrubbed": true` was set. The gitignored `git.verify.json` sidecar retains the real path for a future roundtrip run. Raw payload dumps used to confirm string-vs-JSON content were deleted after inspection rather than left in the tree, since `git_log`'s raw output embeds a commit author's name and email.
 
-## Generated Module
+## Generated Module and Verification
 
-The module parsed cleanly (`ast.parse` succeeded). All 12 tools were generated with correct `-> Any` return types. The 7 probed tools had their shapes confirmed as plain strings — `-> Any` is the honest return type for a text-output server, not a deficiency. No TypedDict models were emitted because no tool returned a structured dict. The generated wrappers correctly handle optional parameters (`context_lines`, `max_count`, `base_branch`, etc.) via conditional inclusion in the `args` dict.
+The regenerated module parsed cleanly (`ast.parse` succeeded, 12 async functions), all carrying `-> Any` — correct, since no tool produced a structured shape. `eval-kit verify git` reported `ast pass`, `signatures pass`, `idempotency pass`, `pii pass`, `roundtrip skip` (`no_shaped_non_mutating_tool`), for an overall verdict of **pass**.

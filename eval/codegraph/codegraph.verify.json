@@ -1,18 +1,18 @@
 {
   "codegraph_context": {
-    "task": "how does the eval harness verify generated wrappers"
+    "task": "how does the verify.py roundtrip check work"
   },
   "codegraph_explore": {
-    "query": "ServerSpec manifest verify"
+    "query": "verify.py ServerSpec"
   },
   "codegraph_node": {
-    "symbol": "verify"
+    "symbol": "check_roundtrip"
   },
   "codegraph_search": {
-    "query": "manifest"
+    "query": "verify"
   },
   "codegraph_trace": {
-    "from": "verify",
-    "to": "ast"
+    "from": "check_roundtrip",
+    "to": "CheckResult"
   }
 }

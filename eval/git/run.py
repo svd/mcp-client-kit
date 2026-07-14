@@ -41,11 +41,11 @@ async def main() -> None:
     diff_staged = await git.git_diff_staged(caller, repo_path="/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval")
     print(f"git_diff_staged: {type(diff_staged).__name__}")
 
-    # git_diff -> Any
+    # git_diff -> Any  (HEAD~1)
     diff = await git.git_diff(caller, repo_path="/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval", target="HEAD~1")
     print(f"git_diff: {type(diff).__name__}")
 
-    # git_show -> Any
+    # git_show -> Any  (HEAD)
     show = await git.git_show(caller, repo_path="/Users/Sviataslau_Svirydau/src/mcp-client-kit-eval", revision="HEAD")
     print(f"git_show: {type(show).__name__}")
 

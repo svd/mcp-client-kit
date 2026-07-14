@@ -2,52 +2,71 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-06-19T22:43:22Z
-- **Duration:** 3m 20s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-07-14T08:24:05Z
+- **Duration:** 6m 4s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
 
-## Tool Inventory
+## Tool inventory
 
-The `@modelcontextprotocol/server-everything` server exposes **13 tools** in total. This server is the MCP reference implementation — it exercises many protocol features (annotations, resource links, binary content, long-running operations, structured output, elicitation) rather than exposing real-world data.
+The `@modelcontextprotocol/server-everything` server exposes **13 tools**
+total — the MCP reference implementation, exercising protocol features
+(annotations, resource links, binary content, structured output, long-running
+operations, elicitation) rather than real-world data.
 
-**10 tools were probed** (all non-side-effect tools):
+**All 13 tools were probed.** As a non-interactive subagent, selection used
+the "probe all non-mutating tools" fallback: no tool name/description matched
+the mutating-keyword heuristic, so nothing was skipped, including the two
+"toggle" tools. `trigger-long-running-operation` used `duration=1, steps=1`
+to keep the call fast. No discriminator candidates were flagged.
 
-- `echo`, `get-annotated-message`, `get-env`, `get-resource-links`, `get-resource-reference`, `get-structured-content`, `get-sum`, `get-tiny-image`, `gzip-file-as-resource`, `simulate-research-query`
+## Interesting observations
 
-**3 tools were skipped** as side-effecting or blocking:
+**Most tools return plain `str`**: 11 of 13 surfaced as
+`_observed_shape: "str"`, because `McpCaller` normalizes MCP content blocks
+down to their text portion — any tool wrapping its real payload in an image,
+resource, or resource_link block loses that structure to the probe.
 
-- `toggle-simulated-logging` — toggling server state
-- `toggle-subscriber-updates` — toggling server state
-- `trigger-long-running-operation` — could block for 10+ seconds with no interesting return shape
+**Binary/resource content is genuinely invisible, not just loosely typed.**
+`get-tiny-image` and `get-resource-links` surfaced only descriptive text
+(e.g. "Here's the image you requested:"). `get-resource-reference`
+(embedded Text/Blob resource) did the same for both variants. Most
+strikingly, `gzip-file-as-resource` with `outputType="resource"` returned an
+**empty string** — that variant carries no text alongside the binary gzip
+blob, confirmed with a direct `mcpgen call`. All four stayed `-> Any` with a
+`_note` explaining why.
 
-## Interesting Observations
+**`get-env`** returned a genuine `dict[str, str]` of ~32 process env vars
+(`PATH`, `HOME`, `npm_config_*`, ...), but the field set is specific to the
+probing machine and wouldn't generalize (CI, other OS/user). Minting a
+32-field `TypedDict` from one dump would overfit, so `fields` was cleared and
+the return stays `Any`, noting the observed keys as evidence.
 
-**Most tools return plain `str`**: The probe showed that 9 of 10 probed tools surface as `_observed_shape: "str"`. This is expected for the `everything` server — it demonstrates MCP protocol features (annotations, resource links, image blobs) whose structured content lives inside the MCP envelope (content array), not in a parsed dict. The `mcpgen` probe extracts the text/content field, so any tool that wraps a message, image, resource URI, or binary blob in an MCP text or image content type surfaces as `str`.
+**`get-structured-content`** is the one tool with genuinely stable
+structure — its description says it demonstrates MCP's structured-content +
+output-schema feature. Probed with `location="New York"`, it returned
+`{temperature: int, conditions: str, humidity: int}`.
 
-**`get-tiny-image`**: The description says "tiny MCP logo image", and the probe confirmed `_observed_shape: "str"`. This is consistent with the binary/image note in the skill — the probe reads only the text envelope; the actual `data` + `mimeType` struct is invisible. The wrapper stays `-> Any` and the caller must handle binary content at runtime.
-
-**`get-env`**: Returns a dict of all process environment variables (all `str` values). While it does return a structured dict, the field set is highly environment-specific (npm runtime vars, system paths, usernames) and not stable across environments. This tool is also a minor security concern (exposes all env vars). Modelling it as a TypedDict would produce a spuriously specific model tied to the probe environment, so it was left as `-> Any`.
-
-**`get-structured-content`**: The only tool returning a stable, meaningful dict. Probed across all 3 city variants (`New York`, `Chicago`, `Los Angeles`) — all returned `{ temperature: int, conditions: str, humidity: int }`. The shape is consistent across all variants, confirming a single `WeatherContent` TypedDict is appropriate.
-
-**`gzip-file-as-resource`**: Probed with both `outputType` values (`resourceLink`, `resource`). Both variants surfaced as `str` — the gzip output is returned as a resource blob or link whose content is opaque in the text envelope.
-
-## Shape Decisions
+## Shape decisions
 
 | Tool | Return type | Reasoning |
 |---|---|---|
-| `echo` | `Any` | Returns the echoed string — plain `str`, no TypedDict |
-| `get-annotated-message` | `Any` | Annotation metadata lives in MCP envelope, not in parsed text |
-| `get-env` | `Any` | Dynamic env var dict; environment-specific, not stable |
-| `get-resource-links` | `Any` | Resource URIs as text; no meaningful dict structure observed |
-| `get-resource-reference` | `Any` | Resource reference as text; both variants return `str` |
-| `get-structured-content` | `WeatherContent` | Stable 3-field dict across all city variants |
-| `get-sum` | `Any` | Numeric result as `str`; no dict |
-| `get-tiny-image` | `Any` | Binary image content; probe reads only text envelope |
-| `gzip-file-as-resource` | `Any` | Compressed binary; both variants return `str` |
-| `simulate-research-query` | `Any` | Long text result; no dict structure |
+| `echo`, `get-sum`, `simulate-research-query` | `Any` | Plain prose `str` results |
+| `get-annotated-message` | `Any` | Annotation metadata lives in the MCP envelope; probed all 3 `messageType` values |
+| `get-env` | `Any` | Dynamic, machine-specific env var dict |
+| `get-resource-links`, `get-resource-reference` | `Any` | resource_link/embedded-resource blocks invisible to text-only probe |
+| `get-structured-content` | `WeatherConditions` | Stable 3-field dict, `unwrap: []`, single record |
+| `get-tiny-image` | `Any` | Image content block; only descriptive text visible |
+| `gzip-file-as-resource` | `Any` | `resourceLink` gives short text; `resource` gives none (binary-only) |
+| `toggle-simulated-logging`, `toggle-subscriber-updates`, `trigger-long-running-operation` | `Any` | Plain confirmation/completion `str` |
 
-**`WeatherContent` TypedDict:** `temperature: int`, `conditions: str`, `humidity: int`. The `location` parameter renders as `Literal['New York', 'Chicago', 'Los Angeles']` automatically from the input schema enum.
+**`WeatherConditions`:** `temperature: int`, `conditions: str`, `humidity:
+int`. `location` renders as `Literal['New York', 'Chicago', 'Los Angeles']`
+automatically from the input schema enum.
 
-## Module Status
+## Module status
 
-The generated module (`everything.py`) parsed cleanly via `ast.parse`. The `get_structured_content` function correctly returns `-> WeatherContent` with a `cast(...)` wrapper, while all other functions return `-> Any`. The `location` parameter is correctly typed as `Literal[...]` from the enum constraint. No manual edits were required.
+The regenerated module (`everything.py`) parsed cleanly via `ast.parse`.
+`get_structured_content` returns `-> WeatherConditions` with a `cast(...)`
+wrapper; all other functions honestly return `-> Any`. `eval-kit verify`
+passed all 5 checks (ast, signatures, idempotency, pii, roundtrip), including
+a live roundtrip call to `get-structured-content` that returned the typed
+result. No manual edits to the generated module were required.

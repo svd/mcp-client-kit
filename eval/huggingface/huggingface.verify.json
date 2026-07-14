@@ -1,24 +1,32 @@
 {
   "hf_doc_fetch": {
-    "doc_url": "https://huggingface.co/docs/transformers/index"
+    "doc_url": "https://huggingface.co/docs/accelerate/quicktour"
   },
   "hf_doc_search": {
     "query": ""
   },
-  "hub_repo_details": {
-    "repo_ids": [
-      "google-bert/bert-base-uncased"
-    ],
-    "repo_type": "model",
-    "operations": [
-      "overview"
-    ]
-  },
+  "hub_repo_details": [
+    {
+      "repo_ids": [
+        "bert-base-uncased"
+      ],
+      "operations": [
+        "overview"
+      ]
+    },
+    {
+      "repo_ids": [
+        "squad"
+      ],
+      "repo_type": "dataset",
+      "operations": [
+        "overview",
+        "dataset_structure"
+      ]
+    }
+  ],
   "hub_repo_search": {
-    "query": "bert",
-    "repo_types": [
-      "model"
-    ],
+    "query": "llama",
     "limit": 5
   },
   "paper_search": {
@@ -26,6 +34,13 @@
     "results_limit": 3
   },
   "space_search": {
-    "query": "machine learning"
+    "query": "text to image generation",
+    "limit": 5
+  },
+  "hf_fs": {
+    "cmd": "ls",
+    "args": [
+      "hf://models/trending"
+    ]
   }
 }

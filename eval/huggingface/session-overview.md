@@ -2,53 +2,34 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-06-19T22:45:39Z
-- **Duration:** 3m 42s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-07-14T08:27:49Z
+- **Duration:** 4m 14s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
 
 ## Tool Inventory
 
-The HuggingFace MCP server exposes **8 tools** in total:
+The HuggingFace MCP server currently exposes **7 tools**: `hf_whoami`, `space_search`, `hub_repo_search`, `hub_repo_details`, `hf_fs`, `hf_doc_search`, `hf_doc_fetch`. **All 7 were probed; none were skipped** — none matched the mutating-keyword heuristic.
 
-| Tool | Category |
-|------|----------|
-| `hf_whoami` | Auth/info |
-| `space_search` | Search |
-| `hub_repo_search` | Search |
-| `paper_search` | Search |
-| `hub_repo_details` | Fetch |
-| `hf_doc_search` | Documentation |
-| `hf_doc_fetch` | Documentation |
-| `gr1_z_image_turbo_generate` | Image generation (skipped) |
-
-**Probed:** 7 tools. **Skipped:** 1 (`gr1_z_image_turbo_generate` — image-generating, mutating, and would return binary/media content).
+Note on drift: a prior eval of this server (2026-06-19) recorded 8 tools, including `paper_search` and an image-generating `gr1_z_image_turbo_generate` (Space-backed, dynamic tool). Neither appeared in this run's `mcpgen list` output — the server's tool surface has changed. This eval reflects only tools live on the server at run time; nothing was fabricated from stale prior-run data.
 
 ## Probing Results
 
-The most notable finding of this eval run is that **all 7 probed tools return pre-formatted Markdown text strings**, not structured JSON objects. The HuggingFace MCP server is a text-first server — every response is a human-readable Markdown document rendered server-side.
+The dominant finding, consistent with the prior run, is that **all 7 probed tools return pre-formatted Markdown/plain-text strings**, not structured JSON — even tools that clearly wrap structured data internally (`hub_repo_search`, `hub_repo_details`, `space_search`). `_observed_shape: "str"` was accurate and honest for every tool; JSON-in-string detection (`json.loads()`) was applied and failed on all payloads, confirming genuine text rather than serialized JSON.
 
-This was confirmed via a raw `mcpgen call` inspection:
+One wrinkle: `hf_doc_search` was probed with three queries. An empty query (documented "discovery mode") returned a clean Markdown catalog of ~60 doc products. A semantic query (`"transformers pipeline"`) triggered a transient `500 Internal Server Error`; a retry with a different query (`"quicktour"`) succeeded immediately, confirming the 500 was query-specific/transient, not systemic auth/quota failure. Since not every non-empty response was an error, `_probe_status: "inconclusive"` wasn't warranted; a `_probe_note` records the transient failure instead. `hf_doc_fetch` was then probed with a real doc URL surfaced from the successful search, returning actual document text.
 
-- `hf_whoami` returns a plain text instruction string directing users to sign up at `hf.co`.
-- `space_search` returns a Markdown table of results with emoji-prefixed space names, links, scores, and metadata — all as a single formatted string.
-- All other probed tools followed the same pattern.
-
-The `_observed_shape: "str"` emitted by mcpgen's probe is accurate and honest in every case. JSON-in-string detection was applied (checking if `json.loads()` would succeed), but all responses are genuine plain/Markdown text that is not JSON-serialized.
+`hf_whoami` returned only anonymous-usage guidance (join/settings links) — no identity to scrub.
 
 ## Shape Decisions
 
 Since all probed tools return `str`:
 
-- **`unwrap`:** `[]` for all tools — there is no vendor envelope to unwrap; the MCP `text` content field contains the final string value directly.
-- **`return_model`:** `null` for all tools — `TypedDict` models are not applicable to plain string responses. The skill's rule against setting `return_model` to a Python primitive name applies here: `null` is correct.
-- **`return_container`:** omitted — no list of records is returned.
+- **`unwrap`:** `[]` for all tools — no vendor envelope; the MCP `text` content field is the final string value.
+- **`return_model`:** `null` for all tools — a `TypedDict` isn't applicable to plain string responses; per the skill's guard, no primitive-name model was fabricated.
+- **`return_container`:** omitted — no list of records returned.
 - **`fields`:** `{}` for all tools — no stable scalar fields to extract from a string.
 
-No discriminator candidates were identified: `limit` appeared in multiple tools but is a pagination/window parameter auto-disqualified in Pass 1.
-
-## Skipped Tool: gr1_z_image_turbo_generate
-
-This tool generates images via the Z-Image diffusion pipeline and returns MCP `image`-type content (base64 + MIME type). Per skill rules for image/binary/media tools, it was skipped: the wrapper correctly stays `-> Any` and the shape is left un-modeled. The tool has 33 `resolution` enum values; these are correctly encoded as `Literal[...]` in the generated signature.
+No discriminator candidates were flagged by `mcpgen list --schema` (no stderr advisory), and none were found by inspection — `limit` recurs across tools but is a pagination parameter, auto-disqualified. `probed_args` required no PII scrubbing: all values are public strings (repo IDs like `bert-base-uncased`/`squad`, search terms, `hf://` URIs, doc URLs).
 
 ## Generated Module
 
-The regenerated `huggingface.py` parsed cleanly (AST check passed). All 8 tool functions are present. Enum parameters (`resolution`, `repo_type`, `operations`, `sort`) are typed as `Literal[...]` automatically by codegen. All functions return `-> Any`, which is the honest return type given that every tool returns a plain string. No TypedDict models were emitted (none were warranted).
+The regenerated `huggingface.py` (13.0 KB, 7 async functions) parsed cleanly via `ast.parse`. A second `codegen` invocation with identical inputs produced byte-identical output (idempotency confirmed by diff). All functions return `-> Any`, the honest type given every tool returns unstructured text — no TypedDict models were warranted. `eval-kit verify huggingface` passed `ast`, `signatures`, `idempotency`, and `pii`; `roundtrip` was skipped (no shaped, non-mutating tool exists to round-trip). Final verdict: **pass**.

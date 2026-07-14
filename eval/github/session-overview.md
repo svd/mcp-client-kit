@@ -1,45 +1,45 @@
-# Session Overview: github MCP Server
+# github — session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-06-19T22:46:03Z
-- **Duration:** 8m 33s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-07-14T08:27:52Z
+- **Duration:** 10m 50s (wall-clock around the generate-mcp-wrappers skill run)
 
-## Server Summary
+## Summary
 
-The GitHub Copilot MCP server (`https://api.githubcopilot.com/mcp/`) exposes **44 tools** covering repository operations, issue and PR management, search, releases, tags, collaborators, teams, secret scanning, and code review. Authentication uses a Bearer token (`GITHUB_PAT`).
+The GitHub MCP server (`https://api.githubcopilot.com/mcp/`, bearer auth) exposes
+44 tools. Following the subagent fallback (no `AskUserQuestion`), every non-mutating
+tool was probed and every likely-mutating tool was skipped — 27 probed, 17 skipped.
+Skipped tools: the keyword-flagged mutators (`create_branch`,
+`create_or_update_file`, `create_pull_request`, `create_repository`, `delete_file`,
+`fork_repository`, `issue_write`, `merge_pull_request`, `pull_request_review_write`,
+`push_files`, `request_copilot_review`, `sub_issue_write`, `update_pull_request`,
+`update_pull_request_branch`) plus three comment/reaction tools that write real
+content despite not matching the mutating-keyword list (`add_comment_to_pending_review`,
+`add_issue_comment`, `add_reply_to_pull_request_comment`).
 
-## Tools Probed vs Skipped
+All read probes ran against `microsoft/vscode` (real tag `1.128.0`, PR `#325746`,
+issue `#250000` — resolved live via discovery calls rather than guessed, after an
+initial guessed PR/issue number 404'd). 19 of 27 probed tools now return a shaped
+`TypedDict` or `list[TypedDict]` (`CommitDetail`, `Label`, `Release` — reused for both
+`get_latest_release` and `get_release_by_tag`, `GitHubUser`, `GitTag`, `TeamOrgSummary`,
+`Branch`, `CommitSummary`, `IssueSummary` unwrapped from `issues`, `PullRequestSummary`,
+`ReleaseSummary`, `TagSummary`, `SecretScanResult`, and six `Search*Result` envelopes
+carrying `total_count`/`incomplete_results`).
 
-- **Probed (26 tools):** All non-mutating read-only tools.
-- **Skipped (18 tools, mutating):** `add_comment_to_pending_review`, `add_issue_comment`, `add_reply_to_pull_request_comment`, `create_branch`, `create_or_update_file`, `create_pull_request`, `create_repository`, `delete_file`, `fork_repository`, `issue_write`, `merge_pull_request`, `pull_request_review_write`, `push_files`, `request_copilot_review`, `run_secret_scanning`, `sub_issue_write`, `update_pull_request`, `update_pull_request_branch`.
+Three tools returned genuine live errors rather than data and are marked
+`"_probe_status": "inconclusive"`: `get_team_members` (the authenticated token has
+no team memberships — `get_teams` confirmed an empty `teams: []`), `list_issue_types`
+(404 — the `microsoft` org has no custom issue-types feature enabled), and
+`list_repository_collaborators` (403 — token lacks the collaborators scope on
+`microsoft/vscode`). `issue_read` and `pull_request_read` stay `Any`: their `method`
+argument switches between dict-shaped (`get`) and list-shaped (`get_comments`,
+`get_files`) responses, structurally incompatible for a single model per the
+discriminator-fallback rule. `get_file_contents` stays `Any` (plain `str`, raw README
+content). `list_issue_fields` returned an empty list — inner element shape
+unobservable from zero samples.
 
-## Discriminator Candidates
-
-The `mcpgen list` output flagged 14 discriminator candidates. After Pass 1 auto-disqualification, all were discarded as pagination/identity/filter params (`after`, `body`, `head`, `issue_number`, `message`, `organization`, `perPage`, `sha`, `since`, `state`, `tag`, `title`) or params spanning only mutating tools. Two functionally important discriminators were handled manually: `method` on `issue_read` (4 enum values: get, get_comments, get_sub_issues, get_labels) and `method` on `pull_request_read` (9 enum values). These were multi-probed but the divergent response shapes (single issue dict vs list of comments) widened to `Any` — correctly left as `return_model: null`.
-
-## Interesting Responses and Shape Decisions
-
-**`get_me`** — no-arg, returns a clean dict with `login`, `id`, `profile_url`, `avatar_url`, plus a nested `details` block. Shaped as `GitHubUser` using top-level scalar fields.
-
-**`get_latest_release` / `get_release_by_tag`** — both return the same rich release object with 16+ stable top-level scalar fields. Shared `return_model: "Release"` with identical `fields` — no collision. `get_tag` returns a lighter `{ref, url, object, node_id}` structure shaped as `GitTag`.
-
-**`list_issues`** — unusually, the response is wrapped in a `{issues: [...], totalCount: int, pageInfo: {...}}` envelope, unlike `list_pull_requests` which returns a bare list. Unwrap set to `["issues"]` with `return_container: "list"` and model `IssueSummary`.
-
-**`issue_read` and `pull_request_read`** — both are method-discriminated and returned `_observed_shape: "Any"` after multi-probe across divergent method values. The `pull_request_read` probe with `method=get` for PR #247000 also returned a string (formatted markdown text), suggesting the server renders some methods as text. Left as `return_model: null`.
-
-**`list_issue_types`** — returned `"str"` rather than a list. This is likely an error or formatted text from the `microsoft` org. Left as plain `Any`.
-
-**`list_repository_collaborators`** — returned `"str"`. The endpoint for `microsoft/vscode` likely returned a formatted message rather than a JSON list, possibly due to organization privacy settings. Left as `Any`.
-
-**`get_file_contents`** — returns raw file contents as `"str"` (the README.md content). No TypedDict warranted for a text blob.
-
-**`get_team_members`** — returned `NoneType` for `microsoft/vscode`. This is likely an access restriction (org team membership not accessible with the PAT's scope). Marked `_probe_status: "inconclusive"` to distinguish from a genuine `None`-returning tool.
-
-**`list_issue_fields`** — returned `[<empty>]`. Inner element shape unobservable; `microsoft` org may not have custom issue fields configured. Left as `return_container: "list"` with no model.
-
-**Search tools** (`search_code`, `search_commits`, `search_issues`, `search_pull_requests`, `search_repositories`, `search_users`) — all return `{total_count, incomplete_results, items: [...]}` envelope. `search_code` returned empty items for `McpCaller` in `vscode`. Each shaped with a distinct result model capturing the top-level envelope scalars.
-
-## Generated Module
-
-Module `eval/github/github.py` (86 KB, 44 tools) parsed cleanly via `ast.parse`. Shaped tools return their `TypedDict` return models; polymorphic / str-returning / inconclusive tools remain `-> Any`. No naming collisions detected in the 17 distinct `return_model` names.
+The regenerated module (91,139 bytes) parses cleanly via `ast.parse`. `eval-kit
+verify github` passed 4/5 checks (`ast`, `idempotency`, `pii`, `roundtrip`), with
+`signatures` skipped for the same three inconclusive tools noted above — an honest,
+expected skip rather than a failure.

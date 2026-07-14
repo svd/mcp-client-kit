@@ -23,7 +23,7 @@ if (args === undefined || args === null) {
 let resolvedArgs = args
 if (typeof resolvedArgs === 'string' && resolvedArgs !== 'all') {
   try { resolvedArgs = JSON.parse(resolvedArgs) } catch(e) {}
-  if (typeof resolvedArgs === 'string') {
+  if (typeof resolvedArgs === 'string' && resolvedArgs !== 'all') {
     resolvedArgs = resolvedArgs.trim().split(/[\s,]+/).filter(Boolean)
   }
 }

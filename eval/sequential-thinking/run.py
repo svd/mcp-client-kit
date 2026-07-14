@@ -21,19 +21,37 @@ async def main() -> None:
 
     # Skipped mutating tools: (none — sequentialthinking is the only tool and is treated as read-only)
 
-    # sequentialthinking -> ThoughtResult
-    thought_result = await sequential_thinking.sequentialthinking(
+    # sequentialthinking -> ThoughtResult  (probed variant 1: initial thought)
+    step1 = await sequential_thinking.sequentialthinking(
         caller,
-        thought="This is the first step of solving the problem.",
-        nextThoughtNeeded=False,
+        thought="Step 1: identify the problem.",
+        nextThoughtNeeded=True,
         thoughtNumber=1,
-        totalThoughts=1,
+        totalThoughts=2,
     )
     print(
-        f"sequentialthinking: thoughtNumber={thought_result.get('thoughtNumber')!r}"
-        f"  totalThoughts={thought_result.get('totalThoughts')!r}"
-        f"  nextThoughtNeeded={thought_result.get('nextThoughtNeeded')!r}"
-        f"  thoughtHistoryLength={thought_result.get('thoughtHistoryLength')!r}"
+        f"sequentialthinking(1): thoughtNumber={step1.get('thoughtNumber')!r}"
+        f"  totalThoughts={step1.get('totalThoughts')!r}"
+        f"  nextThoughtNeeded={step1.get('nextThoughtNeeded')!r}"
+        f"  thoughtHistoryLength={step1.get('thoughtHistoryLength')!r}"
+    )
+
+    # sequentialthinking -> ThoughtResult  (probed variant 2: branch from thought 1)
+    step2 = await sequential_thinking.sequentialthinking(
+        caller,
+        thought="Step 2 (branch): explore an alternative approach.",
+        nextThoughtNeeded=False,
+        thoughtNumber=2,
+        totalThoughts=2,
+        branchFromThought=1,
+        branchId="alt-approach",
+    )
+    print(
+        f"sequentialthinking(2): thoughtNumber={step2.get('thoughtNumber')!r}"
+        f"  totalThoughts={step2.get('totalThoughts')!r}"
+        f"  nextThoughtNeeded={step2.get('nextThoughtNeeded')!r}"
+        f"  branches={step2.get('branches')!r}"
+        f"  thoughtHistoryLength={step2.get('thoughtHistoryLength')!r}"
     )
 
 

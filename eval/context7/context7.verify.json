@@ -1,10 +1,10 @@
 {
   "query-docs": {
-    "libraryId": "/psf/requests",
-    "query": "How to make a GET request"
+    "libraryId": "/reactjs/react.dev",
+    "query": "React useEffect cleanup function examples"
   },
   "resolve-library-id": {
-    "query": "HTTP client library for Python",
-    "libraryName": "requests"
+    "query": "how to use hooks",
+    "libraryName": "React"
   }
 }

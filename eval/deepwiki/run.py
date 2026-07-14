@@ -25,20 +25,20 @@ async def main() -> None:
 
     # read_wiki_structure -> Any
     # Get a list of documentation topics for a GitHub repository.
-    structure = await deepwiki.read_wiki_structure(caller, repoName="microsoft/vscode")
+    structure = await deepwiki.read_wiki_structure(caller, repoName="facebook/react")
     print(f"read_wiki_structure: {type(structure).__name__}")
 
     # read_wiki_contents -> Any
     # View documentation about a GitHub repository.
-    contents = await deepwiki.read_wiki_contents(caller, repoName="microsoft/vscode")
+    contents = await deepwiki.read_wiki_contents(caller, repoName="facebook/react")
     print(f"read_wiki_contents: {type(contents).__name__}")
 
     # ask_question -> Any
     # Ask any question about a GitHub repository and get an AI-powered response.
     answer = await deepwiki.ask_question(
         caller,
-        repoName="microsoft/vscode",
-        question="What is the main architecture?",
+        repoName="facebook/react",
+        question="What is the high-level architecture of this repository?",
     )
     print(f"ask_question: {type(answer).__name__}")
 

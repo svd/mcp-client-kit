@@ -2,8 +2,7 @@
   "get_commit": {
     "owner": "microsoft",
     "repo": "vscode",
-    "sha": "main",
-    "detail": "stats"
+    "sha": "main"
   },
   "get_file_contents": {
     "owner": "microsoft",
@@ -22,12 +21,12 @@
   "get_release_by_tag": {
     "owner": "microsoft",
     "repo": "vscode",
-    "tag": "1.100.2"
+    "tag": "1.128.0"
   },
   "get_tag": {
     "owner": "microsoft",
     "repo": "vscode",
-    "tag": "1.100.2"
+    "tag": "1.128.0"
   },
   "get_team_members": {
     "org": "microsoft",
@@ -38,13 +37,13 @@
       "method": "get",
       "owner": "microsoft",
       "repo": "vscode",
-      "issue_number": 248765
+      "issue_number": 250000
     },
     {
       "method": "get_comments",
       "owner": "microsoft",
       "repo": "vscode",
-      "issue_number": 248765,
+      "issue_number": 250000,
       "perPage": 3
     }
   ],
@@ -96,13 +95,13 @@
       "method": "get",
       "owner": "microsoft",
       "repo": "vscode",
-      "pullNumber": 247000
+      "pullNumber": 325746
     },
     {
       "method": "get_files",
       "owner": "microsoft",
       "repo": "vscode",
-      "pullNumber": 247000,
+      "pullNumber": 325746,
       "perPage": 3
     }
   ],
@@ -127,7 +126,14 @@
     "perPage": 3
   },
   "search_users": {
-    "query": "svd",
+    "query": "torvalds",
     "perPage": 3
+  },
+  "run_secret_scanning": {
+    "owner": "microsoft",
+    "repo": "vscode",
+    "files": [
+      "const key = \"AKIAIOSFODNN7EXAMPLE\";"
+    ]
   }
 }

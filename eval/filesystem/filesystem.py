@@ -141,7 +141,7 @@ read_file.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 't
 
 
 async def read_media_file(caller: McpCaller, *, path: str) -> Any:
-    """Read an image or audio file. Returns the base64 encoded data and MIME type. Only works within allowed directories.
+    """Read a file and return it as a base64-encoded content block with its MIME type. Image and audio files are returned as image/audio content; any other file type is returned as an embedded resource. Only works within allowed directories.
 
     Args:
         path:

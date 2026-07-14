@@ -22,19 +22,20 @@ async def main() -> None:
     # Skipped mutating tools: (none — both tools are read-only)
 
     # resolve_library_id -> Any
-    # Must be called first to obtain a valid library ID for query_docs
+    # Must be called first to obtain a valid Context7-compatible library ID
+    # before query_docs can be used (per tool description).
     lib_result = await context7.resolve_library_id(
         caller,
-        query="HTTP client library for Python",
-        libraryName="requests",
+        query="how to use hooks",
+        libraryName="React",
     )
     print(f"resolve_library_id: {type(lib_result).__name__}")
 
     # query_docs -> Any
     docs_result = await context7.query_docs(
         caller,
-        libraryId="/psf/requests",
-        query="How to make a GET request",
+        libraryId="/reactjs/react.dev",
+        query="React useEffect cleanup function examples",
     )
     print(f"query_docs: {type(docs_result).__name__}")
 

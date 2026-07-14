@@ -11,8 +11,7 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "sha": "main",
-      "detail": "stats"
+      "sha": "main"
     }
   },
   "get_file_contents": {
@@ -113,7 +112,7 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "tag": "1.100.2"
+      "tag": "1.128.0"
     }
   },
   "get_tag": {
@@ -129,7 +128,7 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "tag": "1.100.2"
+      "tag": "1.128.0"
     }
   },
   "get_team_members": {
@@ -146,9 +145,12 @@
   },
   "get_teams": {
     "unwrap": [],
-    "return_model": null,
+    "return_model": "TeamOrgSummary",
+    "return_container": "list",
     "input_overrides": {},
-    "fields": {},
+    "fields": {
+      "org": "str"
+    },
     "source": "live",
     "probed_args": {}
   },
@@ -163,13 +165,13 @@
         "method": "get",
         "owner": "microsoft",
         "repo": "vscode",
-        "issue_number": 248765
+        "issue_number": 250000
       },
       {
         "method": "get_comments",
         "owner": "microsoft",
         "repo": "vscode",
-        "issue_number": 248765,
+        "issue_number": 250000,
         "perPage": 3
       }
     ]
@@ -226,7 +228,8 @@
     "source": "live",
     "probed_args": {
       "owner": "microsoft"
-    }
+    },
+    "_probe_status": "inconclusive"
   },
   "list_issues": {
     "unwrap": ["issues"],
@@ -305,7 +308,8 @@
       "owner": "microsoft",
       "repo": "vscode",
       "perPage": 3
-    }
+    },
+    "_probe_status": "inconclusive"
   },
   "list_tags": {
     "unwrap": [],
@@ -334,16 +338,33 @@
         "method": "get",
         "owner": "microsoft",
         "repo": "vscode",
-        "pullNumber": 247000
+        "pullNumber": 325746
       },
       {
         "method": "get_files",
         "owner": "microsoft",
         "repo": "vscode",
-        "pullNumber": 247000,
+        "pullNumber": 325746,
         "perPage": 3
       }
     ]
+  },
+  "run_secret_scanning": {
+    "unwrap": [],
+    "return_model": "SecretScanResult",
+    "input_overrides": {},
+    "fields": {
+      "numBytesScanned": "int",
+      "blobsScanned": "int"
+    },
+    "source": "live",
+    "probed_args": {
+      "owner": "microsoft",
+      "repo": "vscode",
+      "files": [
+        "const key = \"<example-secret-string>\";"
+      ]
+    }
   },
   "search_code": {
     "unwrap": [],
@@ -425,7 +446,7 @@
     },
     "source": "live",
     "probed_args": {
-      "query": "svd",
+      "query": "torvalds",
       "perPage": 3
     }
   }

@@ -21,34 +21,43 @@ SERVER_URL = "https://huggingface.co/mcp"
 async def main() -> None:
     caller = McpBridgeCaller(url=SERVER_URL)
 
-    # Skipped mutating tools: gr1_z_image_turbo_generate
+    # All discovered tools are read-only; nothing was skipped.
 
     # hf_whoami -> Any  (identity / auth status)
     whoami = await huggingface.hf_whoami(caller)
     print(f"hf_whoami: {type(whoami).__name__}")
 
-    # hf_doc_search -> Any  (doc structure / discovery)
+    # hf_doc_search -> Any  (empty query = discovery mode, per tool description)
     doc_search = await huggingface.hf_doc_search(caller, query="")
     print(f"hf_doc_search: {type(doc_search).__name__}")
 
     # hf_doc_fetch -> Any  (fetch a specific doc page)
-    doc = await huggingface.hf_doc_fetch(caller, doc_url="https://huggingface.co/docs/transformers/index")
+    doc = await huggingface.hf_doc_fetch(
+        caller, doc_url="https://huggingface.co/docs/accelerate/quicktour"
+    )
     print(f"hf_doc_fetch: {type(doc).__name__}")
 
+    # hf_fs -> Any  (browse hf:// resources; ls trending models)
+    listing = await huggingface.hf_fs(caller, cmd="ls", args=["hf://models/trending"])
+    print(f"hf_fs: {type(listing).__name__}")
+
     # hub_repo_search -> Any  (search repos)
-    repo_results = await huggingface.hub_repo_search(caller, query="bert", repo_types=["model"], limit=5)
+    repo_results = await huggingface.hub_repo_search(caller, query="llama", limit=5)
     print(f"hub_repo_search: {type(repo_results).__name__}")
 
     # hub_repo_details -> Any  (model overview)
-    repo_detail = await huggingface.hub_repo_details(caller, repo_ids=["google-bert/bert-base-uncased"], repo_type="model", operations=["overview"])
+    # verify.json probed a second variant (repo_type="dataset",
+    # operations=["overview", "dataset_structure"]) but hub_repo_details has no
+    # discriminator field in shapes.json, so only the first probed entry is used.
+    repo_detail = await huggingface.hub_repo_details(
+        caller, repo_ids=["bert-base-uncased"], operations=["overview"]
+    )
     print(f"hub_repo_details: {type(repo_detail).__name__}")
 
-    # paper_search -> Any  (ML paper search)
-    papers = await huggingface.paper_search(caller, query="attention is all you need", results_limit=3)
-    print(f"paper_search: {type(papers).__name__}")
-
     # space_search -> Any  (semantic space discovery)
-    spaces = await huggingface.space_search(caller, query="machine learning")
+    spaces = await huggingface.space_search(
+        caller, query="text to image generation", limit=5
+    )
     print(f"space_search: {type(spaces).__name__}")
 
 

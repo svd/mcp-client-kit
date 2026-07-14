@@ -2,18 +2,16 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-06-19T22:43:23Z
-- **Duration:** 1m 54s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-07-14T08:24:04Z
+- **Duration:** 2m 11s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
 
 ## Server Overview
 
 The `sqlite` MCP server (`mcp-server-sqlite`) exposes 6 tools for interacting with a local SQLite
-database file (`/tmp/eval.db`). The server was launched via `uvx mcp-server-sqlite --db-path /tmp/eval.db`
-with no authentication required.
+database file (`/tmp/eval.db`), launched via `uvx mcp-server-sqlite --db-path /tmp/eval.db` with
+no authentication required.
 
 ## Tools Enumerated
-
-All 6 tools were listed via `mcpgen list --schema`:
 
 | Tool | Description | Action |
 |---|---|---|
@@ -24,63 +22,46 @@ All 6 tools were listed via `mcpgen list --schema`:
 | `create_table` | Create a new table | Skipped (mutating) |
 | `append_insight` | Add a business insight to memo | Skipped (mutating) |
 
-3 tools were probed; 3 were skipped as mutating (names contain `write`, `create`, `append`).
-
-No discriminator candidates were detected — no params are shared across tools in a way that
-suggests polymorphic response shapes.
+3 tools were probed; 3 were skipped as mutating. `write_query`/`create_table` match the literal
+mutating-keyword heuristic; `append_insight` was also skipped on semantic grounds (it writes to a
+server-side memo even though "add" isn't in the literal keyword list). No discriminator candidates
+were flagged by `mcpgen list --schema`.
 
 ## Bootstrap Discovery
 
-`mcpgen call sqlite list_tables` was used as the bootstrap discovery call. The database at
-`/tmp/eval.db` contained two tables: `users` and `products`. These table names were used to
-construct probe arguments for `describe_table` and `read_query`.
+`mcpgen probe sqlite list_tables` served as bootstrap discovery. `/tmp/eval.db` — persisted from a
+prior eval run of this server — contained two tables, `users` and `products`, which supplied probe
+arguments for `describe_table` and `read_query`. All three read-only tools were re-probed fresh
+this run to confirm reproducibility.
 
 ## Probe Results and Shape Decisions
 
-### `list_tables`
+**`list_tables`** — called with no args, returned exactly 2 `{"name": str}` records. Modeled as
+`TableName` TypedDict, `return_container: "list"`, no unwrap needed. `probed_args` empty, no PII.
 
-Called with no arguments. Response was a list of `{"name": str}` objects — exactly 2 entries
-(one per table). The shape is simple, stable, and unconditionally a list. Decision: model as
-`TableName` TypedDict with a single `name: str` field, `return_container: "list"`. No unwrap
-needed — the response is already a bare list. No PII in `probed_args` (empty).
+**`describe_table`** — probed against both `users` and `products`; both returned SQLite's standard
+`PRAGMA table_info(...)` shape: `cid`/`notnull`/`pk` (int), `name`/`type` (str), `dflt_value`
+(`Any | None`, genuinely nullable — columns without defaults return `None`). Modeled as
+`ColumnInfo` TypedDict, `return_container: "list"`. Table names are functional values, not PII.
 
-### `describe_table`
-
-Probed twice: once for `users` and once for `products`. Both responses returned lists of column
-info records matching SQLite's standard `PRAGMA table_info(...)` format: `cid` (int), `name`
-(str), `type` (str), `notnull` (int), `dflt_value` (Any|None, nullable for columns without
-defaults), `pk` (int). The shapes merged cleanly — both tables happened to have the same column
-descriptor structure. Decision: model as `ColumnInfo` TypedDict with `total=False` (all fields
-`dflt_value` may be None). `return_container: "list"`. No unwrap needed. `probed_args` contains
-generic table names (`users`, `products`) — not PII, no scrubbing required.
-
-### `read_query`
-
-Probed twice with `SELECT * FROM users LIMIT 2` and `SELECT * FROM products LIMIT 2`. The merged
-`_observed_shape` was a union of both tables' columns: `id` (int), `name` (str), `score` (float),
-`price` (float), `in_stock` (int). This merged shape is an artifact of the specific probes and
-does NOT represent a stable contract. `read_query` executes arbitrary SELECT queries — callers
-can request any columns from any tables with any aliases. A `TypedDict` derived from two specific
-test queries would be a misleading lie for all other queries. Decision: leave `return_model: null`,
-keep `return_container: "list"` (it always returns rows as a list). Return type stays `-> Any`.
-`probed_args` contains generic SQL queries against generic table names — not PII, no scrubbing
-needed.
+**`read_query`** — probed with two different SELECTs against `users` and `products`. The merged
+`_observed_shape` unioned unrelated column sets (`id`/`name`/`email`/`active`/`score` vs.
+`id`/`name`/`title`/`price`/`stock`/`discontinued`), because this tool executes arbitrary
+caller-supplied SQL — its output shape is a function of the query, not a fixed contract. A
+`TypedDict` from two sample queries would misrepresent all other queries. Decision: `return_model:
+null`, `return_container: "list"`, return type stays `-> Any`.
 
 ## Interesting Observations
 
-- The `append_insight` tool (add business insight to memo) is an unusual affordance — it writes
-  to a side-channel "memo" resource rather than a database table. This suggests the server is
-  designed for data analysis workflows where insights are collected alongside queries.
-- The `dflt_value` field in `describe_table` is correctly typed as `Any | None` — columns without
-  a default value return `None`, while those with defaults return the default as a string.
-- No envelope wrapping was observed. All three probed tools return bare lists directly, so
-  `unwrap: []` (no-op) is correct for all shaped tools. The codegen uses `cast()` rather than
-  `_dig_list` since no path traversal is needed.
+- `append_insight` writes to a side-channel "memo" resource rather than a table, suggesting the
+  server targets data-analysis workflows where insights accompany queries.
+- No envelope wrapping was observed anywhere; all three probed tools return bare lists, so
+  `unwrap: []` is correct throughout, and codegen uses `cast()` rather than `_dig_list`.
 
 ## Final Verification
 
-The regenerated module (`sqlite.py`, 3194 bytes) parsed cleanly with `ast.parse`. Signatures:
-- `describe_table -> list[ColumnInfo]`
-- `list_tables -> list[TableName]`
-- `read_query -> Any` (intentional — variable schema)
-- `write_query`, `create_table`, `append_insight` → `-> Any` (mutating, not shaped)
+The regenerated module (`sqlite.py`, 3194 bytes) parsed cleanly. Signatures: `describe_table ->
+list[ColumnInfo]`, `list_tables -> list[TableName]`, `read_query -> Any` (intentional), and the
+three mutating tools stay `-> Any`. `eval-kit verify sqlite` reported verdict **pass**: `ast`,
+`signatures`, `idempotency`, and `pii` all passed; `roundtrip` was skipped because `probed_args`
+for the shaped tools are multi-probe lists, which the verifier does not resolve to a single call.

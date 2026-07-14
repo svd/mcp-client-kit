@@ -7,15 +7,25 @@
       "thoughtNumber": "int",
       "totalThoughts": "int",
       "nextThoughtNeeded": "bool",
-      "branches": "list",
+      "branches": "list[str]",
       "thoughtHistoryLength": "int"
     },
     "source": "live",
-    "probed_args": {
-      "thought": "This is the first step of solving the problem.",
-      "nextThoughtNeeded": false,
-      "thoughtNumber": 1,
-      "totalThoughts": 1
-    }
+    "probed_args": [
+      {
+        "thought": "Step 1: identify the problem.",
+        "nextThoughtNeeded": true,
+        "thoughtNumber": 1,
+        "totalThoughts": 2
+      },
+      {
+        "thought": "Step 2 (branch): explore an alternative approach.",
+        "nextThoughtNeeded": false,
+        "thoughtNumber": 2,
+        "totalThoughts": 2,
+        "branchFromThought": 1,
+        "branchId": "alt-approach"
+      }
+    ]
   }
 }

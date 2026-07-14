@@ -2,29 +2,22 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-06-19T22:46:46Z
-- **Duration:** 2m 15s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-07-14T08:28:35Z
+- **Duration:** 1m 36s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
 
 ## Server Summary
 
 The `fetch` MCP server (launched via `uvx mcp-server-fetch`) exposes a single tool: `fetch`. This tool fetches a URL from the internet and returns its content, optionally converted to Markdown. There is no authentication required.
 
-**Tools exposed:** 1  
-**Tools probed:** 1 (`fetch`)  
+**Tools exposed:** 1
+**Tools probed:** 1 (`fetch`)
 **Tools skipped:** 0 (no mutating tools present)
 
 ## Probe Results
 
-The `fetch` tool was probed with `{"url": "https://example.com"}`. The `mcpgen probe` run produced a part file with `_observed_shape: "str"`. A supplementary `mcpgen call` confirmed the raw response: the server returned the page content as plain Markdown text — no JSON envelope, no structured fields, just a raw string.
+The `fetch` tool was probed with `{"url": "https://example.com"}`, a stable, PII-free public domain reserved for documentation/testing (IANA-reserved, RFC 2606). The `mcpgen probe` run produced a part file with `_observed_shape: "str"`: the live call returned the page content as plain Markdown text — no JSON envelope, no structured fields, just a raw string.
 
-The response looked like:
-
-```
-Contents of https://example.com/:
-This domain is for use in documentation examples without needing permission. ...
-```
-
-This confirms the tool's return type is a plain `str` in all cases. The `uvx`-based server startup emitted npm/Node package installation noise to stdout during the first invocation, which caused spurious "Failed to parse JSONRPC message" warnings in the probe runner — these are harmless and did not affect the probe result.
+The `uvx`-based server startup emitted npm/Node package installation noise to stdout on cold start (`added 41 packages…`, `found 0 vulnerabilities`, `run npm fund for details`), which produced several spurious "Failed to parse JSONRPC message" warnings in the mcpgen client. These are package-manager bootstrap noise, not protocol errors — the probe still completed and captured a valid shape once the server's actual JSON-RPC stream started.
 
 ## Shape Decisions
 
@@ -43,4 +36,4 @@ The return type stays as `-> Any` in the generated module. This is correct and h
 
 ## Codegen Output
 
-The generated module (`eval/fetch/fetch.py`) parsed cleanly. It defines a single async function `fetch(caller, *, url, max_length=None, start_index=None, raw=None) -> Any` with the full `__schema__` attribute embedded for downstream tooling. Optional parameters with server-side defaults (`max_length=5000`, `start_index=0`, `raw=False`) are correctly rendered as `int | None`, `int | None`, and `bool | None` with `None`-guard logic in the body.
+The generated module (`eval/fetch/fetch.py`) parsed cleanly (`ast.parse` succeeds). It defines a single async function `fetch(caller, *, url, max_length=None, start_index=None, raw=None) -> Any` with the full `__schema__` attribute embedded for downstream tooling. Optional parameters with server-side defaults (`max_length=5000`, `start_index=0`, `raw=False`) are correctly rendered as `int | None`, `int | None`, and `bool | None` with `None`-guard logic in the body.

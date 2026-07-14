@@ -36,7 +36,7 @@ codegraph_context.__schema__ = {'type': 'object', 'properties': {'task': {'type'
 
 
 async def codegraph_explore(caller: McpCaller, *, query: str, maxFiles: float | None = None, projectPath: str | None = None) -> Any:
-    """Source of SEVERAL related symbols grouped by file, in one capped call. Query is a bag of symbol/file names (not a question). Returned source is verbatim Read-equivalent — do not re-open shown files. Prefer over chained codegraph_node. Budget: make at most 1 calls for this project (5 files indexed).
+    """Source of SEVERAL related symbols grouped by file, in one capped call. Query is a bag of symbol/file names (not a question). Returned source is verbatim Read-equivalent — do not re-open shown files. Prefer over chained codegraph_node. Budget: make at most 1 calls for this project (11 files indexed).
 
     Args:
         query: Symbol names, file names, or short code terms to explore (e.g., "AuthService loginUser session-manager", "GraphTraverser BFS impact traversal.ts"). Use codegraph_search first to find relevant names.

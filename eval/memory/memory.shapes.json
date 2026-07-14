@@ -10,8 +10,7 @@
     "source": "live",
     "probed_args": {
       "names": [
-        "Alice",
-        "ProjectX"
+        "<example-entity-name>"
       ]
     }
   },
@@ -36,7 +35,7 @@
     },
     "source": "live",
     "probed_args": {
-      "query": "Alice"
+      "query": "<example-query>"
     }
   }
 }

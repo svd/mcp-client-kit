@@ -1,29 +1,43 @@
 {
   "directory_tree": {
-    "path": "/private/tmp"
+    "path": "/private/tmp/mcpgen-eval-subdir"
   },
   "get_file_info": {
-    "path": "/private/tmp"
+    "path": "/private/tmp/mcpgen-eval-test.txt"
   },
   "list_directory": {
-    "path": "/private/tmp"
+    "path": "/private/tmp/mcpgen-eval-subdir"
   },
   "list_directory_with_sizes": {
-    "path": "/private/tmp"
+    "path": "/private/tmp/mcpgen-eval-subdir",
+    "sortBy": "name"
   },
-  "read_file": {
-    "path": "/private/tmp/mcpgen-eval-test.txt"
-  },
+  "read_file": [
+    {
+      "path": "/private/tmp/mcpgen-eval-test.txt"
+    },
+    {
+      "path": "/private/tmp/mcpgen-eval-test.txt",
+      "head": 1
+    }
+  ],
   "read_multiple_files": {
     "paths": [
-      "/private/tmp/mcpgen-eval-test.txt"
+      "/private/tmp/mcpgen-eval-test.txt",
+      "/private/tmp/mcpgen-eval-subdir/sample.json"
     ]
   },
-  "read_text_file": {
-    "path": "/private/tmp/mcpgen-eval-test.txt"
-  },
+  "read_text_file": [
+    {
+      "path": "/private/tmp/mcpgen-eval-test.txt"
+    },
+    {
+      "path": "/private/tmp/mcpgen-eval-test.txt",
+      "tail": 1
+    }
+  ],
   "search_files": {
-    "path": "/private/tmp",
+    "path": "/private/tmp/mcpgen-eval-subdir",
     "pattern": "*.json"
   }
 }

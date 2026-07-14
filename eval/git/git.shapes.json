@@ -9,8 +9,8 @@
       "repo_path": "<example-repo-path>",
       "branch_type": "local"
     },
-    "probe_args_scrubbed": true,
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "probe_args_scrubbed": true
   },
   "git_diff": {
     "unwrap": [],
@@ -22,8 +22,8 @@
       "repo_path": "<example-repo-path>",
       "target": "HEAD~1"
     },
-    "probe_args_scrubbed": true,
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "probe_args_scrubbed": true
   },
   "git_diff_staged": {
     "unwrap": [],
@@ -34,8 +34,8 @@
     "probed_args": {
       "repo_path": "<example-repo-path>"
     },
-    "probe_args_scrubbed": true,
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "probe_args_scrubbed": true
   },
   "git_diff_unstaged": {
     "unwrap": [],
@@ -46,8 +46,8 @@
     "probed_args": {
       "repo_path": "<example-repo-path>"
     },
-    "probe_args_scrubbed": true,
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "probe_args_scrubbed": true
   },
   "git_log": {
     "unwrap": [],
@@ -59,8 +59,8 @@
       "repo_path": "<example-repo-path>",
       "max_count": 5
     },
-    "probe_args_scrubbed": true,
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "probe_args_scrubbed": true
   },
   "git_show": {
     "unwrap": [],
@@ -72,8 +72,8 @@
       "repo_path": "<example-repo-path>",
       "revision": "HEAD"
     },
-    "probe_args_scrubbed": true,
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "probe_args_scrubbed": true
   },
   "git_status": {
     "unwrap": [],
@@ -84,7 +84,7 @@
     "probed_args": {
       "repo_path": "<example-repo-path>"
     },
-    "probe_args_scrubbed": true,
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "probe_args_scrubbed": true
   }
 }

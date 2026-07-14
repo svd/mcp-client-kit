@@ -11,7 +11,7 @@
     },
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp"
+      "path": "<example-dir>"
     }
   },
   "get_file_info": {
@@ -21,7 +21,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp"
+      "path": "<example-file>"
     }
   },
   "list_allowed_directories": {
@@ -39,7 +39,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp"
+      "path": "<example-dir>"
     }
   },
   "list_directory_with_sizes": {
@@ -49,7 +49,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp"
+      "path": "<example-dir>",
+      "sortBy": "name"
     }
   },
   "read_file": {
@@ -58,9 +59,15 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "path": "/private/tmp/mcpgen-eval-test.txt"
-    }
+    "probed_args": [
+      {
+        "path": "<example-file>"
+      },
+      {
+        "path": "<example-file>",
+        "head": 1
+      }
+    ]
   },
   "read_multiple_files": {
     "unwrap": [],
@@ -70,7 +77,8 @@
     "source": "live",
     "probed_args": {
       "paths": [
-        "/private/tmp/mcpgen-eval-test.txt"
+        "<example-file>",
+        "<example-file-2>"
       ]
     }
   },
@@ -80,9 +88,15 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "path": "/private/tmp/mcpgen-eval-test.txt"
-    }
+    "probed_args": [
+      {
+        "path": "<example-file>"
+      },
+      {
+        "path": "<example-file>",
+        "tail": 1
+      }
+    ]
   },
   "search_files": {
     "unwrap": [],
@@ -91,7 +105,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp",
+      "path": "<example-dir>",
       "pattern": "*.json"
     }
   }

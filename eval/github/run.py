@@ -73,11 +73,11 @@ async def main() -> None:
     print(f"get_latest_release: tag_name={latest_release.get('tag_name')!r}  name={latest_release.get('name')!r}")
 
     # get_release_by_tag -> Release
-    release_by_tag = await github.get_release_by_tag(caller, owner="microsoft", repo="vscode", tag="1.100.2")
+    release_by_tag = await github.get_release_by_tag(caller, owner="microsoft", repo="vscode", tag="1.128.0")
     print(f"get_release_by_tag: tag_name={release_by_tag.get('tag_name')!r}  published_at={release_by_tag.get('published_at')!r}")
 
     # get_tag -> GitTag
-    git_tag = await github.get_tag(caller, owner="microsoft", repo="vscode", tag="1.100.2")
+    git_tag = await github.get_tag(caller, owner="microsoft", repo="vscode", tag="1.128.0")
     print(f"get_tag: ref={git_tag.get('ref')!r}")
 
     # list_releases -> list[ReleaseSummary]
@@ -106,25 +106,25 @@ async def main() -> None:
 
     # issue_read -> Any  (method=get)
     issue_get = await github.issue_read(
-        caller, method="get", owner="microsoft", repo="vscode", issue_number=248765
+        caller, method="get", owner="microsoft", repo="vscode", issue_number=250000
     )
     print(f"issue_read(get): {type(issue_get).__name__}")
 
     # issue_read -> Any  (method=get_comments)
     issue_comments = await github.issue_read(
-        caller, method="get_comments", owner="microsoft", repo="vscode", issue_number=248765, perPage=3
+        caller, method="get_comments", owner="microsoft", repo="vscode", issue_number=250000, perPage=3
     )
     print(f"issue_read(get_comments): {type(issue_comments).__name__}")
 
     # pull_request_read -> Any  (method=get)
     pr_get = await github.pull_request_read(
-        caller, method="get", owner="microsoft", repo="vscode", pullNumber=247000
+        caller, method="get", owner="microsoft", repo="vscode", pullNumber=325746
     )
     print(f"pull_request_read(get): {type(pr_get).__name__}")
 
     # pull_request_read -> Any  (method=get_files)
     pr_files = await github.pull_request_read(
-        caller, method="get_files", owner="microsoft", repo="vscode", pullNumber=247000, perPage=3
+        caller, method="get_files", owner="microsoft", repo="vscode", pullNumber=325746, perPage=3
     )
     print(f"pull_request_read(get_files): {type(pr_files).__name__}")
 
@@ -149,7 +149,7 @@ async def main() -> None:
     print(f"search_pull_requests: total_count={prs_search.get('total_count')}  incomplete_results={prs_search.get('incomplete_results')}")
 
     # search_users -> SearchUsersResult
-    users = await github.search_users(caller, query="svd", perPage=3)
+    users = await github.search_users(caller, query="torvalds", perPage=3)
     print(f"search_users: total_count={users.get('total_count')}  incomplete_results={users.get('incomplete_results')}")
 
 

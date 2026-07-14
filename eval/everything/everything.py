@@ -14,7 +14,7 @@ SERVER = 'everything'
 
 
 
-class WeatherContent(TypedDict, total=False):
+class WeatherConditions(TypedDict, total=False):
     temperature: int
     conditions: str
     humidity: int
@@ -29,7 +29,7 @@ async def echo(caller: McpCaller, *, message: str) -> Any:
     args: dict[str, Any] = {"message": message}
     return await caller.call(SERVER, "echo", args)
 
-echo.__schema__ = {'type': 'object', 'properties': {'message': {'type': 'string', 'description': 'Message to echo'}}, 'required': ['message'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+echo.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'message': {'type': 'string', 'description': 'Message to echo'}}, 'required': ['message']}
 
 
 async def get_annotated_message(caller: McpCaller, *, messageType: Literal['error', 'success', 'debug'], includeImage: bool | None = None) -> Any:
@@ -44,7 +44,7 @@ async def get_annotated_message(caller: McpCaller, *, messageType: Literal['erro
         args["includeImage"] = includeImage
     return await caller.call(SERVER, "get-annotated-message", args)
 
-get_annotated_message.__schema__ = {'type': 'object', 'properties': {'messageType': {'type': 'string', 'enum': ['error', 'success', 'debug'], 'description': 'Type of message to demonstrate different annotation patterns'}, 'includeImage': {'type': 'boolean', 'default': False, 'description': 'Whether to include an example image'}}, 'required': ['messageType'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+get_annotated_message.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'messageType': {'type': 'string', 'enum': ['error', 'success', 'debug'], 'description': 'Type of message to demonstrate different annotation patterns'}, 'includeImage': {'default': False, 'description': 'Whether to include an example image', 'type': 'boolean'}}, 'required': ['messageType']}
 
 
 async def get_env(caller: McpCaller) -> Any:
@@ -65,7 +65,7 @@ async def get_resource_links(caller: McpCaller, *, count: float | None = None) -
         args["count"] = count
     return await caller.call(SERVER, "get-resource-links", args)
 
-get_resource_links.__schema__ = {'type': 'object', 'properties': {'count': {'type': 'number', 'minimum': 1, 'maximum': 10, 'default': 3, 'description': 'Number of resource links to return (1-10)'}}, 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+get_resource_links.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'count': {'default': 3, 'description': 'Number of resource links to return (1-10)', 'type': 'number', 'minimum': 1, 'maximum': 10}}}
 
 
 async def get_resource_reference(caller: McpCaller, *, resourceType: Literal['Text', 'Blob'] | None = None, resourceId: float | None = None) -> Any:
@@ -82,19 +82,19 @@ async def get_resource_reference(caller: McpCaller, *, resourceType: Literal['Te
         args["resourceId"] = resourceId
     return await caller.call(SERVER, "get-resource-reference", args)
 
-get_resource_reference.__schema__ = {'type': 'object', 'properties': {'resourceType': {'type': 'string', 'enum': ['Text', 'Blob'], 'default': 'Text'}, 'resourceId': {'type': 'number', 'default': 1, 'description': 'ID of the text resource to fetch'}}, 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+get_resource_reference.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'resourceType': {'default': 'Text', 'type': 'string', 'enum': ['Text', 'Blob']}, 'resourceId': {'default': 1, 'description': 'ID of the text resource to fetch', 'type': 'number'}}}
 
 
-async def get_structured_content(caller: McpCaller, *, location: Literal['New York', 'Chicago', 'Los Angeles']) -> WeatherContent:
+async def get_structured_content(caller: McpCaller, *, location: Literal['New York', 'Chicago', 'Los Angeles']) -> WeatherConditions:
     """Returns structured content along with an output schema for client data validation
 
     Args:
         location: Choose city. One of: 'New York', 'Chicago', 'Los Angeles'
     """
     args: dict[str, Any] = {"location": location}
-    return cast("WeatherContent", await caller.call(SERVER, "get-structured-content", args))
+    return cast("WeatherConditions", await caller.call(SERVER, "get-structured-content", args))
 
-get_structured_content.__schema__ = {'type': 'object', 'properties': {'location': {'type': 'string', 'enum': ['New York', 'Chicago', 'Los Angeles'], 'description': 'Choose city'}}, 'required': ['location'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+get_structured_content.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'location': {'type': 'string', 'enum': ['New York', 'Chicago', 'Los Angeles'], 'description': 'Choose city'}}, 'required': ['location']}
 
 
 async def get_sum(caller: McpCaller, *, a: float, b: float) -> Any:
@@ -107,7 +107,7 @@ async def get_sum(caller: McpCaller, *, a: float, b: float) -> Any:
     args: dict[str, Any] = {"a": a, "b": b}
     return await caller.call(SERVER, "get-sum", args)
 
-get_sum.__schema__ = {'type': 'object', 'properties': {'a': {'type': 'number', 'description': 'First number'}, 'b': {'type': 'number', 'description': 'Second number'}}, 'required': ['a', 'b'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+get_sum.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'a': {'type': 'number', 'description': 'First number'}, 'b': {'type': 'number', 'description': 'Second number'}}, 'required': ['a', 'b']}
 
 
 async def get_tiny_image(caller: McpCaller) -> Any:
@@ -134,7 +134,7 @@ async def gzip_file_as_resource(caller: McpCaller, *, name: str | None = None, d
         args["outputType"] = outputType
     return await caller.call(SERVER, "gzip-file-as-resource", args)
 
-gzip_file_as_resource.__schema__ = {'type': 'object', 'properties': {'name': {'type': 'string', 'description': 'Name of the output file', 'default': 'README.md.gz'}, 'data': {'type': 'string', 'format': 'uri', 'description': 'URL or data URI of the file content to compress', 'default': 'https://raw.githubusercontent.com/modelcontextprotocol/servers/refs/heads/main/README.md'}, 'outputType': {'type': 'string', 'enum': ['resourceLink', 'resource'], 'default': 'resourceLink', 'description': "How the resulting gzipped file should be returned. 'resourceLink' returns a link to a resource that can be read later, 'resource' returns a full resource object."}}, 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+gzip_file_as_resource.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'name': {'default': 'README.md.gz', 'type': 'string', 'description': 'Name of the output file'}, 'data': {'default': 'https://raw.githubusercontent.com/modelcontextprotocol/servers/refs/heads/main/README.md', 'type': 'string', 'format': 'uri', 'description': 'URL or data URI of the file content to compress'}, 'outputType': {'default': 'resourceLink', 'description': "How the resulting gzipped file should be returned. 'resourceLink' returns a link to a resource that can be read later, 'resource' returns a full resource object.", 'type': 'string', 'enum': ['resourceLink', 'resource']}}}
 
 
 async def simulate_research_query(caller: McpCaller, *, topic: str, ambiguous: bool | None = None) -> Any:
@@ -149,7 +149,7 @@ async def simulate_research_query(caller: McpCaller, *, topic: str, ambiguous: b
         args["ambiguous"] = ambiguous
     return await caller.call(SERVER, "simulate-research-query", args)
 
-simulate_research_query.__schema__ = {'type': 'object', 'properties': {'topic': {'type': 'string', 'description': 'The research topic to investigate'}, 'ambiguous': {'type': 'boolean', 'default': False, 'description': 'Simulate an ambiguous query that requires clarification (triggers input_required status)'}}, 'required': ['topic'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+simulate_research_query.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'topic': {'type': 'string', 'description': 'The research topic to investigate'}, 'ambiguous': {'default': False, 'description': 'Simulate an ambiguous query that requires clarification (triggers input_required status)', 'type': 'boolean'}}, 'required': ['topic']}
 
 
 async def toggle_simulated_logging(caller: McpCaller) -> Any:
@@ -180,4 +180,4 @@ async def trigger_long_running_operation(caller: McpCaller, *, duration: float |
         args["steps"] = steps
     return await caller.call(SERVER, "trigger-long-running-operation", args)
 
-trigger_long_running_operation.__schema__ = {'type': 'object', 'properties': {'duration': {'type': 'number', 'default': 10, 'description': 'Duration of the operation in seconds'}, 'steps': {'type': 'number', 'default': 5, 'description': 'Number of steps in the operation'}}, 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+trigger_long_running_operation.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'duration': {'default': 10, 'description': 'Duration of the operation in seconds', 'type': 'number'}, 'steps': {'default': 5, 'description': 'Number of steps in the operation', 'type': 'number'}}}

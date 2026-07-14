@@ -6,8 +6,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "libraryId": "/psf/requests",
-      "query": "How to make a GET request"
+      "libraryId": "/reactjs/react.dev",
+      "query": "React useEffect cleanup function examples"
     }
   },
   "resolve-library-id": {
@@ -17,8 +17,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "HTTP client library for Python",
-      "libraryName": "requests"
+      "query": "how to use hooks",
+      "libraryName": "React"
     }
   }
 }

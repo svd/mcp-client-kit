@@ -1,11 +1,10 @@
 {
   "open_nodes": {
     "names": [
-      "Alice",
-      "ProjectX"
+      "test"
     ]
   },
   "search_nodes": {
-    "query": "Alice"
+    "query": "test"
   }
 }

@@ -1,12 +1,12 @@
 {
   "ask_question": {
-    "repoName": "microsoft/vscode",
-    "question": "What is the main architecture?"
+    "repoName": "facebook/react",
+    "question": "What is the high-level architecture of this repository?"
   },
   "read_wiki_contents": {
-    "repoName": "microsoft/vscode"
+    "repoName": "facebook/react"
   },
   "read_wiki_structure": {
-    "repoName": "microsoft/vscode"
+    "repoName": "facebook/react"
   }
 }

@@ -6,7 +6,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "message": "hello world"
+      "message": "hello from eval"
     }
   },
   "get-annotated-message": {
@@ -33,7 +33,8 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {}
+    "probed_args": {},
+    "_note": "observed shape is a dict[str, str] of ~32 npm/shell env vars specific to the probing machine (NODE, PATH, HOME, npm_config_*, ...). Field names are not stable across environments (CI, other machines), so no TypedDict was minted — return stays Any to avoid overfitting to one probe's env."
   },
   "get-resource-links": {
     "unwrap": [],
@@ -43,7 +44,8 @@
     "source": "live",
     "probed_args": {
       "count": 3
-    }
+    },
+    "_note": "tool returns MCP resource_link content blocks; McpCaller reduces the response to its text summary only ('Here are 3 resource links...'), the structured link objects are invisible to probe. Return stays Any."
   },
   "get-resource-reference": {
     "unwrap": [],
@@ -60,12 +62,12 @@
         "resourceType": "Blob",
         "resourceId": 1
       }
-    ]
+    ],
+    "_note": "returns an embedded MCP resource (Text or Blob); McpCaller surfaces only the text envelope, structured resource content (uri, mimeType, blob/text data) is not visible to probe. Return stays Any."
   },
   "get-structured-content": {
     "unwrap": [],
-    "return_model": "WeatherContent",
-    "return_container": null,
+    "return_model": "WeatherConditions",
     "input_overrides": {},
     "fields": {
       "temperature": "int",
@@ -73,17 +75,9 @@
       "humidity": "int"
     },
     "source": "live",
-    "probed_args": [
-      {
-        "location": "New York"
-      },
-      {
-        "location": "Chicago"
-      },
-      {
-        "location": "Los Angeles"
-      }
-    ]
+    "probed_args": {
+      "location": "New York"
+    }
   },
   "get-sum": {
     "unwrap": [],
@@ -92,8 +86,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "a": 3,
-      "b": 4
+      "a": 2,
+      "b": 3
     }
   },
   "get-tiny-image": {
@@ -102,7 +96,8 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {}
+    "probed_args": {},
+    "_note": "returns an MCP image content block (base64 + mimeType); McpCaller surfaces only accompanying text ('Here's the image you requested:'), the binary payload is invisible to probe. Return stays Any per image/binary guidance."
   },
   "gzip-file-as-resource": {
     "unwrap": [],
@@ -117,7 +112,8 @@
       {
         "outputType": "resource"
       }
-    ]
+    ],
+    "_note": "outputType='resourceLink' yields a short text summary; outputType='resource' yields an embedded binary resource (gzip blob) with no accompanying text at all, so probe observed an empty string for that variant. Content is not modelable from text-only probing. Return stays Any."
   },
   "simulate-research-query": {
     "unwrap": [],
@@ -126,7 +122,35 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "topic": "climate change"
+      "topic": "renewable energy trends",
+      "ambiguous": false
+    }
+  },
+  "toggle-simulated-logging": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {}
+  },
+  "toggle-subscriber-updates": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {}
+  },
+  "trigger-long-running-operation": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "duration": 1,
+      "steps": 1
     }
   }
 }

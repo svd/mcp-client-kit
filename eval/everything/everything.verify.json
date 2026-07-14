@@ -1,6 +1,6 @@
 {
   "echo": {
-    "message": "hello world"
+    "message": "hello from eval"
   },
   "get-annotated-message": [
     {
@@ -26,20 +26,12 @@
       "resourceId": 1
     }
   ],
-  "get-structured-content": [
-    {
-      "location": "New York"
-    },
-    {
-      "location": "Chicago"
-    },
-    {
-      "location": "Los Angeles"
-    }
-  ],
+  "get-structured-content": {
+    "location": "New York"
+  },
   "get-sum": {
-    "a": 3,
-    "b": 4
+    "a": 2,
+    "b": 3
   },
   "gzip-file-as-resource": [
     {
@@ -50,6 +42,11 @@
     }
   ],
   "simulate-research-query": {
-    "topic": "climate change"
+    "topic": "renewable energy trends",
+    "ambiguous": false
+  },
+  "trigger-long-running-operation": {
+    "duration": 1,
+    "steps": 1
   }
 }

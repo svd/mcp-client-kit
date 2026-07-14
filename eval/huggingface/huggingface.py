@@ -14,35 +14,6 @@ SERVER = 'huggingface'
 
 
 
-async def gr1_z_image_turbo_generate(caller: McpCaller, *, prompt: str | None = None, resolution: Literal['1024x1024 ( 1:1 )', '1152x896 ( 9:7 )', '896x1152 ( 7:9 )', '1152x864 ( 4:3 )', '864x1152 ( 3:4 )', '1248x832 ( 3:2 )', '832x1248 ( 2:3 )', '1280x720 ( 16:9 )', '720x1280 ( 9:16 )', '1344x576 ( 21:9 )', '576x1344 ( 9:21 )', '1280x1280 ( 1:1 )', '1440x1120 ( 9:7 )', '1120x1440 ( 7:9 )', '1472x1104 ( 4:3 )', '1104x1472 ( 3:4 )', '1536x1024 ( 3:2 )', '1024x1536 ( 2:3 )', '1536x864 ( 16:9 )', '864x1536 ( 9:16 )', '1680x720 ( 21:9 )', '720x1680 ( 9:21 )', '1536x1536 ( 1:1 )', '1728x1344 ( 9:7 )', '1344x1728 ( 7:9 )', '1728x1296 ( 4:3 )', '1296x1728 ( 3:4 )', '1872x1248 ( 3:2 )', '1248x1872 ( 2:3 )', '2048x1152 ( 16:9 )', '1152x2048 ( 9:16 )', '2016x864 ( 21:9 )', '864x2016 ( 9:21 )'] | None = None, seed: int | None = None, steps: float | None = None, shift: float | None = None, random_seed: bool | None = None) -> Any:
-    """Generate an image using the Z-Image model based on the provided prompt and settings. This function is triggered when the user clicks the "Generate" button. It processes the input prompt (optionally enhancing it), configures generation parameters, and produces an image using the Z-Image diffusion transformer pipeline. Returns: tuple: (gallery_images, seed_str, seed_int), - seed_str: String representation of the seed used for generation, - seed_int: Integer representation of the seed used for generation (from mcp-tools/Z-Image-Turbo)
-
-    Args:
-        prompt: Text prompt describing the desired image content
-        resolution: Output resolution in format "WIDTHxHEIGHT ( RATIO )" (e.g., "1024x1024 ( 1:1 )"). One of: '1024x1024 ( 1:1 )', '1152x896 ( 9:7 )', '896x1152 ( 7:9 )', '1152x864 ( 4:3 )', '864x1152 ( 3:4 )', '1248x832 ( 3:2 )', '832x1248 ( 2:3 )', '1280x720 ( 16:9 )', '720x1280 ( 9:16 )', '1344x576 ( 21:9 )', '576x1344 ( 9:21 )', '1280x1280 ( 1:1 )', '1440x1120 ( 9:7 )', '1120x1440 ( 7:9 )', '1472x1104 ( 4:3 )', '1104x1472 ( 3:4 )', '1536x1024 ( 3:2 )', '1024x1536 ( 2:3 )', '1536x864 ( 16:9 )', '864x1536 ( 9:16 )', '1680x720 ( 21:9 )', '720x1680 ( 9:21 )', '1536x1536 ( 1:1 )', '1728x1344 ( 9:7 )', '1344x1728 ( 7:9 )', '1728x1296 ( 4:3 )', '1296x1728 ( 3:4 )', '1872x1248 ( 3:2 )', '1248x1872 ( 2:3 )', '2048x1152 ( 16:9 )', '1152x2048 ( 9:16 )', '2016x864 ( 21:9 )', '864x2016 ( 9:21 )'. Default: '1024x1024 ( 1:1 )'
-        seed: Seed for reproducible generation. Default: 42
-        steps: Number of inference steps for the diffusion process. Default: 8
-        shift: Time shift parameter for the flow matching scheduler. Default: 3
-        random_seed: Whether to generate a new random seed, if True will ignore the seed input. Default: True
-    """
-    args: dict[str, Any] = {}
-    if prompt is not None:
-        args["prompt"] = prompt
-    if resolution is not None:
-        args["resolution"] = resolution
-    if seed is not None:
-        args["seed"] = seed
-    if steps is not None:
-        args["steps"] = steps
-    if shift is not None:
-        args["shift"] = shift
-    if random_seed is not None:
-        args["random_seed"] = random_seed
-    return await caller.call(SERVER, "gr1_z_image_turbo_generate", args)
-
-gr1_z_image_turbo_generate.__schema__ = {'type': 'object', 'properties': {'prompt': {'type': 'string', 'description': 'Text prompt describing the desired image content'}, 'resolution': {'type': 'string', 'enum': ['1024x1024 ( 1:1 )', '1152x896 ( 9:7 )', '896x1152 ( 7:9 )', '1152x864 ( 4:3 )', '864x1152 ( 3:4 )', '1248x832 ( 3:2 )', '832x1248 ( 2:3 )', '1280x720 ( 16:9 )', '720x1280 ( 9:16 )', '1344x576 ( 21:9 )', '576x1344 ( 9:21 )', '1280x1280 ( 1:1 )', '1440x1120 ( 9:7 )', '1120x1440 ( 7:9 )', '1472x1104 ( 4:3 )', '1104x1472 ( 3:4 )', '1536x1024 ( 3:2 )', '1024x1536 ( 2:3 )', '1536x864 ( 16:9 )', '864x1536 ( 9:16 )', '1680x720 ( 21:9 )', '720x1680 ( 9:21 )', '1536x1536 ( 1:1 )', '1728x1344 ( 9:7 )', '1344x1728 ( 7:9 )', '1728x1296 ( 4:3 )', '1296x1728 ( 3:4 )', '1872x1248 ( 3:2 )', '1248x1872 ( 2:3 )', '2048x1152 ( 16:9 )', '1152x2048 ( 9:16 )', '2016x864 ( 21:9 )', '864x2016 ( 9:21 )'], 'description': 'Output resolution in format "WIDTHxHEIGHT ( RATIO )" (e.g., "1024x1024 ( 1:1 )")', 'default': '1024x1024 ( 1:1 )'}, 'seed': {'type': 'integer', 'description': 'Seed for reproducible generation', 'default': 42}, 'steps': {'type': 'number', 'description': 'Number of inference steps for the diffusion process', 'default': 8}, 'shift': {'type': 'number', 'description': 'Time shift parameter for the flow matching scheduler', 'default': 3}, 'random_seed': {'type': 'boolean', 'description': 'Whether to generate a new random seed, if True will ignore the seed input', 'default': True}}, 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
-
-
 async def hf_doc_fetch(caller: McpCaller, *, doc_url: str, offset: float | None = None) -> Any:
     """Fetch a document from the Hugging Face or Gradio documentation library. For large documents, use offset to get subsequent chunks.
 
@@ -59,7 +30,7 @@ hf_doc_fetch.__schema__ = {'type': 'object', 'properties': {'doc_url': {'type': 
 
 
 async def hf_doc_search(caller: McpCaller, *, query: str, product: str | None = None) -> Any:
-    """Search and Discover Hugging Face Product and Library documentation. Send an empty query to discover structure and navigation instructions. Knowledge up-to-date as at 19 June 2026. Combine with the Product filter to focus results.
+    """Search and Discover Hugging Face Product and Library documentation. Send an empty query to discover structure and navigation instructions. Knowledge up-to-date as at 13 July 2026. Combine with the Product filter to focus results.
 
     Args:
         query: Start with an empty query for structure, endpoint discovery and navigation tips. Use semantic queries for targetted searches.
@@ -71,6 +42,41 @@ async def hf_doc_search(caller: McpCaller, *, query: str, product: str | None = 
     return await caller.call(SERVER, "hf_doc_search", args)
 
 hf_doc_search.__schema__ = {'type': 'object', 'properties': {'query': {'type': 'string', 'maxLength': 200, 'description': 'Start with an empty query for structure, endpoint discovery and navigation tips. Use semantic queries for targetted searches.'}, 'product': {'type': 'string', 'description': 'Filter by Product. Supply when known for focused results'}}, 'required': ['query'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+
+
+async def hf_fs(caller: McpCaller, *, cmd: Literal['ls', 'cat', 'stat', 'find', 'search'], args: list[str]) -> Any:
+    """Navigate Hugging Face resources with ls, cat, find, stat, and search over hf:// URIs. Roots: hf://models, hf://datasets, hf://spaces, hf://buckets, hf://collections, hf://papers. For papers, ls hf://papers/ARXIV_ID to discover related resources; cat hf://papers/ARXIV_ID/paper.md or metadata.json.
+
+    Grammar; each token below is one args array element:
+      ls     URI [(-R|-r|--recursive)] [--glob GLOB]
+                 [(-type|--type|--entry-type) TYPE] [--sort SORT] [--limit N]
+      cat    URI [--offset N] [--max-bytes N]
+      stat   URI
+      find   URI [(-name|--name) GLOB] [(-path|--path) GLOB]
+                 [(-type|--type|--entry-type) TYPE] [--limit N]
+      search URI QUERY [(-type|--type|--entry-type) TYPE] [--sort SORT] [--limit N]
+
+    TYPE = file|dir|repo|bucket|collection|paper|link.
+    Type aliases: f=file, d=dir, l=link, model|dataset|space=repo.
+    SORT = createdAt|downloads|likes|lastModified|likes30d|trendingScore|mainSize|id|trending|upvotes.
+    URI starts with hf://. QUERY and GLOB are each one string token.
+    Search URI: hf://models|datasets|spaces[/OWNER], hf://collections[/OWNER], or exactly hf://papers; not hf://.
+    Trending listings: ls hf://models/trending, hf://datasets/trending, or hf://spaces/trending. They return up to 20 entries.
+    Trending paths imply trending order; --sort trending|trendingScore is redundant but valid.
+    Trending papers: ls hf://papers/trending.
+    TYPE filters mixed results; omit it when the URI already fixes the result type.
+    Limits and path-specific behavior are documented at hf://README.md.
+    Omit --limit and --sort unless the request asks for a cap, ordering, or exhaustive results.
+    No pipes, redirects, shell expansion, or multiple commands.
+
+    Args:
+        cmd: Command to execute.. One of: 'ls', 'cat', 'stat', 'find', 'search'
+        args: Command arguments; each array item is one grammar token.
+    """
+    args: dict[str, Any] = {"cmd": cmd, "args": args}
+    return await caller.call(SERVER, "hf_fs", args)
+
+hf_fs.__schema__ = {'type': 'object', 'properties': {'cmd': {'type': 'string', 'enum': ['ls', 'cat', 'stat', 'find', 'search'], 'description': 'Command to execute.'}, 'args': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Command arguments; each array item is one grammar token.'}}, 'required': ['cmd', 'args'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
 
 
 async def hf_whoami(caller: McpCaller) -> Any:
@@ -137,24 +143,6 @@ async def hub_repo_search(caller: McpCaller, *, query: str | None = None, repo_t
     return await caller.call(SERVER, "hub_repo_search", args)
 
 hub_repo_search.__schema__ = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'Search term. Leave blank and specify sort + limit to browse trending or recent repositories.'}, 'repo_types': {'type': 'array', 'items': {'type': 'string', 'enum': ['model', 'dataset', 'space']}, 'minItems': 1, 'maxItems': 3, 'default': ['model', 'dataset'], 'description': 'Repository types to search. Defaults to ["model", "dataset"]. space uses keyword search via /api/spaces.'}, 'author': {'type': 'string', 'description': "Organization or user namespace to filter by (e.g. 'google', 'meta-llama', 'huggingface')."}, 'filters': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional hub filter tags. Applied to each selected repo type (e.g. ["text-generation"], ["language:en"], ["mcp-server"]).'}, 'sort': {'type': 'string', 'enum': ['trendingScore', 'downloads', 'likes', 'createdAt', 'lastModified'], 'description': 'Sort order (descending): trendingScore, downloads, likes, createdAt, lastModified'}, 'limit': {'type': 'number', 'minimum': 1, 'maximum': 100, 'default': 20, 'description': 'Maximum number of results to return per selected repo type'}}, 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
-
-
-async def paper_search(caller: McpCaller, *, query: str, results_limit: float | None = None, concise_only: bool | None = None) -> Any:
-    """Find Machine Learning research papers on the Hugging Face hub. Include 'Link to paper' When presenting the results. Consider whether tabulating results matches user intent.
-
-    Args:
-        query: Semantic Search query
-        results_limit: Number of results to return. Default: 12
-        concise_only: Return a 2 sentence summary of the abstract. Use for broad search terms which may return a lot of results. Check with User if unsure.. Default: False
-    """
-    args: dict[str, Any] = {"query": query}
-    if results_limit is not None:
-        args["results_limit"] = results_limit
-    if concise_only is not None:
-        args["concise_only"] = concise_only
-    return await caller.call(SERVER, "paper_search", args)
-
-paper_search.__schema__ = {'type': 'object', 'properties': {'query': {'type': 'string', 'minLength': 3, 'maxLength': 200, 'description': 'Semantic Search query'}, 'results_limit': {'type': 'number', 'default': 12, 'description': 'Number of results to return'}, 'concise_only': {'type': 'boolean', 'default': False, 'description': 'Return a 2 sentence summary of the abstract. Use for broad search terms which may return a lot of results. Check with User if unsure.'}}, 'required': ['query'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
 
 
 async def space_search(caller: McpCaller, *, query: str, limit: float | None = None, mcp: bool | None = None) -> Any:
