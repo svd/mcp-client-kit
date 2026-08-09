@@ -79,7 +79,7 @@ uv add mcp-client-kit            # or: pip install mcp-client-kit
 | `probe <server> <tool>` | Live call(s) → shape skeleton | `--args` (repeatable), `--emit-shape <path>` (writes `.parts/`) |
 | `call <server> <tool>` | One live call, raw payload to disk — bootstrap ids / inspect output | `--out <path>` (required) |
 | `merge <server>` | Consolidate `.parts/` → `<server>.shapes.json`; emit gitignored `verify.json` | `--out <path>` |
-| `login <server>` | Browser OAuth login | `--headless` / `--no-headless`, connection flags below |
+| `login <server>` | Browser OAuth login | `--headless` / `--no-headless`, `--callback-timeout <seconds>`, connection flags below |
 | `migrate-creds` | Copy stored OAuth tokens between `file`/`keyring` backends | `--from`, `--to`, `--servers`, `--purge`, `--set-default` |
 | `discover` | List servers from agent hosts | `--host <id>` (repeatable), `--json` |
 
@@ -142,6 +142,18 @@ The browser flow waits up to 300 seconds for the redirect. If you cancel on the 
 screen, many authorization servers just close the tab without redirecting back, so mcpgen
 never hears anything — the wait then ends with `TimeoutError` instead of hanging. Your
 existing credential is left untouched by a failed or timed-out attempt.
+
+Adjust the bound when the default doesn't fit — a hardware token or an approve-on-phone
+step can outlast it, and a scripted login may want to fail sooner:
+
+```bash
+mcpgen login myserver --callback-timeout 900   # 15 minutes
+mcpgen login myserver --callback-timeout 0     # wait forever (no bound)
+```
+
+Negative or non-numeric values are rejected outright. Headless logins ignore the flag —
+the pasted-URL prompt is never bounded. In code, the same value is `callback_timeout=` on
+`login()`, `ensure_login()`, and `ensure_login_all()`.
 
 **No browser available (container, SSH, CI):**
 

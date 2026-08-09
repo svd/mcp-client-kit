@@ -625,6 +625,7 @@ def _cmd_login(ns: argparse.Namespace) -> int:
             config_path=ns.config,
             cred_backend=ns.cred_backend,
             headless=ns.headless,
+            callback_timeout=ns.callback_timeout,
         )
     )
     return 0
@@ -726,6 +727,17 @@ def _add_headless_flag(p: argparse.ArgumentParser) -> None:
         "Default: auto-detect (headless without DISPLAY/WAYLAND_DISPLAY; "
         "override with MCPGEN_HEADLESS).",
     )
+
+
+def _callback_timeout(value: str) -> float:
+    """argparse type for --callback-timeout: a non-negative number of seconds."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number of seconds, got {value!r}") from None
+    if seconds < 0 or seconds != seconds:  # NaN never equals itself
+        raise argparse.ArgumentTypeError(f"must be >= 0 (0 waits forever), got {value!r}")
+    return seconds
 
 
 def _add_conn_args(p: argparse.ArgumentParser) -> None:
@@ -849,6 +861,15 @@ def main(argv: list[str] | None = None) -> int:
     lg.add_argument("server", help="server name (e.g. acme)")
     _add_conn_args(lg)
     _add_headless_flag(lg)
+    lg.add_argument(
+        "--callback-timeout",
+        dest="callback_timeout",
+        type=_callback_timeout,
+        metavar="SECONDS",
+        help="how long to wait for the browser redirect before giving up "
+        f"(default: {_bridge._CALLBACK_TIMEOUT}). 0 waits forever. "
+        "Ignored in headless mode, where the pasted-URL prompt is never bounded.",
+    )
     lg.set_defaults(func=_cmd_login)
 
     mc = sub.add_parser(

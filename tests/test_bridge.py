@@ -1519,6 +1519,7 @@ def test_ensure_login_all_runs_servers_in_order_with_kwargs(tmp_path):
             "config_path": "/tmp/servers.json",
             "cred_backend": "keyring",
             "headless": True,
+            "callback_timeout": None,
         }
 
 
@@ -1640,3 +1641,168 @@ class _SlowStdin:
     def readline(self) -> str:
         time.sleep(0.05)
         return self._line
+
+
+def _never_resolving_callback_server():
+    async def fake_callback_server():
+        return 9999, asyncio.get_running_loop().create_future()
+
+    return fake_callback_server
+
+
+def test_login_callback_timeout_overrides_the_constant(tmp_path):
+    """An explicit callback_timeout wins over _CALLBACK_TIMEOUT and reaches wait_for."""
+    creds = tmp_path / "credentials.json"
+    provider, fake_http = _capture_provider_and_invoke_callback()
+    seen: dict = {}
+    real_wait_for = asyncio.wait_for
+
+    async def spy_wait_for(awaitable, timeout):
+        seen["timeout"] = timeout
+        return await real_wait_for(awaitable, timeout)
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _never_resolving_callback_server()),
+            patch("mcpgen._bridge._CALLBACK_TIMEOUT", 999),
+            patch("mcpgen._bridge.asyncio.wait_for", spy_wait_for),
+            patch("mcpgen._bridge._open_http", fake_http),
+            patch("mcpgen._bridge.OAuthClientProvider", provider),
+        ):
+            with pytest.raises(TimeoutError, match="0.01s"):
+                await _bridge.login(
+                    "acme",
+                    creds_path=creds,
+                    url="https://acme.example.com/mcp",
+                    headless=False,
+                    callback_timeout=0.01,
+                )
+
+    asyncio.run(run())
+    assert seen["timeout"] == 0.01
+
+
+def test_login_callback_timeout_zero_waits_forever(tmp_path):
+    """callback_timeout=0 restores the unbounded wait — no wait_for, no timeout."""
+    creds = tmp_path / "credentials.json"
+    captured: dict = {}
+
+    def provider(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    @asynccontextmanager
+    async def fake_http(*args, **kwargs):
+        # The handler must still be pending well past the patched 0.01s bound.
+        handler = asyncio.ensure_future(captured["callback_handler"]())
+        await asyncio.sleep(0.05)
+        assert not handler.done(), "callback_timeout=0 must not time out"
+        handler.cancel()
+        raise RuntimeError("stopped waiting")
+        yield  # unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _never_resolving_callback_server()),
+            patch("mcpgen._bridge._CALLBACK_TIMEOUT", 0.01),
+            patch("mcpgen._bridge._open_http", fake_http),
+            patch("mcpgen._bridge.OAuthClientProvider", provider),
+        ):
+            with pytest.raises(RuntimeError, match="stopped waiting"):
+                await _bridge.login(
+                    "acme",
+                    creds_path=creds,
+                    url="https://acme.example.com/mcp",
+                    headless=False,
+                    callback_timeout=0,
+                )
+
+    asyncio.run(run())
+
+
+def test_login_headless_ignores_callback_timeout(tmp_path):
+    """The flag must not bound the stdin read — a human paste may take any time."""
+    creds = tmp_path / "credentials.json"
+    captured: dict = {}
+    result: dict = {}
+
+    def provider(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    @asynccontextmanager
+    async def fake_http(*args, **kwargs):
+        result["callback"] = await captured["callback_handler"]()
+        raise RuntimeError("callback returned")
+        yield  # unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._open_http", fake_http),
+            patch("mcpgen._bridge.OAuthClientProvider", provider),
+            patch("sys.stdin", _SlowStdin("http://localhost/callback?code=abc&state=xyz\n")),
+        ):
+            with pytest.raises(RuntimeError, match="callback returned"):
+                await _bridge.login(
+                    "acme",
+                    creds_path=creds,
+                    url="https://acme.example.com/mcp",
+                    headless=True,
+                    callback_timeout=0.01,
+                )
+
+    asyncio.run(run())
+    assert result["callback"] == ("abc", "xyz")
+
+
+def test_ensure_login_all_threads_callback_timeout(tmp_path):
+    """callback_timeout rides along with headless through both ensure_* helpers."""
+    creds = tmp_path / "credentials.json"
+    calls = []
+
+    async def fake_ensure_login(name, creds_path=None, **kwargs):
+        calls.append(kwargs)
+
+    async def run():
+        with patch("mcpgen._bridge.ensure_login", fake_ensure_login):
+            await _bridge.ensure_login_all(["acme", "beta"], creds, callback_timeout=42)
+
+    asyncio.run(run())
+    assert [c["callback_timeout"] for c in calls] == [42, 42]
+
+
+def test_ensure_login_threads_callback_timeout_into_login(tmp_path):
+    creds = tmp_path / "credentials.json"
+    login_mock = AsyncMock()
+
+    async def run():
+        with patch("mcpgen._bridge.login", login_mock):
+            await _bridge.ensure_login("acme", creds, url="https://acme.example.com/mcp", callback_timeout=42)
+
+    asyncio.run(run())
+    assert login_mock.await_args.kwargs["callback_timeout"] == 42
+
+
+@pytest.mark.parametrize(
+    ("argv_flag", "expected"),
+    [(["--callback-timeout", "45"], 45.0), (["--callback-timeout", "0"], 0.0), ([], None)],
+)
+def test_cli_login_callback_timeout_flag(argv_flag, expected):
+    """--callback-timeout reaches _bridge.login; absent → None → module default."""
+    from mcpgen.cli import main
+
+    login_mock = AsyncMock()
+    with patch("mcpgen._bridge.login", login_mock):
+        assert main(["login", "acme", *argv_flag]) == 0
+    assert login_mock.await_args.kwargs["callback_timeout"] == expected
+
+
+@pytest.mark.parametrize("bad", ["-1", "abc", "nan"])
+def test_cli_login_callback_timeout_rejects_invalid(bad, capsys):
+    """Nonsense values fail at argparse with a usage message, not deep in asyncio."""
+    from mcpgen.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["login", "acme", "--callback-timeout", bad])
+    assert exc.value.code == 2
+    assert "--callback-timeout" in capsys.readouterr().err

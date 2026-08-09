@@ -17,6 +17,15 @@
   `WAYLAND_DISPLAY` is set. `MCPGEN_HEADLESS=1`/`0` overrides the detection in either direction
   for environments that guess wrong; an explicit `--headless`/`--no-headless` outranks both.
 
+- **`mcpgen login --callback-timeout SECONDS`** — the 300-second bound on the browser redirect
+  is a guess about how long a consent screen plus MFA takes, and guesses about human latency are
+  wrong for someone: a hardware-token or approve-on-phone flow can outlast it, while a scripted
+  login wants to fail fast. The flag sets that bound per invocation, `0` restores the original
+  unbounded wait as an escape hatch, and anything negative or non-numeric is rejected by argparse
+  with a usage message rather than surfacing as a traceback from inside asyncio. The same value
+  is available in code as `callback_timeout=` on `login()`, `ensure_login()`, and
+  `ensure_login_all()`. Headless logins ignore it — the pasted-URL prompt is never bounded.
+
 - **`ensure_login_all(servers)`** — pre-flight refresh-or-login across several servers in one
   call, for pipelines that talk to more than one MCP server and want every token settled before
   work starts. Deliberately sequential: concurrent logins would open several browser tabs at

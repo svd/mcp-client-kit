@@ -1170,6 +1170,7 @@ async def login(
     config_path: str | Path | None = None,
     cred_backend: str | None = None,
     headless: bool | None = None,
+    callback_timeout: float | None = None,
 ) -> None:
     """Full browser-based OAuth login for server_name. Caches tokens + token_endpoint.
 
@@ -1178,6 +1179,9 @@ async def login(
     headless: True prints the authorization URL and reads the pasted callback URL
         from stdin instead of opening a browser; False forces the browser flow;
         None (default) auto-detects via _is_headless().
+    callback_timeout: seconds to wait for the browser redirect; None (default) uses
+        _CALLBACK_TIMEOUT, and any value <= 0 waits indefinitely. Ignored in
+        headless mode, where the stdin read is never bounded.
     """
     _servers = servers(config_path=config_path)
     server_url = url or _servers.get(server_name)
@@ -1195,6 +1199,7 @@ async def login(
 
     if headless is None:
         headless = _is_headless()
+    timeout = _CALLBACK_TIMEOUT if callback_timeout is None else callback_timeout
 
     try:
         callback_future: asyncio.Future | None = None
@@ -1235,14 +1240,16 @@ async def login(
             async def callback_handler() -> tuple[str, str | None]:
                 print("Waiting for OAuth callback… (complete login in your browser)")
                 assert callback_future is not None
+                if timeout <= 0:  # opt-out: wait indefinitely
+                    return await callback_future
                 try:
                     # wait_for cancels the future on timeout; _serve_until_done
                     # awaits the same future under suppress(), so the background
                     # task exits cleanly instead of dangling.
-                    return await asyncio.wait_for(callback_future, _CALLBACK_TIMEOUT)
+                    return await asyncio.wait_for(callback_future, timeout)
                 except TimeoutError:
                     raise TimeoutError(
-                        f"No OAuth callback received within {_CALLBACK_TIMEOUT}s. The browser never "
+                        f"No OAuth callback received within {timeout}s. The browser never "
                         "returned to mcpgen — some authorization servers just close the tab when you "
                         "cancel, without redirecting back. Retry, or use --headless to paste the "
                         "redirect URL manually."
@@ -1303,6 +1310,7 @@ async def ensure_login(
     config_path: str | Path | None = None,
     cred_backend: str | None = None,
     headless: bool | None = None,
+    callback_timeout: float | None = None,
 ) -> None:
     """Ensure a usable token exists for server_name, refreshing or logging in.
 
@@ -1329,6 +1337,7 @@ async def ensure_login(
             config_path=config_path,
             cred_backend=cred_backend,
             headless=headless,
+            callback_timeout=callback_timeout,
         )
         return
     if await storage.get_tokens() is None:  # first-time: no token cached at all
@@ -1340,6 +1349,7 @@ async def ensure_login(
             config_path=config_path,
             cred_backend=cred_backend,
             headless=headless,
+            callback_timeout=callback_timeout,
         )
 
 
@@ -1350,6 +1360,7 @@ async def ensure_login_all(
     config_path: str | Path | None = None,
     cred_backend: str | None = None,
     headless: bool | None = None,
+    callback_timeout: float | None = None,
 ) -> None:
     """Run ensure_login() for each server, one at a time.
 
@@ -1364,4 +1375,5 @@ async def ensure_login_all(
             config_path=config_path,
             cred_backend=cred_backend,
             headless=headless,
+            callback_timeout=callback_timeout,
         )
