@@ -33,6 +33,7 @@ async def _list_tools(
     client_name: str | None = None,
     config_path: str | None = None,
     cred_backend: str | None = None,
+    creds_path: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> list[dict]:
     async with _bridge.session(
@@ -43,6 +44,7 @@ async def _list_tools(
         client_name=client_name,
         config_path=config_path,
         cred_backend=cred_backend,
+        creds_path=creds_path,
         env=env,
     ) as s:
         result = await s.list_tools()
@@ -72,6 +74,7 @@ async def _probe(
     client_name: str | None = None,
     config_path: str | None = None,
     cred_backend: str | None = None,
+    creds_path: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
     """Return `(observed_shape, observed_byte_size)` for one live probe call."""
@@ -82,6 +85,7 @@ async def _probe(
         client_name=client_name,
         config_path=config_path,
         cred_backend=cred_backend,
+        creds_path=creds_path,
         env=env,
     )
     raw = await caller.call(server, tool, args)
@@ -100,6 +104,7 @@ async def _call(
     client_name: str | None = None,
     config_path: str | None = None,
     cred_backend: str | None = None,
+    creds_path: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> Any:
     caller = _bridge.McpBridgeCaller(
@@ -109,6 +114,7 @@ async def _call(
         client_name=client_name,
         config_path=config_path,
         cred_backend=cred_backend,
+        creds_path=creds_path,
         env=env,
     )
     return await caller.call(server, tool, args)
@@ -272,6 +278,7 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         client_name=ns.client_name,
         config_path=ns.config,
         cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
     try:
@@ -329,6 +336,7 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         client_name=ns.client_name,
         config_path=ns.config,
         cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
     shapes = []
@@ -400,6 +408,7 @@ def _cmd_call(ns: argparse.Namespace) -> int:
         client_name=ns.client_name,
         config_path=ns.config,
         cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
 
@@ -583,6 +592,7 @@ def _cmd_list(ns: argparse.Namespace) -> int:
         client_name=ns.client_name,
         config_path=ns.config,
         cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
     try:
@@ -620,6 +630,7 @@ def _cmd_login(ns: argparse.Namespace) -> int:
     asyncio.run(
         _bridge.login(
             ns.server,
+            _creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
             url=ns.url,
             client_name=ns.client_name,
             config_path=ns.config,
@@ -642,6 +653,7 @@ def _cmd_migrate_creds(ns: argparse.Namespace) -> int:
         ns.from_backend,
         ns.to_backend,
         servers=parsed_servers,
+        credentials_path=_creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
         purge=ns.purge,
         set_default=ns.set_default,
     )
@@ -661,7 +673,11 @@ def _cmd_migrate_creds(ns: argparse.Namespace) -> int:
 
 def _cmd_list_creds(ns: argparse.Namespace) -> int:
     """Print stored credentials as a human table (default) or JSON (--json)."""
-    rows = _bridge.list_creds(backend=ns.cred_backend, expired_only=ns.expired)
+    rows = _bridge.list_creds(
+        backend=ns.cred_backend,
+        credentials_path=_creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
+        expired_only=ns.expired,
+    )
 
     if ns.json:
         sys.stdout.write(json.dumps(rows, indent=2) + "\n")
@@ -708,7 +724,11 @@ def _cmd_delete_creds(ns: argparse.Namespace) -> int:
             print("[delete-creds] aborted", file=sys.stderr)
             return 0
 
-    existed = _bridge.delete_cred(ns.server, backend=ns.cred_backend)
+    existed = _bridge.delete_cred(
+        ns.server,
+        backend=ns.cred_backend,
+        credentials_path=_creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
+    )
     if existed:
         print(f"[delete-creds] deleted {ns.server!r}", file=sys.stderr)
     else:
@@ -727,6 +747,33 @@ def _add_headless_flag(p: argparse.ArgumentParser) -> None:
         "Default: auto-detect (headless without DISPLAY/WAYLAND_DISPLAY; "
         "override with MCPGEN_HEADLESS).",
     )
+
+
+def _add_creds_flag(p: argparse.ArgumentParser, *, transport_note: bool = True) -> None:
+    """Add --creds PATH — the file backend's credentials store.
+
+    Shared by the connection commands and the credential-management ones, so a
+    non-default store stays addressable end to end: login writes it, calls read
+    it, list/delete/migrate operate on it.
+    """
+    note = (
+        " No effect with --bearer or --stdio, which store no credentials."
+        if transport_note
+        else " Only the file backend has a path; the keyring backend ignores it."
+    )
+    p.add_argument(
+        "--creds",
+        dest="creds",
+        metavar="PATH",
+        help=f"OAuth credentials file for both storing and reading tokens "
+        f"(default: {_bridge.DEFAULT_CREDS_PATH}).{note}",
+    )
+
+
+def _creds_path(ns: argparse.Namespace) -> Path | None:
+    """--creds as a Path, or None to let _bridge use DEFAULT_CREDS_PATH."""
+    value = getattr(ns, "creds", None)
+    return Path(value) if value else None
 
 
 def _callback_timeout(value: str) -> float:
@@ -756,6 +803,7 @@ def _add_conn_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--config", dest="config", help="servers config path; overrides $MCPGEN_SERVERS and the default search"
     )
+    _add_creds_flag(p)
     p.add_argument(
         "--cred-backend",
         dest="cred_backend",
@@ -907,6 +955,7 @@ def main(argv: list[str] | None = None) -> int:
         help="write cred_backend=<to> into ~/.mcpgen/config.json so future "
         "commands default to the target backend (default: leave config untouched)",
     )
+    _add_creds_flag(mc, transport_note=False)
     mc.set_defaults(func=_cmd_migrate_creds)
 
     lc = sub.add_parser("list-creds", help="list stored credentials (flags expired)")
@@ -926,6 +975,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=["file", "keyring", "auto"],
         help="credential storage backend (default: resolved from env/config, else file)",
     )
+    _add_creds_flag(lc, transport_note=False)
     lc.set_defaults(func=_cmd_list_creds)
 
     dl = sub.add_parser("delete-creds", help="delete the stored credential for one server")
@@ -942,6 +992,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=["file", "keyring", "auto"],
         help="credential storage backend (default: resolved from env/config, else file)",
     )
+    _add_creds_flag(dl, transport_note=False)
     dl.set_defaults(func=_cmd_delete_creds)
 
     dc = sub.add_parser("discover", help="list MCP servers from installed agent hosts")

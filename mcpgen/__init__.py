@@ -1,6 +1,7 @@
 """mcpgen: typed Python wrapper generator for MCP servers."""
 
 from mcpgen._bridge import (
+    DEFAULT_CREDS_PATH,
     McpBridgeCaller,
     ReauthenticationRequired,
     delete_cred,
@@ -13,6 +14,7 @@ from mcpgen._bridge import (
 from mcpgen.seam import McpCaller
 
 __all__ = [
+    "DEFAULT_CREDS_PATH",
     "McpBridgeCaller",
     "McpCaller",
     "ReauthenticationRequired",

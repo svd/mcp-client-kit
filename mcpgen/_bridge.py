@@ -824,9 +824,16 @@ async def _http_session(
     *,
     client_name: str | None = None,
     cred_backend: str | None = None,
+    creds_path: Path | None = None,
 ):
-    """OAuth-authenticated HTTP MCP session. Pre-flight refresh before connecting."""
-    storage = FileTokenStorage(server_name, backend=resolve_cred_backend(cred_backend))
+    """OAuth-authenticated HTTP MCP session. Pre-flight refresh before connecting.
+
+    creds_path: read tokens from this file instead of DEFAULT_CREDS_PATH. Must match
+        whatever login() wrote to, or the session reads an empty store.
+    """
+    storage = FileTokenStorage(
+        server_name, creds_path or DEFAULT_CREDS_PATH, backend=resolve_cred_backend(cred_backend)
+    )
     await _pre_flight_refresh(server_name, storage)
 
     # Unlike login(), this does NOT clear a stale confidential-client registration,
@@ -913,6 +920,7 @@ async def session(
     client_name: str | None = None,
     config_path: str | Path | None = None,
     cred_backend: str | None = None,
+    creds_path: Path | None = None,
     env: dict[str, str] | None = None,
 ):
     """Yield an initialized MCP ClientSession.
@@ -924,6 +932,9 @@ async def session(
     url: inline server URL — routes through HTTP + OAuth keyed by `server` name,
         overriding config. client_name: inline OAuth client_name override.
     config_path: read the server registry from this file instead of the default search.
+    creds_path: read OAuth tokens from this file instead of DEFAULT_CREDS_PATH. Only
+        meaningful on the OAuth path — the stdio, bearer, static-header, and raw-URL
+        transports store no credentials.
     server: a configured name (servers()) → HTTP + OAuth; otherwise a raw URL.
     env: extra env vars forwarded to the stdio subprocess (merged over the SDK's
         safe allowlist). Keys NOT in ``get_default_environment()`` (e.g. API keys)
@@ -953,7 +964,13 @@ async def session(
         async with _static_headers_session(resolved_url, _headers_cache[server]) as s:
             yield s
     elif resolved_url is not None:
-        async with _http_session(server, resolved_url, client_name=client_name, cred_backend=cred_backend) as s:
+        async with _http_session(
+            server,
+            resolved_url,
+            client_name=client_name,
+            cred_backend=cred_backend,
+            creds_path=creds_path,
+        ) as s:
             yield s
     elif "://" not in server:
         raise ValueError(f"server {server!r} not found in config and is not a URL")
@@ -977,6 +994,7 @@ class McpBridgeCaller:
         client_name: str | None = None,
         config_path: str | Path | None = None,
         cred_backend: str | None = None,
+        creds_path: Path | None = None,
         env: dict[str, str] | None = None,
     ) -> None:
         self._cmd = cmd
@@ -985,6 +1003,7 @@ class McpBridgeCaller:
         self._client_name = client_name
         self._config_path = config_path
         self._cred_backend = cred_backend
+        self._creds_path = creds_path
         self._env = env
 
     async def call(self, server: str, tool: str, arguments: dict) -> Any:
@@ -996,6 +1015,7 @@ class McpBridgeCaller:
             client_name=self._client_name,
             config_path=self._config_path,
             cred_backend=self._cred_backend,
+            creds_path=self._creds_path,
             env=self._env,
         ) as s:
             result = await s.call_tool(tool, arguments)
