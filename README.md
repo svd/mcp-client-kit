@@ -144,11 +144,14 @@ Full workflow and flags: [`doc/USAGE.md`](doc/USAGE.md).
 
 ```bash
 mcpgen login <server>                              # OAuth (most servers)
+mcpgen login <server> --headless                   # no browser: print URL, paste callback URL back
 mcpgen codegen <server> --bearer "$TOKEN" --out s.py  # PAT / bearer
 mcpgen codegen <server> --stdio "python server.py" --out s.py  # local stdio, no auth
 ```
 
-Tokens persist in `~/.mcpgen/credentials.json` (chmod 0600) or your OS keystore via `--cred-backend keyring`. In code, `ensure_login(server, url=...)` refreshes silently and only opens a browser when a real login is required.
+Tokens persist in `~/.mcpgen/credentials.json` (chmod 0600) or your OS keystore via `--cred-backend keyring`. In code, `ensure_login(server, url=...)` refreshes silently and only opens a browser when a real login is required; `ensure_login_all([...])` does the same for several servers, one at a time.
+
+In containers, over SSH, or in CI there is no browser to open. `--headless` prints the authorization URL, you authorize on any device, and paste the callback URL back on stdin. It is auto-detected when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set (never on macOS or Windows); `MCPGEN_HEADLESS=1`/`0` overrides the detection, and `--headless`/`--no-headless` overrides both.
 
 ---
 

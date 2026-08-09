@@ -48,10 +48,11 @@ import json
 import os
 import shlex
 import stat
+import sys
 import time
 import warnings
 import webbrowser
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -370,6 +371,14 @@ def _explain_registration_error(exc: OAuthRegistrationError) -> OAuthRegistratio
 
 # Treat a cached token as expired this many seconds before its real expiry.
 _MARGIN = 120
+
+# How long the interactive login waits for the browser to hit the local callback
+# server. Some authorization servers drop the user on cancel without an error
+# redirect, so the callback simply never arrives — bound the wait rather than
+# hang forever. Generous: it has to cover reading a consent screen and an MFA
+# prompt. Headless login is not bounded — a human pasting a URL may take any
+# amount of time.
+_CALLBACK_TIMEOUT = 300
 
 
 class ReauthenticationRequired(Exception):
@@ -1060,6 +1069,39 @@ def parse(content_items: list) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _parse_callback_query(query: str) -> tuple[str | None, str | None]:
+    """Extract (code, state) from an OAuth redirect query string.
+
+    Shared by both callback paths — the local HTTP server and the headless
+    paste-the-URL prompt — so an authorization denial surfaces identically in
+    either mode.
+
+    Raises ValueError when the authorization server returned an error.
+    """
+    params = parse_qs(query)
+    error = params.get("error", [None])[0]
+    if error:
+        description = params.get("error_description", ["(no description)"])[0]
+        raise ValueError(f"OAuth authorization failed: {error} — {description}")
+    return params.get("code", [None])[0], params.get("state", [None])[0]
+
+
+def _is_headless() -> bool:
+    """Return True when no interactive browser is reachable (container, no display).
+
+    MCPGEN_HEADLESS overrides the detection in both directions: set it to
+    1/true/yes/on to force the paste-the-URL flow, or to anything else (e.g. 0)
+    to force the browser flow.
+    """
+    override = os.environ.get("MCPGEN_HEADLESS")
+    if override is not None:
+        return override.strip().lower() in ("1", "true", "yes", "on")
+    # macOS/Windows: the user's own desktop — a browser is always reachable.
+    if sys.platform in ("darwin", "win32"):
+        return False
+    return not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 async def _local_callback_server(port: int = 0) -> tuple[int, asyncio.Future]:
     """Start a local HTTP server to receive the OAuth redirect. Returns (port, future)."""
     loop = asyncio.get_event_loop()
@@ -1068,14 +1110,20 @@ async def _local_callback_server(port: int = 0) -> tuple[int, asyncio.Future]:
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         code: str | None = None
         state: str | None = None
+        failure: ValueError | None = None
         try:
             data = await reader.read(4096)
             first_line = data.decode(errors="replace").split("\n")[0]
             path = first_line.split(" ")[1] if " " in first_line else ""
-            params = parse_qs(urlparse(path).query)
-            code = params.get("code", [None])[0]
-            state = params.get("state", [None])[0]
-            body = b"<html><body><h1>Login complete. You can close this tab.</h1></body></html>"
+            try:
+                code, state = _parse_callback_query(urlparse(path).query)
+            except ValueError as exc:
+                failure = exc
+            body = (
+                b"<html><body><h1>Login failed. You can close this tab.</h1></body></html>"
+                if failure is not None
+                else b"<html><body><h1>Login complete. You can close this tab.</h1></body></html>"
+            )
             writer.write(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
                 + f"Content-Length: {len(body)}\r\n\r\n".encode()
@@ -1085,7 +1133,10 @@ async def _local_callback_server(port: int = 0) -> tuple[int, asyncio.Future]:
         finally:
             writer.close()
             if not future.done():
-                future.set_result((code, state))
+                if failure is not None:
+                    future.set_exception(failure)
+                else:
+                    future.set_result((code, state))
 
     try:
         server = await asyncio.start_server(_handle, "localhost", port)
@@ -1099,7 +1150,12 @@ async def _local_callback_server(port: int = 0) -> tuple[int, asyncio.Future]:
 
     async def _serve_until_done() -> None:
         async with server:
-            await future
+            # The future may carry an OAuth error (see _handle). Swallow it here —
+            # this task exists only to keep the socket open until the callback
+            # lands; the exception is delivered to callback_handler, which awaits
+            # the same future.
+            with suppress(BaseException):
+                await future
 
     asyncio.create_task(_serve_until_done())
     return actual_port, future
@@ -1113,11 +1169,19 @@ async def login(
     client_name: str | None = None,
     config_path: str | Path | None = None,
     cred_backend: str | None = None,
+    headless: bool | None = None,
+    callback_timeout: float | None = None,
 ) -> None:
     """Full browser-based OAuth login for server_name. Caches tokens + token_endpoint.
 
     url/client_name: inline overrides (no config entry needed).
     config_path: read the server registry from this file instead of the default search.
+    headless: True prints the authorization URL and reads the pasted callback URL
+        from stdin instead of opening a browser; False forces the browser flow;
+        None (default) auto-detects via _is_headless().
+    callback_timeout: seconds to wait for the browser redirect; None (default) uses
+        _CALLBACK_TIMEOUT, and any value <= 0 waits indefinitely. Ignored in
+        headless mode, where the stdin read is never bounded.
     """
     _servers = servers(config_path=config_path)
     server_url = url or _servers.get(server_name)
@@ -1133,17 +1197,63 @@ async def login(
     stashed = data.pop(server_name, None)
     storage._save(data)
 
+    if headless is None:
+        headless = _is_headless()
+    timeout = _CALLBACK_TIMEOUT if callback_timeout is None else callback_timeout
+
     try:
-        port, callback_future = await _local_callback_server()
-        callback_uri = f"http://localhost:{port}/callback"
+        callback_future: asyncio.Future | None = None
 
-        async def redirect_handler(url: str) -> None:
-            print(f"\nOpening browser: {url}\n")
-            webbrowser.open(url)
+        if headless:
+            # No local server: the redirect URI is never actually fetched, the
+            # user pastes it back. Port-less keeps the registered URI stable
+            # across runs, which matters for servers that pin redirect_uris.
+            callback_uri = "http://localhost/callback"
 
-        async def callback_handler() -> tuple[str, str | None]:
-            print("Waiting for OAuth callback… (complete login in your browser)")
-            return await callback_future
+            async def redirect_handler(url: str) -> None:
+                print(f"\nOpen this URL in your browser:\n\n{url}\n", file=sys.stderr, flush=True)
+
+            async def callback_handler() -> tuple[str, str | None]:
+                print(
+                    "After authorizing, paste the full callback URL here (http://localhost.../callback?code=...):",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                # run_in_executor: a bare sys.stdin.readline() would block the loop.
+                loop = asyncio.get_running_loop()
+                line = (await loop.run_in_executor(None, sys.stdin.readline)).strip()
+                if not line:
+                    raise ValueError("No URL pasted — login aborted.")
+                code, state = _parse_callback_query(urlparse(line).query)
+                if code is None:
+                    raise ValueError(f"Pasted URL has no ?code= parameter: {line[:120]}")
+                return code, state
+
+        else:
+            port, callback_future = await _local_callback_server()
+            callback_uri = f"http://localhost:{port}/callback"
+
+            async def redirect_handler(url: str) -> None:
+                print(f"\nOpening browser: {url}\n")
+                webbrowser.open(url)
+
+            async def callback_handler() -> tuple[str, str | None]:
+                print("Waiting for OAuth callback… (complete login in your browser)")
+                assert callback_future is not None
+                if timeout <= 0:  # opt-out: wait indefinitely
+                    return await callback_future
+                try:
+                    # wait_for cancels the future on timeout; _serve_until_done
+                    # awaits the same future under suppress(), so the background
+                    # task exits cleanly instead of dangling.
+                    return await asyncio.wait_for(callback_future, timeout)
+                except TimeoutError:
+                    raise TimeoutError(
+                        f"No OAuth callback received within {timeout}s. The browser never "
+                        "returned to mcpgen — some authorization servers just close the tab when you "
+                        "cancel, without redirecting back. Retry, or use --headless to paste the "
+                        "redirect URL manually."
+                    ) from None
 
         provider = OAuthClientProvider(
             server_url=server_url,
@@ -1175,7 +1285,7 @@ async def login(
             except OAuthRegistrationError as e:
                 raise _explain_registration_error(e) from e
         finally:
-            if not callback_future.done():
+            if callback_future is not None and not callback_future.done():
                 callback_future.set_result((None, None))
             await asyncio.sleep(0)
 
@@ -1199,6 +1309,8 @@ async def ensure_login(
     client_name: str | None = None,
     config_path: str | Path | None = None,
     cred_backend: str | None = None,
+    headless: bool | None = None,
+    callback_timeout: float | None = None,
 ) -> None:
     """Ensure a usable token exists for server_name, refreshing or logging in.
 
@@ -1224,6 +1336,8 @@ async def ensure_login(
             client_name=client_name,
             config_path=config_path,
             cred_backend=cred_backend,
+            headless=headless,
+            callback_timeout=callback_timeout,
         )
         return
     if await storage.get_tokens() is None:  # first-time: no token cached at all
@@ -1234,4 +1348,32 @@ async def ensure_login(
             client_name=client_name,
             config_path=config_path,
             cred_backend=cred_backend,
+            headless=headless,
+            callback_timeout=callback_timeout,
+        )
+
+
+async def ensure_login_all(
+    server_names: list[str],
+    creds_path: Path = DEFAULT_CREDS_PATH,
+    *,
+    config_path: str | Path | None = None,
+    cred_backend: str | None = None,
+    headless: bool | None = None,
+    callback_timeout: float | None = None,
+) -> None:
+    """Run ensure_login() for each server, one at a time.
+
+    Sequential on purpose: a parallel version would open several browser tabs at
+    once and race for stdin in headless mode. Servers with a valid cached token
+    are silent, so the common case costs nothing.
+    """
+    for name in server_names:
+        await ensure_login(
+            name,
+            creds_path,
+            config_path=config_path,
+            cred_backend=cred_backend,
+            headless=headless,
+            callback_timeout=callback_timeout,
         )

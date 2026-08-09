@@ -79,7 +79,7 @@ uv add mcp-client-kit            # or: pip install mcp-client-kit
 | `probe <server> <tool>` | Live call(s) → shape skeleton | `--args` (repeatable), `--emit-shape <path>` (writes `.parts/`) |
 | `call <server> <tool>` | One live call, raw payload to disk — bootstrap ids / inspect output | `--out <path>` (required) |
 | `merge <server>` | Consolidate `.parts/` → `<server>.shapes.json`; emit gitignored `verify.json` | `--out <path>` |
-| `login <server>` | Browser OAuth login | connection flags below |
+| `login <server>` | Browser OAuth login | `--headless` / `--no-headless`, `--callback-timeout <seconds>`, connection flags below |
 | `migrate-creds` | Copy stored OAuth tokens between `file`/`keyring` backends | `--from`, `--to`, `--servers`, `--purge`, `--set-default` |
 | `discover` | List servers from agent hosts | `--host <id>` (repeatable), `--json` |
 
@@ -137,6 +137,47 @@ mcpgen login myserver   # opens browser; token stored at ~/.mcpgen/credentials.j
 ```
 
 Re-run when you see `ReauthenticationRequired`.
+
+The browser flow waits up to 300 seconds for the redirect. If you cancel on the consent
+screen, many authorization servers just close the tab without redirecting back, so mcpgen
+never hears anything — the wait then ends with `TimeoutError` instead of hanging. Your
+existing credential is left untouched by a failed or timed-out attempt.
+
+Adjust the bound when the default doesn't fit — a hardware token or an approve-on-phone
+step can outlast it, and a scripted login may want to fail sooner:
+
+```bash
+mcpgen login myserver --callback-timeout 900   # 15 minutes
+mcpgen login myserver --callback-timeout 0     # wait forever (no bound)
+```
+
+Negative or non-numeric values are rejected outright. Headless logins ignore the flag —
+the pasted-URL prompt is never bounded. In code, the same value is `callback_timeout=` on
+`login()`, `ensure_login()`, and `ensure_login_all()`.
+
+**No browser available (container, SSH, CI):**
+
+```bash
+mcpgen login myserver --headless
+```
+
+mcpgen prints the authorization URL instead of opening it, and waits:
+
+```
+Open this URL in your browser:
+
+https://auth.example.com/authorize?response_type=code&client_id=…
+
+After authorizing, paste the full callback URL here (http://localhost.../callback?code=...):
+```
+
+Authorize on any device, then copy the URL from the browser's address bar — the page
+itself will fail to load, which is expected, nothing is listening on that address — and
+paste it at the prompt.
+
+Headless mode is auto-detected when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set (macOS
+and Windows are always treated as interactive). Set `MCPGEN_HEADLESS=1` or `0` to override
+the detection; an explicit `--headless` / `--no-headless` overrides both.
 
 **PAT / Bearer token:**
 
@@ -323,6 +364,10 @@ How it works:
   absent), it falls back to a full browser login — the in-code equivalent of
   `mcpgen login <server>`. Credentials are persisted at
   `~/.mcpgen/credentials.json`.
+- **Several servers at once** — `await ensure_login_all(["a", "b"])` runs the same
+  refresh-or-login for each name in turn. Sequential on purpose: parallel logins would
+  open several browser tabs at once and race for stdin in headless mode. Both functions
+  accept `headless=True`/`False` to force the paste-the-URL or browser flow explicitly.
 - **Lower-level alternative** — skip `ensure_login` and catch
   `ReauthenticationRequired` from the first failing `.call()`, then call
   `login(SERVER, url=URL)` and retry. `ReauthenticationRequired` and `login` are
