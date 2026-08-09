@@ -372,6 +372,14 @@ def _explain_registration_error(exc: OAuthRegistrationError) -> OAuthRegistratio
 # Treat a cached token as expired this many seconds before its real expiry.
 _MARGIN = 120
 
+# How long the interactive login waits for the browser to hit the local callback
+# server. Some authorization servers drop the user on cancel without an error
+# redirect, so the callback simply never arrives — bound the wait rather than
+# hang forever. Generous: it has to cover reading a consent screen and an MFA
+# prompt. Headless login is not bounded — a human pasting a URL may take any
+# amount of time.
+_CALLBACK_TIMEOUT = 300
+
 
 class ReauthenticationRequired(Exception):
     """Tokens absent or refresh failed. Run: mcpgen login <server>"""
@@ -1227,7 +1235,18 @@ async def login(
             async def callback_handler() -> tuple[str, str | None]:
                 print("Waiting for OAuth callback… (complete login in your browser)")
                 assert callback_future is not None
-                return await callback_future
+                try:
+                    # wait_for cancels the future on timeout; _serve_until_done
+                    # awaits the same future under suppress(), so the background
+                    # task exits cleanly instead of dangling.
+                    return await asyncio.wait_for(callback_future, _CALLBACK_TIMEOUT)
+                except TimeoutError:
+                    raise TimeoutError(
+                        f"No OAuth callback received within {_CALLBACK_TIMEOUT}s. The browser never "
+                        "returned to mcpgen — some authorization servers just close the tab when you "
+                        "cancel, without redirecting back. Retry, or use --headless to paste the "
+                        "redirect URL manually."
+                    ) from None
 
         provider = OAuthClientProvider(
             server_url=server_url,

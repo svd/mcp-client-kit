@@ -138,6 +138,11 @@ mcpgen login myserver   # opens browser; token stored at ~/.mcpgen/credentials.j
 
 Re-run when you see `ReauthenticationRequired`.
 
+The browser flow waits up to 300 seconds for the redirect. If you cancel on the consent
+screen, many authorization servers just close the tab without redirecting back, so mcpgen
+never hears anything — the wait then ends with `TimeoutError` instead of hanging. Your
+existing credential is left untouched by a failed or timed-out attempt.
+
 **No browser available (container, SSH, CI):**
 
 ```bash

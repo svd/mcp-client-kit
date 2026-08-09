@@ -15,6 +15,7 @@ import io
 import json
 import os
 import stat
+import time
 import warnings
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1563,3 +1564,79 @@ def test_login_headless_pasted_url_without_code_rejected(tmp_path):
                 await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp", headless=True)
 
     asyncio.run(run())
+
+
+def test_login_interactive_times_out_when_callback_never_arrives(tmp_path):
+    """A browser that never returns must fail, not hang.
+
+    Some authorization servers close the tab on cancel without an error
+    redirect, so no callback request ever reaches the local server and the
+    future stays pending forever.
+    """
+    creds = tmp_path / "credentials.json"
+    original_entry = {"tokens": {"access_token": "orig_tok", "token_type": "bearer"}}
+    creds.write_text(json.dumps({"acme": original_entry}))
+    os.chmod(creds, 0o600)
+
+    async def never_resolving_callback_server():
+        return 9999, asyncio.get_running_loop().create_future()
+
+    provider, fake_http = _capture_provider_and_invoke_callback()
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", never_resolving_callback_server),
+            patch("mcpgen._bridge._CALLBACK_TIMEOUT", 0.01),
+            patch("mcpgen._bridge._open_http", fake_http),
+            patch("mcpgen._bridge.OAuthClientProvider", provider),
+        ):
+            with pytest.raises(TimeoutError) as exc:
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp", headless=False)
+        assert "--headless" in str(exc.value)
+
+    asyncio.run(run())
+    assert json.loads(creds.read_text())["acme"] == original_entry, (
+        "a timed-out login must restore the prior credential"
+    )
+
+
+def test_login_headless_stdin_read_is_not_timed_out(tmp_path):
+    """The stdin paste must not inherit the browser timeout — humans are slow."""
+    creds = tmp_path / "credentials.json"
+    captured: dict = {}
+    result: dict = {}
+
+    def provider(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    @asynccontextmanager
+    async def fake_http(*args, **kwargs):
+        result["callback"] = await captured["callback_handler"]()
+        raise RuntimeError("callback returned")
+        yield  # unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._CALLBACK_TIMEOUT", 0.01),
+            patch("mcpgen._bridge._open_http", fake_http),
+            patch("mcpgen._bridge.OAuthClientProvider", provider),
+            patch("sys.stdin", _SlowStdin("http://localhost/callback?code=abc&state=xyz\n")),
+        ):
+            with pytest.raises(RuntimeError, match="callback returned"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp", headless=True)
+
+    asyncio.run(run())
+    # A TimeoutError instead would mean the stdin read inherited the browser bound.
+    assert result["callback"] == ("abc", "xyz")
+
+
+class _SlowStdin:
+    """stdin whose readline() takes longer than the patched callback timeout."""
+
+    def __init__(self, line: str):
+        self._line = line
+
+    def readline(self) -> str:
+        time.sleep(0.05)
+        return self._line

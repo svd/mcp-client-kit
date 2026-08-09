@@ -32,6 +32,17 @@
   which raises `ValueError: OAuth authorization failed: <error> — <description>` at the point of
   failure.
 
+- **`mcpgen login` no longer hangs forever when the browser never comes back.** The error-redirect
+  fix above only helps when the authorization server actually redirects; real ones often don't —
+  cancel the consent screen and the tab simply closes, so no request ever reaches the local
+  callback server and the wait never ends. The interactive flow now bounds that wait at 300s
+  (`_CALLBACK_TIMEOUT`) and raises `TimeoutError` explaining that the browser never returned,
+  with a pointer to `--headless` for pasting the redirect URL by hand. The timeout cancels the
+  pending callback future, so the background server task shuts down cleanly, and it unwinds
+  through the same restore path as any other login failure — a timed-out attempt leaves a
+  previously-working credential intact. Headless logins are deliberately unbounded: a human
+  pasting a URL may take arbitrarily long.
+
 ## [0.3.0] — 2026-07-14
 
 ### Fixed
