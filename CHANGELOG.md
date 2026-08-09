@@ -2,6 +2,36 @@
 
 ## [Unreleased] — 0.4.0
 
+### Added
+
+- **Headless OAuth login — `mcpgen login <server> --headless`** — logging in no longer requires
+  a browser on the machine running the command. Instead of opening a browser and binding a local
+  callback server, mcpgen prints the authorization URL to stderr, you authorize on any device,
+  and paste the resulting callback URL back on stdin. This is the only workable flow inside
+  containers, over SSH, and in CI, where `webbrowser.open()` silently does nothing and the
+  callback port is unreachable from wherever the browser actually runs. The redirect URI
+  registered in headless mode is port-less (`http://localhost/callback`) — nothing ever fetches
+  it, and keeping it free of an ephemeral port makes the registered value stable across runs for
+  servers that pin `redirect_uris`. Without the flag mcpgen auto-detects: macOS and Windows are
+  always treated as interactive, other platforms are headless when neither `DISPLAY` nor
+  `WAYLAND_DISPLAY` is set. `MCPGEN_HEADLESS=1`/`0` overrides the detection in either direction
+  for environments that guess wrong; an explicit `--headless`/`--no-headless` outranks both.
+
+- **`ensure_login_all(servers)`** — pre-flight refresh-or-login across several servers in one
+  call, for pipelines that talk to more than one MCP server and want every token settled before
+  work starts. Deliberately sequential: concurrent logins would open several browser tabs at
+  once and, in headless mode, race each other for stdin. Servers with a valid cached token stay
+  silent, so the steady-state cost is zero.
+
+### Fixed
+
+- **An authorization denial in the browser flow now fails with the same clear error as the
+  headless flow.** The local callback server extracted only `code` and `state` and ignored
+  `error`/`error_description`, so declining consent resolved the callback to `(None, None)` and
+  surfaced later as an opaque downstream failure. Both callback paths now share one parser,
+  which raises `ValueError: OAuth authorization failed: <error> — <description>` at the point of
+  failure.
+
 ## [0.3.0] — 2026-07-14
 
 ### Fixed

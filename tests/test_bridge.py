@@ -11,6 +11,7 @@ no pytest-asyncio dependency needed).
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import stat
@@ -1311,3 +1312,254 @@ def test_mcp_bridge_caller_resource_link_missing_uri_stays_none():
     result = _run_call_with_content(_FakeResourceLinkItem(uri=None, name="x.txt"))
     assert result["uri"] is None
     json.dumps(result)  # must not raise TypeError
+
+
+# ---------------------------------------------------------------------------
+# Headless login — callback parsing, detection, login()/ensure_login_all(), CLI
+# ---------------------------------------------------------------------------
+
+
+def test_parse_callback_query_returns_code_and_state():
+    assert _bridge._parse_callback_query("code=abc&state=xyz") == ("abc", "xyz")
+
+
+def test_parse_callback_query_raises_on_error_with_description():
+    with pytest.raises(ValueError) as exc:
+        _bridge._parse_callback_query("error=access_denied&error_description=User+said+no")
+    assert "access_denied" in str(exc.value)
+    assert "User said no" in str(exc.value)
+
+
+def test_parse_callback_query_error_without_description():
+    with pytest.raises(ValueError, match=r"\(no description\)"):
+        _bridge._parse_callback_query("error=server_error")
+
+
+def test_parse_callback_query_missing_code_returns_nones():
+    """A bare redirect (no code, no error) is not an error — the caller decides."""
+    assert _bridge._parse_callback_query("") == (None, None)
+
+
+def test_is_headless_env_override_forces_headless(monkeypatch):
+    monkeypatch.setenv("MCPGEN_HEADLESS", "1")
+    with patch("sys.platform", "darwin"):
+        assert _bridge._is_headless() is True
+
+
+def test_is_headless_env_override_forces_interactive(monkeypatch):
+    monkeypatch.setenv("MCPGEN_HEADLESS", "0")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    with patch("sys.platform", "linux"):
+        assert _bridge._is_headless() is False
+
+
+def test_is_headless_false_on_desktop_platforms(monkeypatch):
+    monkeypatch.delenv("MCPGEN_HEADLESS", raising=False)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    for platform in ("darwin", "win32"):
+        with patch("sys.platform", platform):
+            assert _bridge._is_headless() is False
+
+
+def test_is_headless_true_on_linux_without_display(monkeypatch):
+    monkeypatch.delenv("MCPGEN_HEADLESS", raising=False)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    with patch("sys.platform", "linux"):
+        assert _bridge._is_headless() is True
+
+
+def test_is_headless_false_on_linux_with_x11_display(monkeypatch):
+    monkeypatch.delenv("MCPGEN_HEADLESS", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    with patch("sys.platform", "linux"):
+        assert _bridge._is_headless() is False
+
+
+def test_is_headless_false_on_linux_with_wayland_display(monkeypatch):
+    monkeypatch.delenv("MCPGEN_HEADLESS", raising=False)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    with patch("sys.platform", "linux"):
+        assert _bridge._is_headless() is False
+
+
+def test_login_headless_skips_callback_server(tmp_path):
+    """headless=True must not bind a socket, and must register the port-less URI.
+
+    The redirect URI is never fetched in this mode — the user pastes it back —
+    so it stays port-less, which keeps the registered value stable across runs.
+    """
+    creds = tmp_path / "credentials.json"
+    provider_cls = MagicMock()
+    server = MagicMock()
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", server),
+            patch("mcpgen._bridge._open_http", _fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", provider_cls),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp", headless=True)
+
+    asyncio.run(run())
+    server.assert_not_called()
+    metadata = provider_cls.call_args.kwargs["client_metadata"]
+    assert [str(u) for u in metadata.redirect_uris] == ["http://localhost/callback"]
+    assert metadata.token_endpoint_auth_method == "none"
+
+
+def _capture_provider_and_invoke_callback():
+    """Provider factory + _open_http fake that drives the captured callback_handler.
+
+    _fake_http_fail short-circuits before the handler ever runs; this pair lets a
+    test exercise the headless stdin path end to end inside login().
+    """
+    captured: dict = {}
+
+    def provider(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    @asynccontextmanager
+    async def fake_http(*args, **kwargs):
+        await captured["callback_handler"]()
+        yield  # unreachable
+
+    return provider, fake_http
+
+
+def test_login_headless_empty_stdin_aborts_and_restores_credential(tmp_path):
+    """An empty paste aborts the login and leaves the prior credential intact."""
+    creds = tmp_path / "credentials.json"
+    original_entry = {"tokens": {"access_token": "orig_tok", "token_type": "bearer"}}
+    creds.write_text(json.dumps({"acme": original_entry}))
+    os.chmod(creds, 0o600)
+
+    provider, fake_http = _capture_provider_and_invoke_callback()
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._open_http", fake_http),
+            patch("mcpgen._bridge.OAuthClientProvider", provider),
+            patch("sys.stdin", io.StringIO("")),
+        ):
+            with pytest.raises(ValueError, match="No URL pasted"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp", headless=True)
+
+    asyncio.run(run())
+    assert json.loads(creds.read_text())["acme"] == original_entry
+
+
+def test_login_headless_pasted_url_error_surfaces(tmp_path):
+    """A denial pasted back reaches the caller as the shared ValueError."""
+    creds = tmp_path / "credentials.json"
+    provider, fake_http = _capture_provider_and_invoke_callback()
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._open_http", fake_http),
+            patch("mcpgen._bridge.OAuthClientProvider", provider),
+            patch("sys.stdin", io.StringIO("http://localhost/callback?error=access_denied\n")),
+        ):
+            with pytest.raises(ValueError, match="access_denied"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp", headless=True)
+
+    asyncio.run(run())
+
+
+def test_login_explicit_headless_false_beats_env(monkeypatch, tmp_path):
+    """headless=False wins over MCPGEN_HEADLESS=1 — the argument is the top priority."""
+    monkeypatch.setenv("MCPGEN_HEADLESS", "1")
+    creds = tmp_path / "credentials.json"
+    provider_cls = MagicMock()
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", _fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", provider_cls),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp", headless=False)
+
+    asyncio.run(run())
+    metadata = provider_cls.call_args.kwargs["client_metadata"]
+    assert [str(u) for u in metadata.redirect_uris] == ["http://localhost:9999/callback"]
+
+
+def test_ensure_login_all_runs_servers_in_order_with_kwargs(tmp_path):
+    """Sequential by design — parallel logins would race for the browser and stdin."""
+    creds = tmp_path / "credentials.json"
+    calls = []
+
+    async def fake_ensure_login(name, creds_path=None, **kwargs):
+        calls.append((name, creds_path, kwargs))
+
+    async def run():
+        with patch("mcpgen._bridge.ensure_login", fake_ensure_login):
+            await _bridge.ensure_login_all(
+                ["acme", "beta"],
+                creds,
+                config_path="/tmp/servers.json",
+                cred_backend="keyring",
+                headless=True,
+            )
+
+    asyncio.run(run())
+    assert [c[0] for c in calls] == ["acme", "beta"]
+    for _, creds_path, kwargs in calls:
+        assert creds_path == creds
+        assert kwargs == {
+            "config_path": "/tmp/servers.json",
+            "cred_backend": "keyring",
+            "headless": True,
+        }
+
+
+def test_ensure_login_threads_headless_into_login(tmp_path):
+    """ensure_login() with no cached token must pass headless through to login()."""
+    creds = tmp_path / "credentials.json"
+    login_mock = AsyncMock()
+
+    async def run():
+        with patch("mcpgen._bridge.login", login_mock):
+            await _bridge.ensure_login("acme", creds, url="https://acme.example.com/mcp", headless=True)
+
+    asyncio.run(run())
+    assert login_mock.await_args.kwargs["headless"] is True
+
+
+@pytest.mark.parametrize(
+    ("argv_flag", "expected"),
+    [(["--headless"], True), (["--no-headless"], False), ([], None)],
+)
+def test_cli_login_headless_flag(argv_flag, expected):
+    """--headless / --no-headless / absent → True / False / None at _bridge.login."""
+    from mcpgen.cli import main
+
+    login_mock = AsyncMock()
+    with patch("mcpgen._bridge.login", login_mock):
+        assert main(["login", "acme", *argv_flag]) == 0
+    assert login_mock.await_args.kwargs["headless"] is expected
+
+
+def test_login_headless_pasted_url_without_code_rejected(tmp_path):
+    """A URL pasted without ?code= (e.g. the bare redirect) fails loudly."""
+    creds = tmp_path / "credentials.json"
+    provider, fake_http = _capture_provider_and_invoke_callback()
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._open_http", fake_http),
+            patch("mcpgen._bridge.OAuthClientProvider", provider),
+            patch("sys.stdin", io.StringIO("http://localhost/callback\n")),
+        ):
+            with pytest.raises(ValueError, match="no \\?code="):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp", headless=True)
+
+    asyncio.run(run())
