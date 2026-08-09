@@ -33,6 +33,7 @@ async def _list_tools(
     client_name: str | None = None,
     config_path: str | None = None,
     cred_backend: str | None = None,
+    creds_path: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> list[dict]:
     async with _bridge.session(
@@ -43,6 +44,7 @@ async def _list_tools(
         client_name=client_name,
         config_path=config_path,
         cred_backend=cred_backend,
+        creds_path=creds_path,
         env=env,
     ) as s:
         result = await s.list_tools()
@@ -72,6 +74,7 @@ async def _probe(
     client_name: str | None = None,
     config_path: str | None = None,
     cred_backend: str | None = None,
+    creds_path: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
     """Return `(observed_shape, observed_byte_size)` for one live probe call."""
@@ -82,6 +85,7 @@ async def _probe(
         client_name=client_name,
         config_path=config_path,
         cred_backend=cred_backend,
+        creds_path=creds_path,
         env=env,
     )
     raw = await caller.call(server, tool, args)
@@ -100,6 +104,7 @@ async def _call(
     client_name: str | None = None,
     config_path: str | None = None,
     cred_backend: str | None = None,
+    creds_path: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> Any:
     caller = _bridge.McpBridgeCaller(
@@ -109,6 +114,7 @@ async def _call(
         client_name=client_name,
         config_path=config_path,
         cred_backend=cred_backend,
+        creds_path=creds_path,
         env=env,
     )
     return await caller.call(server, tool, args)
@@ -272,6 +278,7 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         client_name=ns.client_name,
         config_path=ns.config,
         cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
     try:
@@ -329,6 +336,7 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         client_name=ns.client_name,
         config_path=ns.config,
         cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
     shapes = []
@@ -400,6 +408,7 @@ def _cmd_call(ns: argparse.Namespace) -> int:
         client_name=ns.client_name,
         config_path=ns.config,
         cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
 
@@ -583,6 +592,7 @@ def _cmd_list(ns: argparse.Namespace) -> int:
         client_name=ns.client_name,
         config_path=ns.config,
         cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
     try:
@@ -620,6 +630,7 @@ def _cmd_login(ns: argparse.Namespace) -> int:
     asyncio.run(
         _bridge.login(
             ns.server,
+            _creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
             url=ns.url,
             client_name=ns.client_name,
             config_path=ns.config,
@@ -729,6 +740,12 @@ def _add_headless_flag(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _creds_path(ns: argparse.Namespace) -> Path | None:
+    """--creds as a Path, or None to let _bridge use DEFAULT_CREDS_PATH."""
+    value = getattr(ns, "creds", None)
+    return Path(value) if value else None
+
+
 def _callback_timeout(value: str) -> float:
     """argparse type for --callback-timeout: a non-negative number of seconds."""
     try:
@@ -755,6 +772,14 @@ def _add_conn_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--config", dest="config", help="servers config path; overrides $MCPGEN_SERVERS and the default search"
+    )
+    p.add_argument(
+        "--creds",
+        dest="creds",
+        metavar="PATH",
+        help=f"OAuth credentials file for both storing and reading tokens "
+        f"(default: {_bridge.DEFAULT_CREDS_PATH}). No effect with --bearer or --stdio, "
+        "which store no credentials.",
     )
     p.add_argument(
         "--cred-backend",

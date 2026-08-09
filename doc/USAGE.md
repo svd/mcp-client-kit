@@ -84,7 +84,7 @@ uv add mcp-client-kit            # or: pip install mcp-client-kit
 | `discover` | List servers from agent hosts | `--host <id>` (repeatable), `--json` |
 
 Connection flags shared by `codegen`/`list`/`probe`/`call`/`login`: `--url`,
-`--bearer`, `--stdio`, `--config`, `--client-name`, `--cred-backend`
+`--bearer`, `--stdio`, `--config`, `--client-name`, `--cred-backend`, `--creds`
 (see [§ Authenticate](#authenticate)).
 
 > **PII:** `call` writes the raw, unscrubbed payload. Name the file `*.probe-raw.json`
@@ -209,6 +209,22 @@ by `--cred-backend`, then `$MCPGEN_CRED_BACKEND`, then `~/.mcpgen/config.json`
 ```bash
 mcpgen login myserver --cred-backend keyring
 ```
+
+**Credential file location:** `--creds PATH` moves the `file` backend off
+`~/.mcpgen/credentials.json` — useful to keep one project's tokens out of the shared
+store, or to run two identities side by side. Pass the same path to every command
+that touches those tokens; a login written to one file is invisible to a call reading
+another:
+
+```bash
+mcpgen login myserver --creds ./.mcp-creds.json
+mcpgen call myserver whoami --creds ./.mcp-creds.json --out out.json
+```
+
+The flag has no effect with `--bearer` or `--stdio`, which store no credentials. In
+code the same value is `creds_path=` on `login()`, `ensure_login()`,
+`ensure_login_all()`, `session()`, and `McpBridgeCaller(...)`; `mcpgen.DEFAULT_CREDS_PATH`
+is exported as the default.
 
 **Validate keyring storage** — confirm the token landed in the OS keystore, not the
 fallback file (service `mcpgen`, username `credentials`):

@@ -18,6 +18,7 @@ import stat
 import time
 import warnings
 from contextlib import asynccontextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -113,7 +114,7 @@ def test_session_routes_bearer_not_oauth_when_bearer_provided():
         yield _make_mock_session()
 
     @asynccontextmanager
-    async def fake_oauth(name, url, *, client_name=None, cred_backend=None):
+    async def fake_oauth(name, url, *, client_name=None, cred_backend=None, creds_path=None):
         oauth_calls.append(name)
         yield _make_mock_session()
 
@@ -161,7 +162,7 @@ def test_session_oauth_path_unchanged_without_bearer():
     oauth_calls: list = []
 
     @asynccontextmanager
-    async def fake_oauth(name, url, *, client_name=None, cred_backend=None):
+    async def fake_oauth(name, url, *, client_name=None, cred_backend=None, creds_path=None):
         oauth_calls.append(name)
         yield _make_mock_session()
 
@@ -1806,3 +1807,125 @@ def test_cli_login_callback_timeout_rejects_invalid(bad, capsys):
         main(["login", "acme", "--callback-timeout", bad])
     assert exc.value.code == 2
     assert "--callback-timeout" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# creds_path on the CALL path (not just login)
+# ---------------------------------------------------------------------------
+
+
+def _recording_storage_factory(recorded: dict):
+    """Stand-in for FileTokenStorage that records how it was constructed."""
+
+    def factory(server_name, credentials_path=_bridge.DEFAULT_CREDS_PATH, *, backend=None):
+        recorded["server_name"] = server_name
+        recorded["credentials_path"] = credentials_path
+        recorded["backend"] = backend
+        storage = MagicMock()
+        storage._load.return_value = {}
+        return storage
+
+    return factory
+
+
+def _run_failing_call(recorded: dict, **caller_kwargs):
+    """Drive McpBridgeCaller.call() far enough to construct the token storage."""
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.FileTokenStorage", _recording_storage_factory(recorded)),
+            patch("mcpgen._bridge._pre_flight_refresh", AsyncMock()),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+            patch("mcpgen._bridge._open_http", _fake_http_fail),
+        ):
+            caller = _bridge.McpBridgeCaller(url="https://acme.example.com/mcp", **caller_kwargs)
+            with pytest.raises(RuntimeError, match="network error"):
+                await caller.call("acme", "whoami", {})
+
+    asyncio.run(run())
+
+
+def test_call_path_uses_custom_creds_path(tmp_path):
+    """A caller-supplied creds_path must reach the token storage on the call path.
+
+    login() honoured creds_path but the session did not, so tokens were written
+    to one file and read from another.
+    """
+    creds = tmp_path / "alt-credentials.json"
+    recorded: dict = {}
+    _run_failing_call(recorded, creds_path=creds)
+    assert recorded["credentials_path"] == creds
+
+
+def test_call_path_defaults_to_default_creds_path():
+    """No creds_path → DEFAULT_CREDS_PATH; existing behaviour is unchanged."""
+    recorded: dict = {}
+    _run_failing_call(recorded)
+    assert recorded["credentials_path"] == _bridge.DEFAULT_CREDS_PATH
+
+
+def test_session_forwards_creds_path_to_http_session(tmp_path):
+    """session() is a public entry point too — it must forward the path."""
+    creds = tmp_path / "alt-credentials.json"
+    recorded: dict = {}
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.FileTokenStorage", _recording_storage_factory(recorded)),
+            patch("mcpgen._bridge._pre_flight_refresh", AsyncMock()),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+            patch("mcpgen._bridge._open_http", _fake_http_fail),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                async with _bridge.session("acme", url="https://acme.example.com/mcp", creds_path=creds):
+                    pass
+
+    asyncio.run(run())
+    assert recorded["credentials_path"] == creds
+
+
+def test_default_creds_path_is_exported():
+    """Consumers need the default as a value instead of re-deriving the path."""
+    import mcpgen
+
+    assert mcpgen.DEFAULT_CREDS_PATH is _bridge.DEFAULT_CREDS_PATH
+    assert "DEFAULT_CREDS_PATH" in mcpgen.__all__
+
+
+def _fake_session_factory(captured: dict):
+    @asynccontextmanager
+    async def fake_session(*args, **kwargs):
+        captured.update(kwargs)
+        s = MagicMock()
+        s.list_tools = AsyncMock(return_value=MagicMock(tools=[]))
+        yield s
+
+    return fake_session
+
+
+@pytest.mark.parametrize(
+    ("argv_flag", "expected"),
+    [(["--creds", "/tmp/alt-creds.json"], Path("/tmp/alt-creds.json")), ([], None)],
+)
+def test_cli_creds_flag_reaches_session(argv_flag, expected):
+    """`--creds` on a session-opening command arrives at _bridge.session."""
+    from mcpgen.cli import main
+
+    captured: dict = {}
+    with patch("mcpgen._bridge.session", _fake_session_factory(captured)):
+        assert main(["list", "acme", "--url", "https://acme.example.com/mcp", *argv_flag]) == 0
+    assert captured["creds_path"] == expected
+
+
+@pytest.mark.parametrize(
+    ("argv_flag", "expected"),
+    [(["--creds", "/tmp/alt-creds.json"], Path("/tmp/alt-creds.json")), ([], _bridge.DEFAULT_CREDS_PATH)],
+)
+def test_cli_login_passes_creds_path(argv_flag, expected):
+    """`mcpgen login` previously dropped --creds entirely — it must log in to that file."""
+    from mcpgen.cli import main
+
+    login_mock = AsyncMock()
+    with patch("mcpgen._bridge.login", login_mock):
+        assert main(["login", "acme", *argv_flag]) == 0
+    assert login_mock.await_args.args[1] == expected

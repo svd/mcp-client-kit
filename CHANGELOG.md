@@ -2,6 +2,33 @@
 
 ## [Unreleased] — 0.5.0
 
+### Fixed
+
+- **A caller-supplied credentials path was silently ignored once past login, so tokens were
+  written to one file and read from another.** `login()` and `ensure_login()` accepted
+  `creds_path` and honoured it, but the call path never did: `_http_session()` built its
+  `FileTokenStorage` on the default `~/.mcpgen/credentials.json`, and neither `session()` nor
+  `McpBridgeCaller` even accepted the parameter, so there was no way to route a call to the file
+  the login had just written. Anyone keeping tokens outside the shared store — a project-local
+  credentials file, two identities side by side, a test fixture — logged in successfully and then
+  got `ReauthenticationRequired` on the very next call, in a loop, with both files on disk looking
+  plausible. `creds_path` now flows through `_http_session()`, `session()`, and
+  `McpBridgeCaller`, defaulting to `DEFAULT_CREDS_PATH` when omitted, so existing behaviour is
+  unchanged. The stdio, bearer, static-header, and raw-URL transports do not take it: they store
+  no credentials at all, and a parameter that silently does nothing is worse than its absence.
+
+### Added
+
+- **`--creds PATH`** on every command that opens a session or logs in (`codegen`, `list`, `probe`,
+  `call`, `login`) — the CLI surface for the fix above. `mcpgen login` previously dropped the
+  path entirely, having no flag to drop it from; it now logs in to exactly the file the
+  subsequent calls will read.
+
+- **`DEFAULT_CREDS_PATH` is exported from `mcpgen`** — consumers that thread a credentials path
+  through their own CLI need the default as a value. Re-deriving
+  `Path.home() / ".mcpgen" / "credentials.json"` downstream would silently drift the day mcpgen
+  changes it.
+
 ## [0.4.0] — 2026-08-09
 
 ### Added
