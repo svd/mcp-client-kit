@@ -80,12 +80,16 @@ uv add mcp-client-kit            # or: pip install mcp-client-kit
 | `call <server> <tool>` | One live call, raw payload to disk — bootstrap ids / inspect output | `--out <path>` (required) |
 | `merge <server>` | Consolidate `.parts/` → `<server>.shapes.json`; emit gitignored `verify.json` | `--out <path>` |
 | `login <server>` | Browser OAuth login | `--headless` / `--no-headless`, `--callback-timeout <seconds>`, connection flags below |
-| `migrate-creds` | Copy stored OAuth tokens between `file`/`keyring` backends | `--from`, `--to`, `--servers`, `--purge`, `--set-default` |
+| `migrate-creds` | Copy stored OAuth tokens between `file`/`keyring` backends | `--from`, `--to`, `--servers`, `--purge`, `--set-default`, `--creds <path>` |
 | `discover` | List servers from agent hosts | `--host <id>` (repeatable), `--json` |
 
 Connection flags shared by `codegen`/`list`/`probe`/`call`/`login`: `--url`,
 `--bearer`, `--stdio`, `--config`, `--client-name`, `--cred-backend`, `--creds`
 (see [§ Authenticate](#authenticate)).
+
+`--creds` is also accepted by the credential-management commands — `list-creds`,
+`delete-creds`, `migrate-creds` — so a non-default store stays addressable from every
+command that reads or writes it.
 
 > **PII:** `call` writes the raw, unscrubbed payload. Name the file `*.probe-raw.json`
 > (gitignored) and never commit it.
@@ -219,6 +223,7 @@ another:
 ```bash
 mcpgen login myserver --creds ./.mcp-creds.json
 mcpgen call myserver whoami --creds ./.mcp-creds.json --out out.json
+mcpgen list-creds --creds ./.mcp-creds.json
 ```
 
 The flag has no effect with `--bearer` or `--stdio`, which store no credentials. In

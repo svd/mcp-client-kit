@@ -1929,3 +1929,43 @@ def test_cli_login_passes_creds_path(argv_flag, expected):
     with patch("mcpgen._bridge.login", login_mock):
         assert main(["login", "acme", *argv_flag]) == 0
     assert login_mock.await_args.args[1] == expected
+
+
+@pytest.mark.parametrize(
+    ("argv_flag", "expected"),
+    [(["--creds", "/tmp/alt-creds.json"], Path("/tmp/alt-creds.json")), ([], _bridge.DEFAULT_CREDS_PATH)],
+)
+def test_cli_list_creds_passes_creds_path(argv_flag, expected):
+    """`list-creds` must inspect the same store `login --creds` wrote to."""
+    from mcpgen.cli import main
+
+    with patch("mcpgen._bridge.list_creds", return_value=[]) as list_mock:
+        assert main(["list-creds", *argv_flag]) == 0
+    assert list_mock.call_args.kwargs["credentials_path"] == expected
+
+
+@pytest.mark.parametrize(
+    ("argv_flag", "expected"),
+    [(["--creds", "/tmp/alt-creds.json"], Path("/tmp/alt-creds.json")), ([], _bridge.DEFAULT_CREDS_PATH)],
+)
+def test_cli_delete_creds_passes_creds_path(argv_flag, expected):
+    """Deleting from the default store when the user named another would be a silent no-op."""
+    from mcpgen.cli import main
+
+    with patch("mcpgen._bridge.delete_cred", return_value=True) as delete_mock:
+        assert main(["delete-creds", "acme", "--yes", *argv_flag]) == 0
+    assert delete_mock.call_args.kwargs["credentials_path"] == expected
+
+
+@pytest.mark.parametrize(
+    ("argv_flag", "expected"),
+    [(["--creds", "/tmp/alt-creds.json"], Path("/tmp/alt-creds.json")), ([], _bridge.DEFAULT_CREDS_PATH)],
+)
+def test_cli_migrate_creds_passes_creds_path(argv_flag, expected):
+    """migrate-creds reads and writes the file backend — it needs the path too."""
+    from mcpgen.cli import main
+
+    result = {"from": "file", "to": "keyring", "migrated": 0, "overwritten": 0, "purged": False, "set_default": False}
+    with patch("mcpgen._bridge.migrate_creds", return_value=result) as migrate_mock:
+        assert main(["migrate-creds", "--from", "file", "--to", "keyring", *argv_flag]) == 0
+    assert migrate_mock.call_args.kwargs["credentials_path"] == expected

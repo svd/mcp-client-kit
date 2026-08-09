@@ -653,6 +653,7 @@ def _cmd_migrate_creds(ns: argparse.Namespace) -> int:
         ns.from_backend,
         ns.to_backend,
         servers=parsed_servers,
+        credentials_path=_creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
         purge=ns.purge,
         set_default=ns.set_default,
     )
@@ -672,7 +673,11 @@ def _cmd_migrate_creds(ns: argparse.Namespace) -> int:
 
 def _cmd_list_creds(ns: argparse.Namespace) -> int:
     """Print stored credentials as a human table (default) or JSON (--json)."""
-    rows = _bridge.list_creds(backend=ns.cred_backend, expired_only=ns.expired)
+    rows = _bridge.list_creds(
+        backend=ns.cred_backend,
+        credentials_path=_creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
+        expired_only=ns.expired,
+    )
 
     if ns.json:
         sys.stdout.write(json.dumps(rows, indent=2) + "\n")
@@ -719,7 +724,11 @@ def _cmd_delete_creds(ns: argparse.Namespace) -> int:
             print("[delete-creds] aborted", file=sys.stderr)
             return 0
 
-    existed = _bridge.delete_cred(ns.server, backend=ns.cred_backend)
+    existed = _bridge.delete_cred(
+        ns.server,
+        backend=ns.cred_backend,
+        credentials_path=_creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
+    )
     if existed:
         print(f"[delete-creds] deleted {ns.server!r}", file=sys.stderr)
     else:
@@ -737,6 +746,27 @@ def _add_headless_flag(p: argparse.ArgumentParser) -> None:
         "instead of opening a browser. --no-headless forces the browser flow. "
         "Default: auto-detect (headless without DISPLAY/WAYLAND_DISPLAY; "
         "override with MCPGEN_HEADLESS).",
+    )
+
+
+def _add_creds_flag(p: argparse.ArgumentParser, *, transport_note: bool = True) -> None:
+    """Add --creds PATH — the file backend's credentials store.
+
+    Shared by the connection commands and the credential-management ones, so a
+    non-default store stays addressable end to end: login writes it, calls read
+    it, list/delete/migrate operate on it.
+    """
+    note = (
+        " No effect with --bearer or --stdio, which store no credentials."
+        if transport_note
+        else " Only the file backend has a path; the keyring backend ignores it."
+    )
+    p.add_argument(
+        "--creds",
+        dest="creds",
+        metavar="PATH",
+        help=f"OAuth credentials file for both storing and reading tokens "
+        f"(default: {_bridge.DEFAULT_CREDS_PATH}).{note}",
     )
 
 
@@ -773,14 +803,7 @@ def _add_conn_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--config", dest="config", help="servers config path; overrides $MCPGEN_SERVERS and the default search"
     )
-    p.add_argument(
-        "--creds",
-        dest="creds",
-        metavar="PATH",
-        help=f"OAuth credentials file for both storing and reading tokens "
-        f"(default: {_bridge.DEFAULT_CREDS_PATH}). No effect with --bearer or --stdio, "
-        "which store no credentials.",
-    )
+    _add_creds_flag(p)
     p.add_argument(
         "--cred-backend",
         dest="cred_backend",
@@ -932,6 +955,7 @@ def main(argv: list[str] | None = None) -> int:
         help="write cred_backend=<to> into ~/.mcpgen/config.json so future "
         "commands default to the target backend (default: leave config untouched)",
     )
+    _add_creds_flag(mc, transport_note=False)
     mc.set_defaults(func=_cmd_migrate_creds)
 
     lc = sub.add_parser("list-creds", help="list stored credentials (flags expired)")
@@ -951,6 +975,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=["file", "keyring", "auto"],
         help="credential storage backend (default: resolved from env/config, else file)",
     )
+    _add_creds_flag(lc, transport_note=False)
     lc.set_defaults(func=_cmd_list_creds)
 
     dl = sub.add_parser("delete-creds", help="delete the stored credential for one server")
@@ -967,6 +992,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=["file", "keyring", "auto"],
         help="credential storage backend (default: resolved from env/config, else file)",
     )
+    _add_creds_flag(dl, transport_note=False)
     dl.set_defaults(func=_cmd_delete_creds)
 
     dc = sub.add_parser("discover", help="list MCP servers from installed agent hosts")

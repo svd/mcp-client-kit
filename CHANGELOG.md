@@ -19,10 +19,15 @@
 
 ### Added
 
-- **`--creds PATH`** on every command that opens a session or logs in (`codegen`, `list`, `probe`,
-  `call`, `login`) — the CLI surface for the fix above. `mcpgen login` previously dropped the
+- **`--creds PATH`** on every command that touches stored credentials — `codegen`, `list`,
+  `probe`, `call`, `login`, and the management trio `list-creds`, `delete-creds`,
+  `migrate-creds` — the CLI surface for the fix above. `mcpgen login` previously dropped the
   path entirely, having no flag to drop it from; it now logs in to exactly the file the
-  subsequent calls will read.
+  subsequent calls will read. The management commands were the other half of the same gap: all
+  three already took a `credentials_path` internally but exposed no way to set it, so after a
+  `--creds` login `list-creds` reported an empty store, `delete-creds` deleted nothing while
+  saying so, and `migrate-creds` migrated the wrong file. A flag that exists on half the
+  commands that read a file is worse than no flag at all — it makes the other half look broken.
 
 - **`DEFAULT_CREDS_PATH` is exported from `mcpgen`** — consumers that thread a credentials path
   through their own CLI need the default as a value. Re-deriving
