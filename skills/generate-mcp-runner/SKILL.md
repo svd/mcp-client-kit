@@ -178,10 +178,15 @@ Write the file with this structure:
 **b. Call body** (replaces `$demo_calls`): for each tool in workflow order, emit one block:
 
 ```python
-    # <tool_name> -> <ReturnAnnotation>
-    result = await <module>.<fn>(caller, param=value, ...)
-    <shape-aware print>
+        # <tool_name> -> <ReturnAnnotation>
+        result = await <module>.<fn>(caller, param=value, ...)
+        <shape-aware print>
 ```
+
+**Indentation: 8 spaces, not 4.** In every skeleton `$demo_calls` now sits inside
+`async with caller.connected():` within `async def main()`, so each emitted line needs two
+levels of indentation. Emit every demo call inside the `connected()` block so the run uses
+one connection lifecycle.
 
 **Shape-aware print conventions** — choose based on `shapes.json` entry:
 
@@ -198,19 +203,19 @@ rather than reusing `result` — it makes the script readable as a flow.
 **c. Discriminated tool variants** — emit adjacent blocks:
 
 ```python
-    # <tool> -> list[Variant1]  (discriminator=1)
-    v1 = await <module>.<fn>(caller, discriminator=1, ...)
-    print(f"<tool>(1): {len(v1)} record(s)")
+        # <tool> -> list[Variant1]  (discriminator=1)
+        v1 = await <module>.<fn>(caller, discriminator=1, ...)
+        print(f"<tool>(1): {len(v1)} record(s)")
 
-    # <tool> -> list[Variant2]  (discriminator=2)
-    v2 = await <module>.<fn>(caller, discriminator=2, ...)
-    print(f"<tool>(2): {len(v2)} record(s)")
+        # <tool> -> list[Variant2]  (discriminator=2)
+        v2 = await <module>.<fn>(caller, discriminator=2, ...)
+        print(f"<tool>(2): {len(v2)} record(s)")
 ```
 
-**d. Skipped tools comment** — before the first call in `main()`:
+**d. Skipped tools comment** — before the first call inside the `connected()` block:
 
 ```python
-    # Skipped mutating tools: create_entity, update_entity, delete_entity
+        # Skipped mutating tools: create_entity, update_entity, delete_entity
 ```
 
 **e. Docstring** — the file-level `"""..."""` from the chosen skeleton already documents

@@ -1,6 +1,6 @@
 """
 Smoke-test runner for generated $server_name/ wrappers.
-Transport: HTTP/SSE  ($launch)
+Transport: Streamable HTTP  ($launch)
 Auth: OAuth (browser flow via mcpgen)
 
 Usage:
@@ -28,6 +28,9 @@ async def main() -> None:
     await ensure_login(SERVER_NAME)
     caller = McpBridgeCaller(url=SERVER_URL)
 
+    # One connection for the whole run: one initialize() and one OAuth
+    # pre-flight refresh, instead of one per tool call.
+    async with caller.connected():
 $demo_calls
 
 if __name__ == "__main__":

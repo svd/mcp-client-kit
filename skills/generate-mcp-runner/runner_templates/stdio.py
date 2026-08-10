@@ -19,6 +19,9 @@ from mcpgen import McpBridgeCaller
 async def main() -> None:
     caller = McpBridgeCaller(cmd="$launch")
 
+    # One connection for the whole run: a single initialize() and a single
+    # subprocess, instead of reconnecting for every tool call.
+    async with caller.connected():
 $demo_calls
 
 if __name__ == "__main__":
