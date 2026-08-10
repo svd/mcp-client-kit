@@ -12,29 +12,8 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
-
 from mcpgen import McpBridgeCaller
 from mcpgen.cli import main
-
-# Known product defect, pinned here rather than papered over.
-#
-# An MCP server returning a list serializes it as one content block per element
-# (FastMCP does; the spec allows it generally). `_bridge.parse()` reads only
-# `content_items[0]` and never consults `result.structuredContent`, so a
-# generated wrapper for a list-returning tool silently returns just the first
-# element. Raw capture for `list_records(limit=2)`:
-#
-#     content: [{"id": 1, ...}, {"id": 2, ...}]        <- two text blocks
-#     structuredContent: {"result": [ ...both... ]}    <- ignored
-#     parse() -> {"id": 1, "name": "record-1"}         <- second record lost
-#
-# The test below asserts the correct result and is marked xfail(strict=True):
-# when `parse()` learns to reassemble multi-block results, it starts passing and
-# strict mode fails the suite, prompting removal of this marker.
-_LIST_TRUNCATION = (
-    "product bug: parse() reads content[0] only, so multi-block list results lose every element but the first"
-)
 
 
 def _load(path: Path, name: str):
@@ -60,7 +39,6 @@ def test_generated_wrapper_calls_the_real_tool(tmp_path, stdio_cmd):
     assert total == 42
 
 
-@pytest.mark.xfail(strict=True, reason=_LIST_TRUNCATION)
 def test_generated_wrapper_returns_a_list_of_records(tmp_path, stdio_cmd):
     out = tmp_path / "demo_list.py"
     main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(out)])
@@ -127,8 +105,9 @@ def test_two_calls_share_one_connection_block(tmp_path, stdio_cmd):
 
     The plan's third call was ``list_records``; it is ``styled`` here so this
     acceptance test fails only if the connection block is broken, never because
-    of the unrelated multi-block truncation defect described at the top of this
-    module. Three distinct tools still share one block.
+    of an unrelated defect in how a multi-block result is parsed — that is
+    ``test_generated_wrapper_returns_a_list_of_records``'s job. Three distinct
+    tools still share one block.
     """
     out = tmp_path / "demo_block.py"
     main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(out)])

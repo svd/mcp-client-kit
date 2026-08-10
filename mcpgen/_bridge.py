@@ -1213,8 +1213,8 @@ def _summarize_content_item(item: Any) -> dict:
     return {"type": item_type, "text": getattr(item, "text", "")}
 
 
-def parse(content_items: list) -> Any:
-    """Extract and JSON-parse the text payload from an MCP tool result.
+def _parse_one(item: Any) -> Any:
+    """Parse a single MCP content block into a Python value.
 
     Falls back to ``ast.literal_eval`` for Python-repr payloads (e.g. servers
     that return single-quoted dicts like sqlite), then to a plain string as a
@@ -1224,9 +1224,6 @@ def parse(content_items: list) -> Any:
     to parse — return the block's own summary dict as-is rather than falling
     through to an empty string, so the shape-spec records something real.
     """
-    if not content_items:
-        raise ValueError("MCP tool result has empty content")
-    item = content_items[0]
     item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
     if item_type in ("image", "resource", "resource_link"):
         return item if isinstance(item, dict) else _summarize_content_item(item)
@@ -1238,6 +1235,30 @@ def parse(content_items: list) -> Any:
             return ast.literal_eval(text)
         except (ValueError, SyntaxError):
             return text
+
+
+def parse(content_items: list) -> Any:
+    """Extract the payload from an MCP tool result.
+
+    MCP serializes a list return value as one content block per element, so a
+    multi-block result must fold into a list — reading only the first block
+    silently drops data, which is what this function used to do.
+
+    A single block returns its value directly rather than a one-element list:
+    that is the overwhelmingly common case and wrapping it would change the
+    return type of every existing wrapper.
+
+    ``structuredContent`` is deliberately not consulted. Its presence depends on
+    whether the tool author annotated the return type, and its wrapping depends
+    on whether the value is a JSON object, so relying on it would make
+    correctness a function of someone else's type hints. Content blocks are
+    transport-level and always present.
+    """
+    if not content_items:
+        raise ValueError("MCP tool result has empty content")
+    if len(content_items) == 1:
+        return _parse_one(content_items[0])
+    return [_parse_one(item) for item in content_items]
 
 
 # ---------------------------------------------------------------------------

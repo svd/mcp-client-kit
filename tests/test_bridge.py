@@ -2490,3 +2490,64 @@ def test_url_override_bypasses_the_sse_guard(tmp_path):
 
     asyncio.run(run())
     assert opened["url"] == "https://x.example/mcp"
+
+
+# ---------------------------------------------------------------------------
+# parse(): multi-block results must not lose data
+# ---------------------------------------------------------------------------
+
+
+def test_parse_multiple_text_blocks_returns_a_list():
+    """MCP serializes a list return as one content block per element."""
+    blocks = [
+        {"type": "text", "text": '{"id": 1, "name": "record-1"}'},
+        {"type": "text", "text": '{"id": 2, "name": "record-2"}'},
+        {"type": "text", "text": '{"id": 3, "name": "record-3"}'},
+    ]
+    assert _bridge.parse(blocks) == [
+        {"id": 1, "name": "record-1"},
+        {"id": 2, "name": "record-2"},
+        {"id": 3, "name": "record-3"},
+    ]
+
+
+def test_parse_single_block_is_unchanged():
+    """The common case must stay byte-compatible — no list wrapping."""
+    assert _bridge.parse([{"type": "text", "text": '{"a": 1}'}]) == {"a": 1}
+
+
+def test_parse_single_block_scalar_is_unchanged():
+    assert _bridge.parse([{"type": "text", "text": "42"}]) == 42
+
+
+def test_parse_multiple_plain_string_blocks():
+    """Non-JSON text blocks fold into a list of strings rather than vanishing."""
+    blocks = [{"type": "text", "text": "alpha"}, {"type": "text", "text": "beta"}]
+    assert _bridge.parse(blocks) == ["alpha", "beta"]
+
+
+def test_parse_multiple_blocks_of_mixed_types():
+    """A text block plus an image block keeps both, in order."""
+    blocks = [
+        {"type": "text", "text": '{"a": 1}'},
+        {"type": "image", "mimeType": "image/png", "data": "…"},
+    ]
+    result = _bridge.parse(blocks)
+    assert result[0] == {"a": 1}
+    assert result[1]["type"] == "image"
+
+
+def test_parse_empty_still_raises():
+    with pytest.raises(ValueError, match="empty content"):
+        _bridge.parse([])
+
+
+def test_parse_single_image_block_is_unchanged():
+    block = {"type": "image", "mimeType": "image/png", "data": "…"}
+    assert _bridge.parse([block]) == block
+
+
+def test_parse_multiple_python_repr_blocks():
+    """The ast.literal_eval fallback applies per block, not just to the first."""
+    blocks = [{"type": "text", "text": "{'a': 1}"}, {"type": "text", "text": "{'b': 2}"}]
+    assert _bridge.parse(blocks) == [{"a": 1}, {"b": 2}]
