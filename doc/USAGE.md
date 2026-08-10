@@ -14,8 +14,13 @@
 
 ## Path A — Plugin / skill (recommended)
 
-The plugin bundles the `generate-mcp-wrappers` skill. The skill drives the engine
-automatically via `uvx` — no separate engine install needed.
+The plugin bundles the `generate-mcp-wrappers` skill, which drives the engine for you.
+
+The skill requires the `mcpgen` CLI on `PATH` and checks for it before running. Install
+it separately (`uv tool install mcp-client-kit`, or `uv add mcp-client-kit` in a project);
+the plugin does not bundle it. You can also invoke the CLI ad hoc without installing via
+`uvx --from mcp-client-kit mcpgen …`, but the skill itself needs `mcpgen` resolvable on
+`PATH`.
 
 **Install the plugin:**
 
@@ -32,14 +37,18 @@ Or via the `svd-agent-skills` aggregator if it's listed there.
 ```
 
 The skill:
-1. Generates mechanical stubs (`mcpgen codegen`) for the target server.
+1. Generates mechanical stubs (`mcpgen codegen`) for the target server — typed inputs,
+   `Any` returns.
 2. Probes chosen tools live (`mcpgen probe`) to capture actual response shapes.
-3. Regenerates wrappers with real return types.
+3. Edits the shape-spec — the judgment pass over what the probes observed.
+4. Regenerates wrappers, now with real return types.
+
+Return types are never inferred from a tool's `inputSchema`; they come from steps 2–3.
 
 Before the skill can reach your server, complete [§ Configure a server](#configure-a-server)
 and [§ Authenticate](#authenticate).
 
-For the full 6-step procedure see [§ The skill procedure](#the-skill-procedure).
+For the full 7-step procedure see [§ The skill procedure](#the-skill-procedure).
 
 ---
 
@@ -74,18 +83,23 @@ uv add mcp-client-kit            # or: pip install mcp-client-kit
 
 | Command | Purpose | Key flags |
 |---------|---------|-----------|
-| `codegen <server>` | Emit typed wrappers | `--out`, `--shapes <path>`, `--probe <tool>` / `--probe-args`, `--embed-schema` |
+| `codegen <server>` | Emit wrappers (typed inputs; typed returns once `--shapes` is supplied) and a tool-inventory manifest | `--out`, `--shapes <path>`, `--probe <tool>` / `--probe-args`, `--embed-schema`, `--manifest <path>`, `--no-manifest` |
+| `check <server>` | Compare the live tool inventory against a stored manifest | `--manifest <path>`, `--json`, `--update`, `--stdio` |
 | `list <server>` | Tools as JSON `[{name, description}]` (add `--schema` for `inputSchema` per tool); discriminator advisory on stderr | `--schema` |
 | `probe <server> <tool>` | Live call(s) → shape skeleton | `--args` (repeatable), `--emit-shape <path>` (writes `.parts/`) |
 | `call <server> <tool>` | One live call, raw payload to disk — bootstrap ids / inspect output | `--out <path>` (required) |
 | `merge <server>` | Consolidate `.parts/` → `<server>.shapes.json`; emit gitignored `verify.json` | `--out <path>` |
 | `login <server>` | Browser OAuth login | `--headless` / `--no-headless`, `--callback-timeout <seconds>`, connection flags below |
 | `migrate-creds` | Copy stored OAuth tokens between `file`/`keyring` backends | `--from`, `--to`, `--servers`, `--purge`, `--set-default`, `--creds <path>` |
-| `discover` | List servers from agent hosts | `--host <id>` (repeatable), `--json` |
+| `discover` | List MCP servers configured in Claude Code | `--host <id>` (repeatable), `--json` |
 
-Connection flags shared by `codegen`/`list`/`probe`/`call`/`login`: `--url`,
+Connection flags shared by `codegen`/`check`/`list`/`probe`/`call`/`login`: `--url`,
 `--bearer`, `--stdio`, `--config`, `--client-name`, `--cred-backend`, `--creds`
 (see [§ Authenticate](#authenticate)).
+
+`discover` enumerates the MCP servers configured in **Claude Code**. Only Claude Code is
+implemented today; `discovery.PROVIDERS` is the extension point where support for more
+hosts gets added.
 
 `--creds` is also accepted by the credential-management commands — `list-creds`,
 `delete-creds`, `migrate-creds` — so a non-default store stays addressable from every
@@ -129,6 +143,20 @@ Both formats are accepted:
   } 
 }
 ```
+
+### Supported transports
+
+**stdio** and **Streamable HTTP** only.
+
+SSE servers are surfaced by `mcpgen discover` but marked unsupported (`probeable: false`,
+with an explanatory note). A config entry declaring `"type": "sse"` is refused up front
+with an explicit error rather than failing obscurely part-way through a connection, so
+`list` / `codegen` / `probe` / `call` all stop with a message naming SSE as the cause.
+
+Known limit: the refusal reads the declared `type` from your server config. A URL passed
+inline with `--url` — or a `--bearer` / `--stdio` override, which bypasses the config
+lookup — carries no declared transport type, so it cannot be detected up front and will
+instead fail at the transport layer with the SDK's own error.
 
 ---
 
@@ -202,13 +230,13 @@ mcpgen codegen myserver --stdio "python path/to/server.py" --out myserver.py
 
 OAuth tokens are stored via one of three backends, selected (highest priority first)
 by `--cred-backend`, then `$MCPGEN_CRED_BACKEND`, then `~/.mcpgen/config.json`
-(`{"cred_backend": "..."}`), defaulting to `auto`.
+(`{"cred_backend": "..."}`), defaulting to `file`.
 
 | Backend | Storage |
 |---------|---------|
-| `file` | `~/.mcpgen/credentials.json` (chmod 0600) — works everywhere |
+| `file` | `~/.mcpgen/credentials.json` (chmod 0600) — works everywhere **(default)** |
 | `keyring` | OS native keystore (Keychain / Credential Locker / Secret Service); falls back to `file` with a warning if the keystore is unavailable |
-| `auto` | Try `keyring`; if keystore is unavailable fall back to `file` silently — no warning (default) |
+| `auto` | Try `keyring`; if keystore is unavailable fall back to `file` silently — no warning |
 
 ```bash
 mcpgen login myserver --cred-backend keyring
@@ -257,7 +285,7 @@ export MCPGEN_CRED_BACKEND=keyring
 ```
 
 Priority order (highest first): `--cred-backend` flag → `$MCPGEN_CRED_BACKEND` →
-`~/.mcpgen/config.json` → default (`auto`).
+`~/.mcpgen/config.json` → default (`file`).
 
 **Migrate credentials between backends** — use `migrate-creds` to move stored OAuth tokens
 from one backend to the other. Both `--from` and `--to` are required and must differ.
@@ -436,6 +464,90 @@ Invoke it after the wrapper skill (optional step 8) with a phrase like
 
 ---
 
+## Drift detection (`mcpgen check`)
+
+A generated wrapper is a snapshot of a remote contract you do not control. `check` tells
+you when that contract has moved.
+
+### The manifest
+
+Every `mcpgen codegen` run that writes a module also writes a **tool-inventory manifest**
+beside it, derived from the `--out` stem:
+
+```bash
+mcpgen codegen demo --stdio 'python server.py' --out gen/demo.py
+# writes gen/demo.py  and  gen/demo.mcpgen.json
+```
+
+| Flag | Effect |
+|------|--------|
+| *(none)* | Write `<out-stem>.mcpgen.json` next to `--out` |
+| `--manifest PATH` | Write it to `PATH` instead |
+| `--no-manifest` | Do not write one |
+
+Stdout mode (no `--out`) writes no manifest.
+
+The file holds exactly three keys — `format_version`, `server`, and `tools` (each tool's
+`description`, `inputSchema`, and `annotations`). There is **no timestamp and no generator
+version**, so the manifest is a pure function of the inventory: regenerating against an
+unchanged server produces a byte-identical file and never dirties a git diff. Object keys
+are sorted and set-like schema arrays (`required`, `enum`) are normalized, so a server that
+merely re-orders them does not read as a change. It contains no credentials — commit it
+alongside the generated module.
+
+### Checking
+
+```bash
+mcpgen check <server> [--manifest PATH] [--json] [--update] [--stdio CMD] <connection flags>
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--manifest PATH` | Manifest to compare against (default: `<server>.mcpgen.json`) |
+| `--json` | Emit a structured report on stdout instead of human text |
+| `--update` | Accept the live inventory: rewrite the manifest and exit 0 |
+| `--stdio CMD` | stdio transport, e.g. `'python server.py'` |
+
+Plus the same connection flags as `codegen`: `--url`, `--bearer`, `--client-name`,
+`--config`, `--creds`, `--cred-backend`, `--env`.
+
+### Exit codes
+
+| Exit | Meaning |
+|------|---------|
+| `0` | No drift. Description-only changes print as **advisories** and do not affect the exit code. |
+| `1` | Drift: a tool was added, removed, or its `inputSchema` or `annotations` changed. |
+| `2` | Operational error: manifest missing or unreadable, unknown `format_version`, transport failure, auth failure, bad config. |
+
+`2` is never drift. A dead CI runner or an expired token can therefore never be misread as
+a changed tool contract — the two failure modes stay distinguishable in a pipeline.
+
+```yaml
+- name: Check MCP tool drift
+  run: mcpgen check demo --config .mcp.json --manifest gen/demo.mcpgen.json --json
+```
+
+### Accepting a change
+
+`check` never rewrites the manifest on its own — not when it finds drift, not silently.
+Ask for it:
+
+```bash
+mcpgen check demo --stdio 'python server.py' --manifest gen/demo.mcpgen.json --update
+```
+
+`--update` writes the live inventory and exits `0`. It also bootstraps a manifest for an
+existing wrapper that predates one. On an operational error (exit `2`) it writes nothing.
+After an `--update`, regenerate the wrapper if the change affects tools you call.
+
+### What `check` does not touch
+
+- It **never calls a tool** — `tools/list` only, no probing, no side effects on the server.
+- It **never reads or writes** `<server>.shapes.json`. Your shape-spec and its hand-edits
+  are untouched.
+
+---
+
 ## Polymorphic tools (discriminated shaping)
 
 Some tools return **different payload shapes** depending on an input argument
@@ -505,3 +617,6 @@ accepts values outside the declared enum, the appropriate fix is to update the s
 | `ReauthenticationRequired` | Run `mcpgen login <server>` |
 | Config not found | Check the search order above; paths resolve from your cwd |
 | Bearer token rejected | Confirm the env var is exported in the current shell |
+| `uses SSE transport, which this mcpgen version does not support` | Only stdio and Streamable HTTP are implemented — see [§ Supported transports](#supported-transports) |
+| `mcpgen check` exits `1` | The server's tools changed. Review the report, then regenerate, or `--update` to accept |
+| `mcpgen check` exits `2` | Not drift — a missing/unreadable manifest, or a transport/auth/config failure. Read the `[check] error:` line on stderr |
