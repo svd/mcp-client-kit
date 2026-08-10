@@ -52,7 +52,7 @@ import sys
 import time
 import warnings
 import webbrowser
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -1013,6 +1013,78 @@ async def session(
                 yield s
 
 
+class _SessionBlock:
+    """Owns every live session for one ``McpBridgeCaller.connected()`` block.
+
+    All context managers are entered and exited by a single owner task. This is
+    load-bearing, not stylistic: ``stdio_client`` and ``streamable_http_client``
+    open anyio task groups, and anyio requires a cancel scope to be exited in the
+    task that entered it. A session opened lazily inside an ``asyncio.gather()``
+    child and closed from the parent would raise "Attempted to exit cancel scope
+    in a different task". Funnelling every open through the owner removes that
+    failure mode by construction.
+    """
+
+    def __init__(self, caller: McpBridgeCaller) -> None:
+        self._caller = caller
+        self._requests: asyncio.Queue = asyncio.Queue()
+        self._sessions: dict[str, Any] = {}
+        # Guards the open path only. call_tool() itself runs unserialized, so
+        # asyncio.gather() over wrappers stays genuinely concurrent — the SDK's
+        # ClientSession multiplexes on JSON-RPC request id.
+        self._open_lock = asyncio.Lock()
+        self._ready = asyncio.Event()
+        self._task: asyncio.Task | None = None
+
+    async def _owner(self) -> None:
+        """Serve open-requests until a None sentinel arrives, then unwind."""
+        async with AsyncExitStack() as stack:
+            # Entering an empty AsyncExitStack cannot fail, so signalling ready
+            # here cannot deadlock the starter.
+            self._ready.set()
+            while True:
+                item = await self._requests.get()
+                if item is None:
+                    return
+                server, future = item
+                try:
+                    opened = await stack.enter_async_context(self._caller._session_cm(server))
+                except BaseException as exc:  # noqa: BLE001 — relayed to the requester
+                    if not future.done():
+                        future.set_exception(exc)
+                else:
+                    if future.done():
+                        # Requester was cancelled while waiting. The session is
+                        # already on the stack and will close at block exit.
+                        continue
+                    future.set_result(opened)
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._owner())
+        await self._ready.wait()
+
+    async def close(self) -> None:
+        """Stop the owner and wait for the stack to unwind in the owner's task."""
+        await self._requests.put(None)
+        if self._task is not None:
+            await self._task
+
+    async def session_for(self, server: str) -> Any:
+        """Return this block's session for *server*, opening it on first use."""
+        existing = self._sessions.get(server)
+        if existing is not None:
+            return existing
+        async with self._open_lock:
+            existing = self._sessions.get(server)
+            if existing is not None:
+                return existing
+            future: asyncio.Future = asyncio.get_running_loop().create_future()
+            await self._requests.put((server, future))
+            opened = await future
+            self._sessions[server] = opened
+            return opened
+
+
 class McpBridgeCaller:
     """McpCaller implementation backed by the standalone MCP client."""
 
@@ -1036,6 +1108,51 @@ class McpBridgeCaller:
         self._cred_backend = cred_backend
         self._creds_path = creds_path
         self._env = env
+        self._block: _SessionBlock | None = None
+
+    def _session_cm(self, server: str):
+        """The session context manager for *server* under this caller's config."""
+        return session(
+            server,
+            cmd=self._cmd,
+            url=self._url,
+            bearer=self._bearer,
+            client_name=self._client_name,
+            config_path=self._config_path,
+            cred_backend=self._cred_backend,
+            creds_path=self._creds_path,
+            env=self._env,
+        )
+
+    @asynccontextmanager
+    async def connected(self):
+        """Reuse one initialized session per server for the duration of the block.
+
+        Inside the block every ``call()`` to the same server reuses one
+        ``ClientSession``: one ``initialize()``, one stdio subprocess, one OAuth
+        pre-flight refresh. Outside the block ``call()`` is unchanged — it opens
+        and closes a session per invocation.
+
+            caller = McpBridgeCaller(cmd="python server.py")
+            async with caller.connected():
+                await gh.get_me(caller)
+                await gh.list_issues(caller, owner="octocat", repo="hello-world")
+
+        Connection arguments are fixed per caller instance, so within one block
+        the server name fully determines the connection; two callers never share
+        a session. Not re-entrant. Sessions close on exit, including when the
+        block body raises.
+        """
+        if self._block is not None:
+            raise RuntimeError("McpBridgeCaller.connected() is not re-entrant")
+        block = _SessionBlock(self)
+        await block.start()
+        self._block = block
+        try:
+            yield self
+        finally:
+            self._block = None
+            await block.close()
 
     async def call(self, server: str, tool: str, arguments: dict) -> Any:
         async with session(

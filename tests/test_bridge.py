@@ -2028,3 +2028,177 @@ def test_session_sse_guard_does_not_block_stdio_override(tmp_path):
 
     asyncio.run(run())
     assert started["command"] == "python"
+
+
+# ---------------------------------------------------------------------------
+# Session reuse: block lifecycle
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _tracking_session(log: list, name: str = "s"):
+    """A fake session context manager that records the task it enters/exits in."""
+    log.append(("enter", name, asyncio.current_task()))
+    try:
+        yield _make_mock_session({"ok": name})
+    finally:
+        log.append(("exit", name, asyncio.current_task()))
+
+
+def test_connected_opens_one_session_for_two_calls():
+    """Two calls in one block share a single session (one initialize)."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                await caller.call("demo", "greet", {})
+                await caller.call("demo", "add", {})
+
+    asyncio.run(run())
+    assert [e[0] for e in log] == ["enter", "exit"]
+
+
+def test_one_shot_calls_still_open_a_session_each():
+    """Outside a block, behaviour is unchanged: one session per call."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            await caller.call("demo", "greet", {})
+            await caller.call("demo", "add", {})
+
+    asyncio.run(run())
+    assert [e[0] for e in log] == ["enter", "exit", "enter", "exit"]
+
+
+def test_connected_returns_the_caller():
+    """`async with caller.connected() as c` yields the same caller, for convenience."""
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected() as c:
+                assert c is caller
+
+    asyncio.run(run())
+
+
+def test_connected_closes_session_on_exit():
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                await caller.call("demo", "greet", {})
+
+    asyncio.run(run())
+    assert log[-1][0] == "exit"
+
+
+def test_connected_closes_session_when_body_raises():
+    """Cleanup on the exception path — the audit's constraint 4."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                await caller.call("demo", "greet", {})
+                raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(run())
+    assert log[-1][0] == "exit"
+
+
+def test_connected_enter_and_exit_happen_in_the_same_task():
+    """The anyio cancel-scope rule: whatever task triggers the open, the context
+    manager must be entered and exited by one and the same task."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                # Open from a child task, close from the parent — this is the
+                # combination that breaks a naive AsyncExitStack.
+                await asyncio.gather(caller.call("demo", "greet", {}))
+
+    asyncio.run(run())
+    enter_task = next(e[2] for e in log if e[0] == "enter")
+    exit_task = next(e[2] for e in log if e[0] == "exit")
+    assert enter_task is exit_task
+
+
+def test_connected_is_not_reentrant():
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                async with caller.connected():
+                    pass  # pragma: no cover
+
+    with pytest.raises(RuntimeError, match="not re-entrant"):
+        asyncio.run(run())
+
+
+def test_block_state_is_cleared_after_exit():
+    """After a block, the caller is one-shot again — including after an exception."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            try:
+                async with caller.connected():
+                    raise RuntimeError("boom")
+            except RuntimeError:
+                pass
+            await caller.call("demo", "greet", {})
+            await caller.call("demo", "add", {})
+
+    asyncio.run(run())
+    # The failed block opened nothing; the two one-shot calls opened one each.
+    assert [e[0] for e in log] == ["enter", "exit", "enter", "exit"]
