@@ -966,12 +966,22 @@ async def session(
     _servers = servers(config_path=config_path)
     # SSE is discovered by discovery.py but has no transport adapter here. Refuse
     # up front rather than letting the URL fall into the Streamable HTTP path and
-    # fail with an opaque protocol error. An inline --url carries no declared
-    # type, so this only catches config-declared entries; that limit is documented.
-    if cmd is None and bearer is None and _types_cache.get(server) == "sse":
+    # fail with an opaque protocol error.
+    #
+    # Only --stdio and --url are exempt, because only those re-target the
+    # transport. --bearer must NOT exempt: it is an auth override, so with a
+    # config-declared SSE entry the URL still resolves from that same entry and
+    # `--bearer` would route an SSE endpoint into _bearer_session → Streamable
+    # HTTP → exactly the opaque error this guard exists to prevent.
+    #
+    # An inline --url carries no declared type, so config-declared entries are
+    # all this can catch; that limit is documented rather than guessed at from
+    # URL shape.
+    if cmd is None and url is None and _types_cache.get(server) == "sse":
         raise ValueError(
             f"server {server!r} uses SSE transport, which this mcpgen version does not support. "
-            f"Supported transports: stdio and Streamable HTTP."
+            'Re-register it with "type": "http" if the server speaks Streamable HTTP, '
+            "or pass --stdio to run it locally."
         )
     resolved_url = url or _servers.get(server)
     # Resolve a stdio spec: explicit --stdio flag takes precedence over config.

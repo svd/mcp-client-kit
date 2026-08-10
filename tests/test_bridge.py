@@ -1979,13 +1979,23 @@ def test_cli_migrate_creds_passes_creds_path(argv_flag, expected):
 
 def test_session_rejects_config_declared_sse_server(tmp_path):
     """An SSE server must fail fast with a clear message, not silently take the
-    Streamable HTTP path and produce an opaque transport error."""
+    Streamable HTTP path and produce an opaque transport error.
+
+    Hermetic: _http_session is patched to raise, so a regression fails here
+    instead of attempting real DNS from an otherwise network-free suite.
+    """
     config = tmp_path / "servers.json"
     config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
 
+    @asynccontextmanager
+    async def unreachable_http_session(*args, **kwargs):
+        raise AssertionError("SSE entry reached the Streamable HTTP transport")
+        yield  # pragma: no cover — makes this a generator
+
     async def run():
-        async with _bridge.session("legacy", config_path=str(config)):
-            pass  # pragma: no cover — must raise before yielding
+        with patch("mcpgen._bridge._http_session", unreachable_http_session):
+            async with _bridge.session("legacy", config_path=str(config)):
+                pass  # pragma: no cover — must raise before yielding
 
     with pytest.raises(ValueError, match="SSE transport"):
         asyncio.run(run())
@@ -2386,3 +2396,97 @@ def test_pre_flight_refresh_runs_once_per_block():
     # _http_session is where _pre_flight_refresh lives; entering it once per
     # block means one refresh, not three.
     assert refreshes["n"] == 1
+
+
+def test_session_rejects_sse_from_the_default_config_search_path(tmp_path, monkeypatch):
+    """The guard must work without --config — that is how real users hit it."""
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+    # Start from an empty cache, otherwise an earlier config_path= test leaves
+    # {"legacy": "sse"} behind and this passes without ever exercising the
+    # search-order assignment it exists to cover.
+    monkeypatch.setattr(_bridge, "_types_cache", {})
+    monkeypatch.setattr(_bridge, "_servers_cache", None)
+    monkeypatch.setenv(_bridge._SERVERS_CONFIG_ENV, str(config))
+    _bridge.servers(refresh=True)
+    assert _bridge._types_cache == {"legacy": "sse"}
+
+    async def run():
+        async with _bridge.session("legacy"):
+            pass  # pragma: no cover
+
+    with pytest.raises(ValueError, match="SSE transport"):
+        asyncio.run(run())
+
+
+def test_types_cache_is_cleared_when_no_config_is_found(tmp_path, monkeypatch):
+    """A stale _types_cache would refuse a server that is no longer SSE."""
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+    monkeypatch.setattr(_bridge, "_types_cache", {})
+    monkeypatch.setattr(_bridge, "_servers_cache", None)
+    monkeypatch.setenv(_bridge._SERVERS_CONFIG_ENV, str(config))
+    _bridge.servers(refresh=True)
+    assert _bridge._types_cache == {"legacy": "sse"}
+
+    monkeypatch.setenv(_bridge._SERVERS_CONFIG_ENV, str(tmp_path / "absent.json"))
+    monkeypatch.setattr(_bridge, "_SERVERS_SEARCH", [])
+    _bridge.servers(refresh=True)
+
+    # Assert both the cache state and the observable behaviour: the first alone
+    # tests the assignment, the second alone tests the guard.
+    assert _bridge._types_cache == {}
+
+    opened: dict = {}
+
+    @asynccontextmanager
+    async def fake_http_session(server_name, server_url, **kwargs):
+        opened["hit"] = True
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge._http_session", fake_http_session):
+            with patch("mcpgen._bridge.servers", return_value={"legacy": "https://x.example/mcp"}):
+                async with _bridge.session("legacy"):
+                    pass
+
+    asyncio.run(run())
+    assert opened.get("hit") is True
+
+
+def test_bearer_does_not_bypass_the_sse_guard(tmp_path):
+    """--bearer is an auth override, not a transport override.
+
+    Without this, `mcpgen list legacy --bearer $TOK` skips the guard, resolves
+    the SSE URL from that same config entry, and routes it into _bearer_session
+    → Streamable HTTP → the opaque error the guard exists to prevent.
+    """
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+
+    async def run():
+        async with _bridge.session("legacy", bearer="tok", config_path=str(config)):
+            pass  # pragma: no cover
+
+    with pytest.raises(ValueError, match="SSE transport"):
+        asyncio.run(run())
+
+
+def test_url_override_bypasses_the_sse_guard(tmp_path):
+    """--url re-targets the transport, so it must still be exempt."""
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+    opened: dict = {}
+
+    @asynccontextmanager
+    async def fake_http_session(server_name, server_url, **kwargs):
+        opened["url"] = server_url
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge._http_session", fake_http_session):
+            async with _bridge.session("legacy", url="https://x.example/mcp", config_path=str(config)):
+                pass
+
+    asyncio.run(run())
+    assert opened["url"] == "https://x.example/mcp"
