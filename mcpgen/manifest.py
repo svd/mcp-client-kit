@@ -195,3 +195,54 @@ def diff(old: dict, new: dict) -> DriftReport:
         changed=changed,
         advisory=advisory,
     )
+
+
+def render_text(report: DriftReport) -> str:
+    """Human-readable drift report. Advisories print but never imply drift."""
+    lines: list[str] = []
+    for name in report.added:
+        lines.append(f"ADDED     {report.server}.{name}")
+    for name in report.removed:
+        lines.append(f"REMOVED   {report.server}.{name}")
+    for change in report.changed:
+        lines.append(f"CHANGED   {report.server}.{change.tool}: {change.detail}")
+    for change in report.advisory:
+        lines.append(f"ADVISORY  {report.server}.{change.tool}: {change.detail}")
+        lines.append(f"            - {change.old!r}")
+        lines.append(f"            + {change.new!r}")
+
+    suffix = f" ({len(report.advisory)} advisory)" if report.advisory else ""
+    if report.has_drift:
+        summary = (
+            f"Drift detected: {len(report.added)} added, "
+            f"{len(report.removed)} removed, {len(report.changed)} changed{suffix}."
+        )
+    else:
+        summary = f"No drift.{suffix}"
+
+    if lines:
+        lines.append("")
+    lines.append(summary)
+    return "\n".join(lines)
+
+
+def _change_to_json(change: ToolChange) -> dict:
+    return {
+        "tool": change.tool,
+        "category": change.category,
+        "detail": change.detail,
+        "old": change.old,
+        "new": change.new,
+    }
+
+
+def to_json(report: DriftReport) -> dict:
+    """Structured drift report for CI consumers."""
+    return {
+        "server": report.server,
+        "drift": report.has_drift,
+        "added": list(report.added),
+        "removed": list(report.removed),
+        "changed": [_change_to_json(c) for c in report.changed],
+        "advisory": [_change_to_json(c) for c in report.advisory],
+    }

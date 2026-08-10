@@ -241,3 +241,69 @@ def test_diff_rejects_unknown_format_version():
 def test_diff_rejects_manifest_missing_tools_key():
     with pytest.raises(ValueError):
         manifest.diff({"format_version": 1, "server": "demo"}, _m(TOOLS))
+
+
+# ── rendering ─────────────────────────────────────────────────────────────────
+
+
+def test_render_text_clean_report():
+    report = manifest.diff(BASE, _m(TOOLS))
+    assert manifest.render_text(report) == "No drift."
+
+
+def test_render_text_clean_report_with_advisory():
+    mutated = json.loads(json.dumps(TOOLS))
+    mutated[1]["description"] = "different"
+    text = manifest.render_text(manifest.diff(BASE, _m(mutated)))
+    assert "ADVISORY  demo.add: description changed" in text
+    assert text.strip().endswith("No drift. (1 advisory)")
+
+
+def test_render_text_lists_added_removed_changed():
+    mutated = json.loads(json.dumps(TOOLS[:1]))
+    mutated[0]["inputSchema"]["required"] = ["name", "excited"]
+    mutated.append({"name": "subtract", "description": "", "inputSchema": {}, "annotations": None})
+    text = manifest.render_text(manifest.diff(BASE, _m(mutated)))
+    assert "ADDED     demo.subtract" in text
+    assert "REMOVED   demo.add" in text
+    assert "CHANGED   demo.greet: required properties changed:" in text
+    assert "Drift detected: 1 added, 1 removed, 1 changed." in text
+
+
+def test_render_text_summary_counts_advisories_separately():
+    mutated = json.loads(json.dumps(TOOLS))
+    mutated[0]["inputSchema"]["required"] = ["name", "excited"]
+    mutated[1]["description"] = "different"
+    text = manifest.render_text(manifest.diff(BASE, _m(mutated)))
+    assert "Drift detected: 0 added, 0 removed, 1 changed (1 advisory)." in text
+
+
+def test_to_json_clean_report():
+    payload = manifest.to_json(manifest.diff(BASE, _m(TOOLS)))
+    assert payload == {
+        "server": "demo",
+        "drift": False,
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "advisory": [],
+    }
+
+
+def test_to_json_drift_report_is_serializable():
+    mutated = json.loads(json.dumps(TOOLS))
+    mutated[0]["inputSchema"]["required"] = ["name", "excited"]
+    payload = manifest.to_json(manifest.diff(BASE, _m(mutated)))
+    assert payload["drift"] is True
+    assert payload["changed"][0]["tool"] == "greet"
+    assert payload["changed"][0]["category"] == "required"
+    assert payload["changed"][0]["new"] == ["excited", "name"]
+    json.dumps(payload)  # must not raise
+
+
+def test_to_json_advisory_does_not_set_drift():
+    mutated = json.loads(json.dumps(TOOLS))
+    mutated[1]["description"] = "different"
+    payload = manifest.to_json(manifest.diff(BASE, _m(mutated)))
+    assert payload["drift"] is False
+    assert payload["advisory"][0]["category"] == "description"
