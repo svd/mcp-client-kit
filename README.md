@@ -101,11 +101,14 @@ Outside the block nothing changes, so existing code keeps working untouched. Det
 | Step | Command | Result |
 |------|---------|--------|
 | 1. Generate | `mcpgen codegen <server> --out <server>.py` | One `async def` per tool: typed inputs, `Any` return by default. |
-| 2. Probe | `mcpgen probe <server> <tool> --args '{}' --emit-shape <server>.shapes.json` | Observed response-shape skeleton from a live call. |
-| 3. Edit the shape-spec (or run the skill) | edit `<server>.shapes.json` | Output model and `unwrap` decisions — the judgment pass. |
-| 4. Regenerate | `mcpgen codegen <server> --out <server>.py --shapes <server>.shapes.json` | `TypedDict` returns, unions, lists, overloads. |
+| 2. Probe | `mcpgen probe <server> <tool> --args '{}' --emit-shape <server>.shapes.json` | Observed response-shape skeleton, written as a per-tool part under `<server>.shapes.json.parts/`. |
+| 3. Merge | `mcpgen merge <server> --out <server>.shapes.json` | Consolidates the parts into the committed, hand-editable shape-spec. |
+| 4. Edit the shape-spec (or run the skill) | edit `<server>.shapes.json` | Output model and `unwrap` decisions — the judgment pass. |
+| 5. Regenerate | `mcpgen codegen <server> --out <server>.py --shapes <server>.shapes.json` | `TypedDict` returns, unions, lists, overloads. |
 
-Typed input wrappers by default; empirically shaped output types after live probes. Steps 2–4 are optional — skip them and you still get working wrappers, just with `Any` returns.
+Step 3 is not optional: `--emit-shape` writes only into `<server>.shapes.json.parts/`, so `<server>.shapes.json` does not exist until you merge.
+
+Typed input wrappers by default; empirically shaped output types after live probes. Steps 2–5 are optional as a group — skip them and you still get working wrappers, just with `Any` returns. Shaping is also per-tool: tools you never probe keep their `Any` return.
 
 Polymorphic tools — ones that return different shapes depending on an input (`entityType=1` → `Person`, `=2` → `Position`) — get typed `@overload`s, so your type checker narrows the return at every call site.
 

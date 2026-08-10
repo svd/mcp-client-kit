@@ -94,8 +94,9 @@ uv add mcp-client-kit            # or: pip install mcp-client-kit
 | `discover` | List MCP servers configured in Claude Code | `--host <id>` (repeatable), `--json` |
 
 Connection flags shared by `codegen`/`check`/`list`/`probe`/`call`/`login`: `--url`,
-`--bearer`, `--stdio`, `--config`, `--client-name`, `--cred-backend`, `--creds`
-(see [§ Authenticate](#authenticate)).
+`--bearer`, `--config`, `--client-name`, `--cred-backend`, `--creds`, `--env`
+(see [§ Authenticate](#authenticate)). `--stdio` is available on every command in that
+list except `login`.
 
 `discover` enumerates the MCP servers configured in **Claude Code**. Only Claude Code is
 implemented today; `discovery.PROVIDERS` is the extension point where support for more
@@ -151,12 +152,14 @@ Both formats are accepted:
 SSE servers are surfaced by `mcpgen discover` but marked unsupported (`probeable: false`,
 with an explanatory note). A config entry declaring `"type": "sse"` is refused up front
 with an explicit error rather than failing obscurely part-way through a connection, so
-`list` / `codegen` / `probe` / `call` all stop with a message naming SSE as the cause.
+`list` / `codegen` / `check` / `probe` / `call` all stop with a message naming SSE as the
+cause.
 
-Known limit: the refusal reads the declared `type` from your server config. A URL passed
-inline with `--url` — or a `--bearer` / `--stdio` override, which bypasses the config
-lookup — carries no declared transport type, so it cannot be detected up front and will
-instead fail at the transport layer with the SDK's own error.
+Known limit: the refusal reads the declared `type` from your server config, so it only
+fires for named config entries. A bare SSE URL passed as `<server>` or via `--url` carries
+no declared type and will instead fail at the transport layer with the SDK's own error.
+`--stdio` and `--url` assert a transport explicitly and skip the check by design; a
+`--bearer` token does not, so a config-declared SSE entry is still refused with it.
 
 ---
 
@@ -552,7 +555,7 @@ Plus the same connection flags as `codegen`: `--url`, `--bearer`, `--client-name
 |------|---------|
 | `0` | No drift. Description-only changes print as **advisories** and do not affect the exit code. |
 | `1` | Drift: a tool was added, removed, or its `inputSchema` or `annotations` changed. |
-| `2` | Operational error: manifest missing or unreadable, unknown `format_version`, transport failure, auth failure, bad config. |
+| `2` | Operational error: manifest missing (without `--update`) or unreadable, unknown `format_version`, transport failure, auth failure, bad config. |
 
 `2` is never drift. A dead CI runner or an expired token can therefore never be misread as
 a changed tool contract — the two failure modes stay distinguishable in a pipeline.
