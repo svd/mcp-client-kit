@@ -108,3 +108,136 @@ def test_build_applies_canonical_to_input_schema():
     tools = [{"name": "t", "description": "", "inputSchema": {"required": ["b", "a"]}, "annotations": None}]
     m = manifest.build("demo", tools)
     assert m["tools"]["t"]["inputSchema"]["required"] == ["a", "b"]
+
+
+# ── diff ──────────────────────────────────────────────────────────────────────
+
+
+def _m(tools: list[dict]) -> dict:
+    return manifest.build("demo", tools)
+
+
+BASE = _m(TOOLS)
+
+
+def test_diff_identical_has_no_drift():
+    report = manifest.diff(BASE, _m(TOOLS))
+    assert not report.has_drift
+    assert report.added == []
+    assert report.removed == []
+    assert report.changed == []
+    assert report.advisory == []
+
+
+def test_diff_reordered_tools_has_no_drift():
+    report = manifest.diff(BASE, _m(list(reversed(TOOLS))))
+    assert not report.has_drift
+
+
+def test_diff_reordered_required_has_no_drift():
+    """The canonical-ordering false-positive guard, end to end through diff()."""
+    mutated = json.loads(json.dumps(TOOLS))
+    mutated[1]["inputSchema"]["required"] = ["b", "a"]
+    report = manifest.diff(BASE, _m(mutated))
+    assert not report.has_drift
+
+
+def test_diff_reordered_enum_has_no_drift():
+    with_enum = json.loads(json.dumps(TOOLS))
+    with_enum[0]["inputSchema"]["properties"]["style"] = {"enum": ["formal", "casual"]}
+    left = _m(with_enum)
+    with_enum[0]["inputSchema"]["properties"]["style"] = {"enum": ["casual", "formal"]}
+    report = manifest.diff(left, _m(with_enum))
+    assert not report.has_drift
+
+
+def test_diff_detects_added_tool():
+    mutated = [*TOOLS, {"name": "subtract", "description": "", "inputSchema": {}, "annotations": None}]
+    report = manifest.diff(BASE, _m(mutated))
+    assert report.added == ["subtract"]
+    assert report.has_drift
+
+
+def test_diff_detects_removed_tool():
+    report = manifest.diff(BASE, _m(TOOLS[:1]))
+    assert report.removed == ["add"]
+    assert report.has_drift
+
+
+def test_diff_detects_changed_required():
+    mutated = json.loads(json.dumps(TOOLS))
+    mutated[0]["inputSchema"]["required"] = ["name", "excited"]
+    report = manifest.diff(BASE, _m(mutated))
+    assert report.has_drift
+    assert [c.tool for c in report.changed] == ["greet"]
+    assert report.changed[0].category == "required"
+    assert "excited" in report.changed[0].detail
+
+
+def test_diff_detects_changed_enum():
+    left = json.loads(json.dumps(TOOLS))
+    left[0]["inputSchema"]["properties"]["style"] = {"enum": ["formal", "casual"]}
+    right = json.loads(json.dumps(left))
+    right[0]["inputSchema"]["properties"]["style"] = {"enum": ["formal", "shouty"]}
+    report = manifest.diff(_m(left), _m(right))
+    assert report.has_drift
+    assert report.changed[0].category == "enum"
+    assert "style" in report.changed[0].detail
+
+
+def test_diff_detects_other_input_schema_change():
+    mutated = json.loads(json.dumps(TOOLS))
+    mutated[1]["inputSchema"]["properties"]["a"] = {"type": "number"}
+    report = manifest.diff(BASE, _m(mutated))
+    assert report.changed[0].category == "input_schema"
+
+
+def test_diff_detects_annotations_change():
+    mutated = json.loads(json.dumps(TOOLS))
+    mutated[0]["annotations"] = {"readOnlyHint": False}
+    report = manifest.diff(BASE, _m(mutated))
+    assert report.changed[0].category == "annotations"
+    assert report.has_drift
+
+
+def test_diff_description_change_is_advisory_only():
+    mutated = json.loads(json.dumps(TOOLS))
+    mutated[1]["description"] = "Adds two integers and returns the sum"
+    report = manifest.diff(BASE, _m(mutated))
+    assert not report.has_drift
+    assert [c.tool for c in report.advisory] == ["add"]
+    assert report.advisory[0].category == "description"
+    assert report.advisory[0].old == "Add two numbers"
+    assert report.advisory[0].new == "Adds two integers and returns the sum"
+
+
+def test_diff_schema_and_description_change_reports_changed_not_advisory():
+    """An advisory must never hide real drift for the same tool."""
+    mutated = json.loads(json.dumps(TOOLS))
+    mutated[1]["description"] = "different"
+    mutated[1]["inputSchema"]["required"] = ["a"]
+    report = manifest.diff(BASE, _m(mutated))
+    assert [c.tool for c in report.changed] == ["add"]
+    assert report.advisory == []
+    assert report.has_drift
+
+
+def test_diff_added_and_removed_are_sorted():
+    mutated = [
+        {"name": "zeta", "description": "", "inputSchema": {}, "annotations": None},
+        {"name": "alpha", "description": "", "inputSchema": {}, "annotations": None},
+    ]
+    report = manifest.diff(BASE, _m(mutated))
+    assert report.added == ["alpha", "zeta"]
+    assert report.removed == ["add", "greet"]
+
+
+def test_diff_rejects_unknown_format_version():
+    stale = {"format_version": 99, "server": "demo", "tools": {}}
+    with pytest.raises(ValueError, match="format_version"):
+        manifest.diff(stale, _m(TOOLS))
+
+
+def test_diff_rejects_manifest_missing_tools_key():
+    with pytest.raises(ValueError):
+        manifest.diff({"format_version": 1, "server": "demo"}, _m(TOOLS))
