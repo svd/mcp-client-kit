@@ -250,3 +250,104 @@ def test_check_does_not_write_manifest_on_drift_without_update(tmp_path):
     with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=live):
         assert _cmd_check(_ns(path)) == 1
     assert path.read_bytes() == before
+
+
+# ── --json ────────────────────────────────────────────────────────────────────
+
+
+def test_check_json_clean_report(tmp_path, capsys):
+    path = _write_manifest(tmp_path)
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=TOOLS):
+        rc = _cmd_check(_ns(path, json=True))
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"server": "demo", "drift": False, "added": [], "removed": [], "changed": [], "advisory": []}
+
+
+def test_check_json_drift_report(tmp_path, capsys):
+    path = _write_manifest(tmp_path)
+    live = _mutate(lambda t: t[1]["inputSchema"].__setitem__("required", ["a", "b", "precision"]))
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=live):
+        rc = _cmd_check(_ns(path, json=True))
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["drift"] is True
+    assert payload["changed"][0]["tool"] == "add"
+    assert payload["changed"][0]["category"] == "required"
+
+
+def test_check_json_error_report_is_parseable(tmp_path, capsys):
+    """A CI job parsing stdout must not choke on the exit-2 path."""
+    path = _write_manifest(tmp_path)
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, side_effect=ConnectionError("refused")):
+        rc = _cmd_check(_ns(path, json=True))
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["server"] == "demo"
+    assert "refused" in payload["error"]
+    assert "drift" not in payload
+
+
+def test_check_json_emits_no_human_text(tmp_path, capsys):
+    path = _write_manifest(tmp_path)
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=TOOLS):
+        _cmd_check(_ns(path, json=True))
+    assert "No drift." not in capsys.readouterr().out
+
+
+# ── --update ──────────────────────────────────────────────────────────────────
+
+
+def test_check_update_rewrites_manifest_and_exits_zero(tmp_path, capsys):
+    path = _write_manifest(tmp_path)
+    live = _mutate(lambda t: t[1]["inputSchema"].__setitem__("required", ["a", "b", "precision"]))
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=live):
+        rc = _cmd_check(_ns(path, update=True))
+    assert rc == 0
+    assert json.loads(path.read_text())["tools"]["add"]["inputSchema"]["required"] == ["a", "b", "precision"]
+    assert "updated" in capsys.readouterr().out
+
+
+def test_check_update_is_idempotent(tmp_path):
+    """After --update, a plain check on the same inventory is clean."""
+    path = _write_manifest(tmp_path)
+    live = _mutate(lambda t: t[1]["inputSchema"].__setitem__("required", ["a", "b", "precision"]))
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=live):
+        _cmd_check(_ns(path, update=True))
+        assert _cmd_check(_ns(path)) == 0
+
+
+def test_check_update_writes_nothing_on_operational_error(tmp_path):
+    path = _write_manifest(tmp_path)
+    before = path.read_bytes()
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, side_effect=ConnectionError("refused")):
+        assert _cmd_check(_ns(path, update=True)) == 2
+    assert path.read_bytes() == before
+
+
+def test_check_update_on_clean_inventory_leaves_bytes_identical(tmp_path):
+    path = _write_manifest(tmp_path)
+    before = path.read_bytes()
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=TOOLS):
+        assert _cmd_check(_ns(path, update=True)) == 0
+    assert path.read_bytes() == before
+
+
+def test_check_update_creates_manifest_when_absent(tmp_path):
+    """--update is the documented way to bootstrap a manifest for an existing wrapper."""
+    path = tmp_path / "demo.mcpgen.json"
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=TOOLS):
+        rc = _cmd_check(_ns(path, update=True))
+    assert rc == 0
+    assert json.loads(path.read_text())["server"] == "demo"
+
+
+def test_check_update_json_reports_update(tmp_path, capsys):
+    path = _write_manifest(tmp_path)
+    live = _mutate(lambda t: t[1]["inputSchema"].__setitem__("required", ["a"]))
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=live):
+        rc = _cmd_check(_ns(path, update=True, json=True))
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["updated"] is True
+    assert payload["drift"] is True

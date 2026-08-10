@@ -670,10 +670,17 @@ def _cmd_check(ns: argparse.Namespace) -> int:
         print(f"[check] error: {message}", file=sys.stderr)
         return CHECK_ERROR
 
+    bootstrapping = False
     try:
         stored = json.loads(manifest_path.read_text())
     except FileNotFoundError:
-        return _fail(f"manifest not found: {manifest_path}. Generate one with `mcpgen codegen --out <file>.py`.")
+        if not getattr(ns, "update", False):
+            return _fail(
+                f"manifest not found: {manifest_path}. Generate one with `mcpgen codegen --out <file>.py`, "
+                f"or bootstrap it with `mcpgen check {ns.server} --manifest {manifest_path} --update`."
+            )
+        bootstrapping = True
+        stored = manifest_mod.build(ns.server, [])
     except (OSError, json.JSONDecodeError) as exc:
         return _fail(f"cannot read manifest {manifest_path}: {exc}")
 
@@ -695,11 +702,32 @@ def _cmd_check(ns: argparse.Namespace) -> int:
         return _fail(f"{type(exc).__name__}: {exc}")
 
     try:
-        report = manifest_mod.diff(stored, manifest_mod.build(ns.server, tools))
+        live = manifest_mod.build(ns.server, tools)
+        report = manifest_mod.diff(stored, live)
     except ValueError as exc:
         return _fail(str(exc))
 
-    sys.stdout.write(manifest_mod.render_text(report) + "\n")
+    updated = False
+    if getattr(ns, "update", False):
+        # The only write path outside `codegen`, and it requires the explicit
+        # flag. Nothing above this line ever touches the manifest file.
+        _atomic_write_text(manifest_path, manifest_mod.dumps(live))
+        updated = True
+
+    if getattr(ns, "json", False):
+        payload = manifest_mod.to_json(report)
+        if updated:
+            payload["updated"] = True
+        sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+    else:
+        sys.stdout.write(manifest_mod.render_text(report) + "\n")
+        if updated:
+            accepted = len(report.added) + len(report.removed) + len(report.changed)
+            verb = "created" if bootstrapping else "updated"
+            sys.stdout.write(f"[check] {verb} {manifest_path} (accepted {accepted} change(s))\n")
+
+    if updated:
+        return CHECK_OK
     return CHECK_DRIFT if report.has_drift else CHECK_OK
 
 
@@ -1006,6 +1034,12 @@ def main(argv: list[str] | None = None) -> int:
         help="manifest written by `mcpgen codegen` (default: <server>.mcpgen.json)",
     )
     ck.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    ck.add_argument("--json", action="store_true", help="emit a structured report instead of the human diff")
+    ck.add_argument(
+        "--update",
+        action="store_true",
+        help="accept the live inventory and rewrite the manifest (never happens without this flag)",
+    )
     _add_conn_args(ck)
     ck.set_defaults(func=_cmd_check)
 
