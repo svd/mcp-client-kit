@@ -430,20 +430,39 @@ def test_cli_http_entry_stays_probeable():
     assert server.note is None
 
 
+def test_json_connector_entry_is_not_probeable():
+    """The JSON path had no connector coverage at all — only the CLI path did."""
+    provider = discovery.ClaudeCodeProvider()
+    server = provider._entry_to_server(
+        "claude.ai Context7", {"type": "http", "url": "https://mcp.context7.com/mcp"}, "user"
+    )
+    assert server.probeable is False
+    assert server.note == discovery._CLAUDE_AI_CONNECTOR_NOTE
+
+
+def test_connector_note_wins_when_entry_is_both_connector_and_sse():
+    """Precedence is deliberate: the connector explanation is the more useful one."""
+    provider = discovery.ClaudeCodeProvider()
+    server = provider._entry_to_server("claude.ai Legacy", {"type": "sse", "url": "https://x.example/sse"}, "user")
+    assert server.transport == "sse"
+    assert server.probeable is False
+    assert server.note == discovery._CLAUDE_AI_CONNECTOR_NOTE
+
+
 def test_discover_prints_warning_not_hint_for_sse(capsys):
-    """cli.py:569's probeable gate must suppress the runnable hint for SSE."""
+    """End to end: an SSE config entry must reach the CLI as a warning, not a hint.
+
+    The input is built by the real classifier rather than hand-constructed, so
+    reverting either classification site fails this test. A hand-built
+    DiscoveredServer(probeable=False) would instead test cli.py's pre-existing
+    probeable gate and pass even with the SSE work removed entirely.
+    """
     from types import SimpleNamespace
 
     from mcpgen.cli import _cmd_discover
 
-    sse = discovery.DiscoveredServer(
-        host="claude-code",
-        name="legacy",
-        transport="sse",
-        url="https://x.example/sse",
-        scope="user",
-        probeable=False,
-        note="SSE transport is discovered but not supported by this mcpgen version",
+    sse = discovery.ClaudeCodeProvider()._entry_to_server(
+        "legacy", {"type": "sse", "url": "https://x.example/sse"}, "user"
     )
     with patch("mcpgen.cli.discovery.discover_all", return_value=[sse]):
         rc = _cmd_discover(SimpleNamespace(host=None, json=False, include_env=False))
@@ -451,4 +470,6 @@ def test_discover_prints_warning_not_hint_for_sse(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "mcpgen list legacy" not in out
-    assert "SSE transport is discovered but not supported" in out
+    # Reference the constant, not a copy of its text, so rewording it cannot
+    # leave this assertion passing against a stale literal.
+    assert discovery._SSE_UNSUPPORTED_NOTE in out
