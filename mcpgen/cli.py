@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import quote as _url_quote
 
 from . import _bridge, codegen, discovery
+from . import manifest as manifest_mod
 
 
 async def _list_tools(
@@ -270,6 +271,25 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
     return shapes
 
 
+def _manifest_path(ns: argparse.Namespace) -> Path | None:
+    """Resolve where codegen should write the tool-inventory manifest.
+
+    Derived from --out (``gen/wrapper.py`` → ``gen/wrapper.mcpgen.json``) so the
+    manifest stays beside the module it describes even when the module name
+    differs from the server name. --manifest overrides; --no-manifest and
+    stdout mode suppress.
+    """
+    if getattr(ns, "no_manifest", False):
+        return None
+    override = getattr(ns, "manifest", None)
+    if override:
+        return Path(override)
+    if not ns.out:
+        return None
+    out = Path(ns.out)
+    return out.with_name(out.stem + ".mcpgen.json")
+
+
 def _cmd_codegen(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
     conn = dict(
@@ -310,6 +330,11 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         print(f"[codegen] wrote {ns.out} ({len(source)} bytes)", file=sys.stderr)
     else:
         sys.stdout.write(source)
+
+    target = _manifest_path(ns)
+    if target is not None:
+        _atomic_write_text(target, manifest_mod.dumps(manifest_mod.build(ns.server, tools)))
+        print(f"[codegen] wrote {target} ({len(tools)} tool(s))", file=sys.stderr)
     return 0
 
 
@@ -848,6 +873,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         dest="embed_schema",
         help="embed raw inputSchema as __schema__ attribute and Args docstring per tool",
+    )
+    cg.add_argument(
+        "--manifest",
+        metavar="PATH",
+        help="tool-inventory manifest path for `mcpgen check` "
+        "(default: <out-stem>.mcpgen.json beside --out)",
+    )
+    cg.add_argument(
+        "--no-manifest",
+        action="store_true",
+        dest="no_manifest",
+        help="do not write a tool-inventory manifest",
     )
     _add_conn_args(cg)
     cg.set_defaults(func=_cmd_codegen)
