@@ -66,7 +66,12 @@ class DiscoveredServer:
     """Connection status string (e.g. ``"Connected"``, ``"Needs authentication"``)."""
 
     probeable: bool = True
-    """Whether mcpgen can open a session to this server."""
+    """Whether mcpgen can open a session to this server.
+
+    ``False`` for claude.ai connectors (managed OAuth that mcpgen cannot drive)
+    and for SSE entries (this mcpgen version ships no SSE transport adapter).
+    ``note`` explains which case applies.
+    """
 
     note: str | None = None
     """Human-readable annotation explaining any special handling."""
@@ -124,6 +129,8 @@ def _default_run(cmd: list[str]) -> str | None:
 # ---------------------------------------------------------------------------
 
 _CLAUDE_AI_CONNECTOR_NOTE = "claude.ai connector — managed OAuth, not probeable by mcpgen"
+
+_SSE_UNSUPPORTED_NOTE = "SSE transport is discovered but not supported by this mcpgen version"
 
 # Match "<name>: <rest> - <status_part>" with the status being everything
 # after the LAST " - " on the line.
@@ -228,6 +235,7 @@ def _build_server_from_get(
     args = raw_args.split() if raw_args else []
 
     is_connector = _is_claude_ai_connector(name, scope)
+    is_sse = transport == "sse"
     return DiscoveredServer(
         host=host,
         name=name,
@@ -237,8 +245,8 @@ def _build_server_from_get(
         url=url if transport in ("http", "sse") else None,
         scope=scope,
         status=raw_status,
-        probeable=not is_connector,
-        note=_CLAUDE_AI_CONNECTOR_NOTE if is_connector else None,
+        probeable=not (is_connector or is_sse),
+        note=_CLAUDE_AI_CONNECTOR_NOTE if is_connector else (_SSE_UNSUPPORTED_NOTE if is_sse else None),
     )
 
 
@@ -394,6 +402,7 @@ class ClaudeCodeProvider:
         }
 
         is_connector = _is_claude_ai_connector(name, scope)
+        is_sse = transport == "sse"
         return DiscoveredServer(
             host=self.id,
             name=name,
@@ -404,8 +413,8 @@ class ClaudeCodeProvider:
             url=url if transport in ("http", "sse") else None,
             scope=scope,
             status=None,
-            probeable=not is_connector,
-            note=_CLAUDE_AI_CONNECTOR_NOTE if is_connector else None,
+            probeable=not (is_connector or is_sse),
+            note=_CLAUDE_AI_CONNECTOR_NOTE if is_connector else (_SSE_UNSUPPORTED_NOTE if is_sse else None),
         )
 
 

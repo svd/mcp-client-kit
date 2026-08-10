@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+from mcpgen import discovery
 from mcpgen.discovery import (
     ClaudeCodeProvider,
     DiscoveredServer,
@@ -377,3 +378,77 @@ def test_discover_all_skips_unavailable(tmp_path, monkeypatch):
         # No .claude.json → available() returns False.
         result = discover_all()
     assert result == []
+
+
+# ── SSE is discovered but not supported ───────────────────────────────────────
+
+
+def test_json_sse_entry_is_not_probeable():
+    """discovery must not advertise an SSE server as runnable — _bridge has no SSE path."""
+    provider = discovery.ClaudeCodeProvider()
+    server = provider._entry_to_server("legacy", {"type": "sse", "url": "https://x.example/sse"}, "user")
+    assert server.transport == "sse"
+    assert server.probeable is False
+    assert "SSE" in (server.note or "")
+
+
+def test_json_http_entry_stays_probeable():
+    provider = discovery.ClaudeCodeProvider()
+    server = provider._entry_to_server("modern", {"type": "http", "url": "https://x.example/mcp"}, "user")
+    assert server.transport == "http"
+    assert server.probeable is True
+    assert server.note is None
+
+
+def test_json_stdio_entry_stays_probeable():
+    provider = discovery.ClaudeCodeProvider()
+    server = provider._entry_to_server("local", {"command": "run-me", "args": ["--mcp"]}, "user")
+    assert server.transport == "stdio"
+    assert server.probeable is True
+
+
+def test_cli_sse_entry_is_not_probeable():
+    server = discovery._build_server_from_get(
+        "claude-code",
+        "legacy",
+        {"transport_hint": "sse"},
+        {"Type": "sse", "URL": "https://x.example/sse", "Scope": "user"},
+    )
+    assert server.transport == "sse"
+    assert server.probeable is False
+    assert "SSE" in (server.note or "")
+
+
+def test_cli_http_entry_stays_probeable():
+    server = discovery._build_server_from_get(
+        "claude-code",
+        "modern",
+        {"transport_hint": "http"},
+        {"Type": "http", "URL": "https://x.example/mcp", "Scope": "user"},
+    )
+    assert server.probeable is True
+    assert server.note is None
+
+
+def test_discover_prints_warning_not_hint_for_sse(capsys):
+    """cli.py:569's probeable gate must suppress the runnable hint for SSE."""
+    from types import SimpleNamespace
+
+    from mcpgen.cli import _cmd_discover
+
+    sse = discovery.DiscoveredServer(
+        host="claude-code",
+        name="legacy",
+        transport="sse",
+        url="https://x.example/sse",
+        scope="user",
+        probeable=False,
+        note="SSE transport is discovered but not supported by this mcpgen version",
+    )
+    with patch("mcpgen.cli.discovery.discover_all", return_value=[sse]):
+        rc = _cmd_discover(SimpleNamespace(host=None, json=False, include_env=False))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "mcpgen list legacy" not in out
+    assert "SSE transport is discovered but not supported" in out
