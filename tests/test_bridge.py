@@ -19,6 +19,7 @@ import time
 import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -2202,3 +2203,154 @@ def test_block_state_is_cleared_after_exit():
     asyncio.run(run())
     # The failed block opened nothing; the two one-shot calls opened one each.
     assert [e[0] for e in log] == ["enter", "exit", "enter", "exit"]
+
+
+def test_connected_reuses_session_across_calls_and_returns_results():
+    calls: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        s = MagicMock()
+
+        async def call_tool(tool, arguments):
+            calls.append(tool)
+            return MagicMock(content=[SimpleNamespace(type="text", text=json.dumps({"tool": tool}))])
+
+        s.call_tool = call_tool
+        yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                first = await caller.call("demo", "greet", {})
+                second = await caller.call("demo", "add", {})
+            return first, second
+
+    first, second = asyncio.run(run())
+    assert first == {"tool": "greet"}
+    assert second == {"tool": "add"}
+    assert calls == ["greet", "add"]
+
+
+def test_connected_opens_one_session_per_distinct_server():
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller()
+            async with caller.connected():
+                await caller.call("alpha", "t", {})
+                await caller.call("beta", "t", {})
+                await caller.call("alpha", "t", {})
+
+    asyncio.run(run())
+    opened = [e[1] for e in log if e[0] == "enter"]
+    closed = [e[1] for e in log if e[0] == "exit"]
+    assert sorted(opened) == ["alpha", "beta"]
+    assert sorted(closed) == ["alpha", "beta"]
+
+
+def test_connected_concurrent_first_calls_open_one_session():
+    """The open lock: two concurrent first-calls must not start two subprocesses."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        await asyncio.sleep(0)  # yield control, widening the race window
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                return await asyncio.gather(
+                    caller.call("demo", "greet", {}),
+                    caller.call("demo", "add", {}),
+                )
+
+    results = asyncio.run(run())
+    assert len([e for e in log if e[0] == "enter"]) == 1
+    assert len(results) == 2
+
+
+def test_connected_concurrent_calls_are_not_serialized():
+    """call_tool() must run unserialized so gather() stays genuinely concurrent."""
+    in_flight = 0
+    peak = 0
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        s = MagicMock()
+
+        async def call_tool(tool, arguments):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            return MagicMock(content=[SimpleNamespace(type="text", text="{}")])
+
+        s.call_tool = call_tool
+        yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                await caller.call("demo", "warmup", {})  # open the session first
+                await asyncio.gather(
+                    caller.call("demo", "a", {}),
+                    caller.call("demo", "b", {}),
+                    caller.call("demo", "c", {}),
+                )
+
+    asyncio.run(run())
+    assert peak >= 2
+
+
+def test_connected_open_failure_propagates_to_the_caller():
+    """A transport error on open surfaces at the call site, not as a hang."""
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        raise ConnectionError("refused")
+        yield  # pragma: no cover
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                await caller.call("demo", "greet", {})
+
+    with pytest.raises(ConnectionError, match="refused"):
+        asyncio.run(run())
+
+
+def test_connected_open_failure_does_not_wedge_the_block():
+    """After a failed open, the block still closes cleanly."""
+
+    attempts = {"n": 0}
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ConnectionError("refused")
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                with pytest.raises(ConnectionError):
+                    await caller.call("demo", "greet", {})
+                return await caller.call("demo", "add", {})
+
+    assert asyncio.run(run()) == {"ok": True}

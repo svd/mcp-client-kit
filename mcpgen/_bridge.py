@@ -1155,20 +1155,18 @@ class McpBridgeCaller:
             await block.close()
 
     async def call(self, server: str, tool: str, arguments: dict) -> Any:
-        async with session(
-            server,
-            cmd=self._cmd,
-            url=self._url,
-            bearer=self._bearer,
-            client_name=self._client_name,
-            config_path=self._config_path,
-            cred_backend=self._cred_backend,
-            creds_path=self._creds_path,
-            env=self._env,
-        ) as s:
-            result = await s.call_tool(tool, arguments)
-            content = [_summarize_content_item(item) for item in result.content]
-            return parse(content)
+        block = self._block
+        if block is None:
+            # One-shot: open, call, close. Unchanged behaviour.
+            async with self._session_cm(server) as s:
+                return await self._invoke(s, tool, arguments)
+        return await self._invoke(await block.session_for(server), tool, arguments)
+
+    @staticmethod
+    async def _invoke(s: Any, tool: str, arguments: dict) -> Any:
+        result = await s.call_tool(tool, arguments)
+        content = [_summarize_content_item(item) for item in result.content]
+        return parse(content)
 
 
 def _summarize_content_item(item: Any) -> dict:
