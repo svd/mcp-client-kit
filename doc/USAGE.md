@@ -440,6 +440,41 @@ class FakeCaller:
 
 ---
 
+## Reusing one connection for a series of calls
+
+By default each wrapper call opens and closes its own MCP session. For a run that
+makes several calls, wrap them in a connection block:
+
+```python
+from mcpgen import McpBridgeCaller
+import demo
+
+caller = McpBridgeCaller(cmd="python server.py")
+
+async with caller.connected():
+    greeting = await demo.greet(caller, name="Grace")
+    total = await demo.add(caller, a=1, b=2)
+```
+
+Inside the block, all calls to one server share a single initialized session: one
+`initialize()`, one stdio subprocess, one OAuth pre-flight refresh. Outside the
+block, `call()` is unchanged — a session per invocation — so existing code keeps
+working with no edits.
+
+Details:
+
+- **Per-server.** A block holds one session per distinct server name, opened on
+  first use and closed on exit.
+- **Concurrency.** Calls inside a block may run concurrently; `asyncio.gather()`
+  over wrappers works. Only session creation is serialized, so two concurrent
+  first-calls cannot start two subprocesses.
+- **Cleanup.** Sessions close when the block exits, including when the body raises.
+- **Not re-entrant.** Nesting `connected()` on the same caller raises `RuntimeError`.
+- **Generated wrappers are unaffected.** They depend only on the `McpCaller`
+  protocol and neither know nor care whether a block is active.
+
+---
+
 ## Smoke-test runner
 
 A second skill, `generate-mcp-runner`, authors a standalone `<server>/run.py` that

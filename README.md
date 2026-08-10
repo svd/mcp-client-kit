@@ -58,6 +58,18 @@ The `-> GitHubUser` return type above comes from the full lifecycle — probe th
 
 `github.py` is just Python. Open it in your IDE, review it in a PR, pin it to a commit, ship it. No runtime proxy, no framework lock-in, no live server required to read what your tools return.
 
+**One connection for a series of calls.** Each call opens its own session by default. Wrap a run in `connected()` and every call to a server shares one initialized session — one `initialize()`, one stdio subprocess, one OAuth pre-flight refresh:
+
+```python
+caller = McpBridgeCaller(url="https://api.githubcopilot.com/mcp/")
+
+async with caller.connected():
+    me = await github.get_me(caller)
+    issues = await github.list_issues(caller, owner="octocat", repo="hello-world")
+```
+
+Outside the block nothing changes, so existing code keeps working untouched. Details — per-server sessions, concurrency, cleanup — in [`doc/USAGE.md`](doc/USAGE.md#reusing-one-connection-for-a-series-of-calls).
+
 ---
 
 ## Why developers pick it

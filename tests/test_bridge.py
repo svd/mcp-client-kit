@@ -2354,3 +2354,35 @@ def test_connected_open_failure_does_not_wedge_the_block():
                 return await caller.call("demo", "add", {})
 
     assert asyncio.run(run()) == {"ok": True}
+
+
+def test_connected_is_public_api():
+    """`connected` is part of the documented surface, not an internal."""
+    from mcpgen import McpBridgeCaller
+
+    assert hasattr(McpBridgeCaller, "connected")
+    assert McpBridgeCaller.connected.__doc__
+
+
+def test_pre_flight_refresh_runs_once_per_block():
+    """OAuth pre-flight must fire per block, not per call (audit §4 constraint 6)."""
+    refreshes = {"n": 0}
+
+    @asynccontextmanager
+    async def fake_http_session(server_name, server_url, **kwargs):
+        refreshes["n"] += 1
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge._http_session", fake_http_session):
+            with patch("mcpgen._bridge.servers", return_value={"acme": "https://acme.example/mcp"}):
+                caller = _bridge.McpBridgeCaller()
+                async with caller.connected():
+                    await caller.call("acme", "a", {})
+                    await caller.call("acme", "b", {})
+                    await caller.call("acme", "c", {})
+
+    asyncio.run(run())
+    # _http_session is where _pre_flight_refresh lives; entering it once per
+    # block means one refresh, not three.
+    assert refreshes["n"] == 1
