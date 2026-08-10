@@ -651,6 +651,58 @@ def _cmd_list(ns: argparse.Namespace) -> int:
     return 0
 
 
+# Exit contract for `mcpgen check`. Deliberately different from the other
+# subcommands, which return 1 for operational failures: here 1 means drift and
+# only drift, so a CI job with a dead token or an unreachable server can never
+# be misread as a changed tool contract.
+CHECK_OK = 0
+CHECK_DRIFT = 1
+CHECK_ERROR = 2
+
+
+def _cmd_check(ns: argparse.Namespace) -> int:
+    """Compare a server's live tool inventory against a stored manifest."""
+    manifest_path = Path(ns.manifest) if ns.manifest else Path(f"{ns.server}.mcpgen.json")
+
+    def _fail(message: str) -> int:
+        if getattr(ns, "json", False):
+            sys.stdout.write(json.dumps({"server": ns.server, "error": message}, indent=2) + "\n")
+        print(f"[check] error: {message}", file=sys.stderr)
+        return CHECK_ERROR
+
+    try:
+        stored = json.loads(manifest_path.read_text())
+    except FileNotFoundError:
+        return _fail(f"manifest not found: {manifest_path}. Generate one with `mcpgen codegen --out <file>.py`.")
+    except (OSError, json.JSONDecodeError) as exc:
+        return _fail(f"cannot read manifest {manifest_path}: {exc}")
+
+    cmd = getattr(ns, "stdio", None)
+    conn = dict(
+        url=ns.url,
+        bearer=ns.bearer,
+        client_name=ns.client_name,
+        config_path=ns.config,
+        cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
+        env=_parse_env(ns),
+    )
+    # No probing: tools/list only. `check` never calls a tool and never touches
+    # the shape-spec sidecar.
+    try:
+        tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
+    except Exception as exc:  # transport, auth, config — all operational
+        return _fail(f"{type(exc).__name__}: {exc}")
+
+    try:
+        report = manifest_mod.diff(stored, manifest_mod.build(ns.server, tools))
+    except ValueError as exc:
+        return _fail(str(exc))
+
+    sys.stdout.write(manifest_mod.render_text(report) + "\n")
+    return CHECK_DRIFT if report.has_drift else CHECK_OK
+
+
 def _cmd_login(ns: argparse.Namespace) -> int:
     asyncio.run(
         _bridge.login(
@@ -941,6 +993,21 @@ def main(argv: list[str] | None = None) -> int:
     ls.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(ls)
     ls.set_defaults(func=_cmd_list)
+
+    ck = sub.add_parser(
+        "check",
+        help="compare a server's live tool inventory against a stored manifest",
+        description="Exit codes: 0 = no drift, 1 = drift, 2 = operational/config/auth error.",
+    )
+    ck.add_argument("server", help="server name (e.g. acme) or URL")
+    ck.add_argument(
+        "--manifest",
+        metavar="PATH",
+        help="manifest written by `mcpgen codegen` (default: <server>.mcpgen.json)",
+    )
+    ck.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    _add_conn_args(ck)
+    ck.set_defaults(func=_cmd_check)
 
     lg = sub.add_parser("login", help="browser OAuth login for a named server")
     lg.add_argument("server", help="server name (e.g. acme)")
