@@ -215,6 +215,11 @@ _stdio_cache: dict[str, dict] = {}
 # servers() from config entries that have both "url" and "headers". Values in "headers"
 # have ``${VAR}`` references expanded at parse time (same as stdio "env").
 _headers_cache: dict[str, dict[str, str]] = {}
+# Declared transport type keyed by server name, e.g. {"legacy": "sse"}. Populated
+# alongside _servers_cache by servers(). Only entries with an explicit "type" are
+# present. Used to refuse SSE up front — this client has no SSE transport adapter,
+# and without the guard an SSE URL silently takes the Streamable HTTP path.
+_types_cache: dict[str, str] = {}
 
 
 def _filter_str_dict(raw: dict, *, require_nonempty_key: bool = False) -> dict[str, str]:
@@ -285,6 +290,22 @@ def _parse_servers(
     return urls, names, cmds, hdrs
 
 
+def _parse_server_types(raw: dict) -> dict[str, str]:
+    """Return {name: declared transport type} for entries carrying an explicit "type".
+
+    Kept separate from _parse_servers() so that function's 4-tuple contract, which
+    several callers unpack positionally, stays stable.
+    """
+    block = raw.get("mcpServers", raw)
+    types: dict[str, str] = {}
+    for name, val in block.items():
+        if isinstance(val, dict):
+            declared = val.get("type")
+            if isinstance(declared, str) and declared:
+                types[name] = declared.lower()
+    return types
+
+
 def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> dict[str, str]:
     """Return the {name: url} registry loaded from user config (cached).
 
@@ -292,7 +313,7 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
     search-order fallback) and always fresh, bypassing the cache.  A missing or
     unparseable explicit config raises rather than silently returning an empty dict.
     """
-    global _servers_cache, _client_names_cache, _stdio_cache, _headers_cache
+    global _servers_cache, _client_names_cache, _stdio_cache, _headers_cache, _types_cache
     if config_path is None and _servers_cache is not None and not refresh:
         return _servers_cache
     if config_path is not None:
@@ -301,9 +322,9 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
         if not path.exists():
             raise FileNotFoundError(f"config not found: {config_path}")
         try:
-            _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(
-                json.loads(path.read_text())
-            )
+            raw = json.loads(path.read_text())
+            _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(raw)
+            _types_cache = _parse_server_types(raw)
         except (json.JSONDecodeError, OSError, AttributeError) as e:
             raise ValueError(f"failed to parse config {path}: {e}") from e
         return _servers_cache
@@ -314,13 +335,14 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
     for path in candidates:
         if path.exists():
             try:
-                _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(
-                    json.loads(path.read_text())
-                )
+                raw = json.loads(path.read_text())
+                _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(raw)
+                _types_cache = _parse_server_types(raw)
                 return _servers_cache
             except (json.JSONDecodeError, OSError, AttributeError):
                 continue
     _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = {}, {}, {}, {}
+    _types_cache = {}
     return _servers_cache
 
 
@@ -942,6 +964,15 @@ async def session(
         No-op for non-stdio transports.
     """
     _servers = servers(config_path=config_path)
+    # SSE is discovered by discovery.py but has no transport adapter here. Refuse
+    # up front rather than letting the URL fall into the Streamable HTTP path and
+    # fail with an opaque protocol error. An inline --url carries no declared
+    # type, so this only catches config-declared entries; that limit is documented.
+    if cmd is None and bearer is None and _types_cache.get(server) == "sse":
+        raise ValueError(
+            f"server {server!r} uses SSE transport, which this mcpgen version does not support. "
+            f"Supported transports: stdio and Streamable HTTP."
+        )
     resolved_url = url or _servers.get(server)
     # Resolve a stdio spec: explicit --stdio flag takes precedence over config.
     stdio_spec: dict | None = None

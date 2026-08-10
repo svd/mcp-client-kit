@@ -1969,3 +1969,62 @@ def test_cli_migrate_creds_passes_creds_path(argv_flag, expected):
     with patch("mcpgen._bridge.migrate_creds", return_value=result) as migrate_mock:
         assert main(["migrate-creds", "--from", "file", "--to", "keyring", *argv_flag]) == 0
     assert migrate_mock.call_args.kwargs["credentials_path"] == expected
+
+
+# ---------------------------------------------------------------------------
+# SSE: discovered, not supported
+# ---------------------------------------------------------------------------
+
+
+def test_session_rejects_config_declared_sse_server(tmp_path):
+    """An SSE server must fail fast with a clear message, not silently take the
+    Streamable HTTP path and produce an opaque transport error."""
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+
+    async def run():
+        async with _bridge.session("legacy", config_path=str(config)):
+            pass  # pragma: no cover — must raise before yielding
+
+    with pytest.raises(ValueError, match="SSE transport"):
+        asyncio.run(run())
+
+
+def test_session_allows_config_declared_http_server(tmp_path):
+    """The guard must be narrow: only type=='sse' is refused."""
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"modern": {"type": "http", "url": "https://x.example/mcp"}}}))
+    opened: dict = {}
+
+    @asynccontextmanager
+    async def fake_http_session(server_name, server_url, **kwargs):
+        opened["url"] = server_url
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge._http_session", fake_http_session):
+            async with _bridge.session("modern", config_path=str(config)):
+                pass
+
+    asyncio.run(run())
+    assert opened["url"] == "https://x.example/mcp"
+
+
+def test_session_sse_guard_does_not_block_stdio_override(tmp_path):
+    """--stdio explicitly overrides config, so the SSE guard must not fire."""
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+    started: dict = {}
+
+    @asynccontextmanager
+    async def fake_stdio_session(command, args, env=None):
+        started["command"] = command
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge._stdio_session", fake_stdio_session):
+            async with _bridge.session("legacy", cmd="python srv.py", config_path=str(config)):
+                pass
+
+    asyncio.run(run())
+    assert started["command"] == "python"

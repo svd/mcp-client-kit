@@ -185,3 +185,29 @@ def test_filter_str_dict_expands_vars(monkeypatch):
     monkeypatch.setenv("MY_VAR", "hello")
     result = _bridge._filter_str_dict({"k": "${MY_VAR}", "bad": None, "n": 42})
     assert result == {"k": "hello", "n": "42"}
+
+
+# ── declared transport types ──────────────────────────────────────────────────
+
+
+def test_parse_server_types_reads_sse():
+    types = _bridge._parse_server_types({"mcpServers": {"legacy": {"type": "sse", "url": "https://x/sse"}}})
+    assert types == {"legacy": "sse"}
+
+
+def test_parse_server_types_lowercases():
+    types = _bridge._parse_server_types({"mcpServers": {"legacy": {"type": "SSE", "url": "https://x/sse"}}})
+    assert types["legacy"] == "sse"
+
+
+def test_parse_server_types_omits_entries_without_type():
+    types = _bridge._parse_server_types({"mcpServers": {"plain": {"url": "https://x/mcp"}}})
+    assert types == {}
+
+
+def test_parse_server_types_ignores_flat_string_form():
+    assert _bridge._parse_server_types({"s": "https://x/mcp"}) == {}
+
+
+def test_parse_server_types_ignores_non_string_type():
+    assert _bridge._parse_server_types({"mcpServers": {"weird": {"type": 5, "url": "https://x"}}}) == {}
