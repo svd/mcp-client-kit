@@ -156,9 +156,7 @@ def _classify(tool: str, old: dict, new: dict) -> ToolChange | None:
         return ToolChange(tool, "input_schema", "input schema changed", old_schema, new_schema)
 
     if old.get("annotations") != new.get("annotations"):
-        return ToolChange(
-            tool, "annotations", "annotations changed", old.get("annotations"), new.get("annotations")
-        )
+        return ToolChange(tool, "annotations", "annotations changed", old.get("annotations"), new.get("annotations"))
     return None
 
 

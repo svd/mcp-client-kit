@@ -957,8 +957,7 @@ def main(argv: list[str] | None = None) -> int:
     cg.add_argument(
         "--manifest",
         metavar="PATH",
-        help="tool-inventory manifest path for `mcpgen check` "
-        "(default: <out-stem>.mcpgen.json beside --out)",
+        help="tool-inventory manifest path for `mcpgen check` (default: <out-stem>.mcpgen.json beside --out)",
     )
     cg.add_argument(
         "--no-manifest",
