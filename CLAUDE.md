@@ -13,8 +13,9 @@ uv run pytest                          # all tests
 uv run pytest tests/test_codegen.py    # single file
 uv run pytest -k "test_name"           # single test
 
-# Lint / type-check
-uv run ruff check mcpgen/
+# Lint / type-check — same three commands CI runs; all must pass before pushing
+uv run ruff check .            # `skills/` is excluded in pyproject.toml (Template placeholders)
+uv run ruff format --check .   # CI fails on formatting alone; `ruff format .` to fix
 uv run mypy
 
 # Build dist

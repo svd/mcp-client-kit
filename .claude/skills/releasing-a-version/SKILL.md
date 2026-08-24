@@ -1,6 +1,6 @@
 ---
 name: releasing-a-version
-description: Use when releasing, cutting, or shipping a new version of mcp-client-kit — publishing to PyPI, bumping the version for release, or tagging vX.Y.Z / plugin-vX.Y.Z. Covers the engine (PyPI) and plugin-only (marketplace) flows, including the dev-branch dev0→stable→PR→tag→minor+dev sequence.
+description: Use when releasing, cutting, or shipping a new version of mcp-client-kit — publishing to PyPI, bumping the version for release, or tagging vX.Y.Z / plugin-vX.Y.Z. Covers the engine (PyPI) and plugin-only (marketplace) flows, including the dev-branch devN→stable→PR→tag→minor+dev sequence.
 ---
 
 # Releasing a version
@@ -33,7 +33,7 @@ gh pr checks        # CI green
 
 **2. Bump to stable**
 ```bash
-uv version --bump stable --dry-run   # preview: 0.2.0.dev0 => 0.2.0
+uv version --bump stable --dry-run   # preview: 0.2.0.dev1 => 0.2.0
 uv version --bump stable             # writes pyproject.toml + uv.lock
 ```
 
@@ -68,12 +68,11 @@ git push --tags   # bare v* tag triggers publish.yml → PyPI
 **6. Re-advance dev**
 ```bash
 git checkout dev
-uv version --bump minor              # 0.2.0 → 0.3.0
-uv version --bump dev                # 0.3.0 → 0.3.0.dev0
+uv version --bump minor --bump dev   # 0.2.0 → 0.3.0.dev1  (one call, not two)
 # Add fresh unreleased section to CHANGELOG if not already there:
 # ## [Unreleased] — 0.3.0
 git add pyproject.toml uv.lock CHANGELOG.md
-git commit -m "chore: bump version to 0.3.0.dev0"
+git commit -m "chore: bump version to 0.3.0.dev1"
 git push origin dev
 ```
 
@@ -121,7 +120,8 @@ In the `svd-agent-skills` marketplace repo, bump the `mcp-client-kit` entry's `r
 |---|---|
 | Tag on `dev` instead of `main` | Marketplace/PyPI points at a dev pre-release |
 | Tag version ≠ `pyproject.toml` version | `publish.yml` fails the tag-vs-version assertion |
-| Skip step 6 (re-advance dev) | dev stays at release version, no `.dev0` signal |
+| Skip step 6 (re-advance dev) | dev stays at release version, no `.devN` signal |
+| Split step 6 into `--bump minor` then `--bump dev` | Second call fails: `--bump dev` alone computes `0.3.0.dev1`, which sorts *below* `0.3.0`, so uv rejects it as a decrease. Both bumps must be in one call. `--bump` never produces `.dev0` — uv's dev segment starts at 1 |
 | Bump `pyproject.toml` for plugin-only | Triggers unnecessary PyPI republish |
 | Bump `marketplace.json` top-level `version` for every plugin release | Top-level is catalog metadata, not plugin version — leave it unless the catalog listing changed |
 | Raise SKILL.md floor preemptively | Floor should only move when the skill actually needs the new engine feature |
