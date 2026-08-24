@@ -407,6 +407,19 @@ class ReauthenticationRequired(Exception):
     """Tokens absent or refresh failed. Run: mcpgen login <server>"""
 
 
+class PostLoginCheckFailed(Exception):
+    """The OAuth flow finished and the token is cached, but the check after it failed.
+
+    The counterpart to ``ReauthenticationRequired``, and deliberately not named for
+    a cause: the token was issued, which says nothing about whether the resource
+    server accepted it. A 502 from the origin, a post-login 401 over scope or
+    audience, and an MCP-level error from ``list_tools()`` all raise this. What
+    they have in common — and the only thing a caller can act on — is that another
+    browser round will not fix them. Batch callers should abort here rather than
+    re-prompting once per item; that distinction is why this type exists.
+    """
+
+
 class FileTokenStorage(TokenStorage):
     """OAuth token + client info store, keyed by server name.
 
@@ -1358,6 +1371,86 @@ async def _local_callback_server(port: int = 0) -> tuple[int, asyncio.Future]:
     return actual_port, future
 
 
+def _persist_token_endpoint(
+    storage: FileTokenStorage,
+    server_name: str,
+    provider: OAuthClientProvider | None,
+) -> None:
+    """Cache the exact token endpoint the SDK exchanged this token against.
+
+    `_pre_flight_refresh` refuses to renew without it, so this has to be saved
+    wherever a token is — including the paths where the session itself failed.
+    Runs twice when the session fails *after* `initialize()`; the second write is
+    the same value, so it costs a load/save and nothing else.
+
+    `_get_token_endpoint()` is the SDK's own resolution: the discovered
+    `oauth_metadata.token_endpoint`, or `<origin>/token` when the server publishes
+    no discovery document. Asking it — rather than reading the metadata ourselves
+    and improvising a fallback — is what makes the cached URL the one that just
+    demonstrably worked: we are only ever called with a token in hand, so whatever
+    endpoint issued it is proven, while any endpoint we reconstruct is a guess.
+
+    It is private API, and access is direct on purpose: a `getattr` chain would
+    turn an SDK rename into a silent no-op — no endpoint written, every credential
+    expiring into a browser prompt — which is the failure this path exists to stop.
+    `mcp` is pinned to a range, so let a rename raise loudly.
+    `test_sdk_provider_resolves_token_endpoint` pins the name cheaply.
+    """
+    if provider is None:  # only reachable before the handshake, when no token exists
+        return
+    endpoint = provider._get_token_endpoint()
+    if not endpoint:
+        return
+    data = storage._load()
+    data.setdefault(server_name, {})["token_endpoint"] = str(endpoint)
+    storage._save(data)
+
+
+_DESCRIBE_LIMIT = 200
+"""Per-leaf cap on the exception text in a one-line error. Matches the response-body
+bound in ``_pre_flight_refresh``: enough to identify the failure, short enough to read."""
+
+
+def _carries_interrupt(exc: BaseException) -> bool:
+    """True if *exc* is, or wraps, a control-flow exception we must not relabel.
+
+    anyio task groups wrap even a single exception, so a Ctrl-C raised inside the
+    session surfaces as ``BaseExceptionGroup([KeyboardInterrupt])`` — a flat
+    isinstance check on the outermost exception would miss it and report a server
+    fault instead of an interrupt.
+
+    A group holding *both* an interrupt and a real failure counts as an interrupt
+    and propagates unconverted. That is deliberate: the user asked to stop, and
+    the group still carries the other exception for anyone who wants it, whereas
+    converting would discard the interrupt and keep the process running.
+    """
+    if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_carries_interrupt(inner) for inner in exc.exceptions)
+    return False
+
+
+def _describe(exc: BaseException) -> str:
+    """Render *exc* with its real cause visible, flattening exception groups.
+
+    ``str(BaseExceptionGroup)`` is only ever "unhandled errors in a TaskGroup
+    (1 sub-exception)" — useless to whoever has to decide whether the server
+    returned 502, DNS failed, or TLS did. The transport error always arrives
+    wrapped, so the leaves are the whole message.
+
+    Each leaf is capped: an ``HTTPStatusError`` can carry a whole HTML error page
+    in its message, and this ends up on one CLI line. Same reasoning — and same
+    bound — as the response-body truncation in ``_pre_flight_refresh``.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        return "; ".join(_describe(inner) for inner in exc.exceptions)
+    text = str(exc)
+    if len(text) > _DESCRIBE_LIMIT:
+        text = text[:_DESCRIBE_LIMIT] + "…"
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 async def login(
     server_name: str,
     creds_path: Path = DEFAULT_CREDS_PATH,
@@ -1379,6 +1472,9 @@ async def login(
     callback_timeout: seconds to wait for the browser redirect; None (default) uses
         _CALLBACK_TIMEOUT, and any value <= 0 waits indefinitely. Ignored in
         headless mode, where the stdin read is never bounded.
+
+    Raises PostLoginCheckFailed when the OAuth flow succeeded but the post-login
+    session failed: the token is saved and re-running login will not help.
     """
     _servers = servers(config_path=config_path)
     server_url = url or _servers.get(server_name)
@@ -1387,9 +1483,11 @@ async def login(
 
     storage = FileTokenStorage(server_name, creds_path, backend=resolve_cred_backend(cred_backend))
 
-    # Stash the existing entry before clearing it. If the OAuth flow fails for
-    # any reason (user cancel, network error, bad registration), we restore it
-    # so the caller is not locked out of a previously-working server.
+    # Stash the existing entry before clearing it. If the OAuth flow fails before
+    # it produces a token (user cancel, network error, bad registration), we
+    # restore it so the caller is not locked out of a previously-working server.
+    # Once a token *has* been exchanged the stash is stale by definition — see
+    # the handler at the bottom of this function.
     data = storage._load()
     stashed = data.pop(server_name, None)
     storage._save(data)
@@ -1397,6 +1495,8 @@ async def login(
     if headless is None:
         headless = _is_headless()
     timeout = _CALLBACK_TIMEOUT if callback_timeout is None else callback_timeout
+
+    provider: OAuthClientProvider | None = None
 
     try:
         callback_future: asyncio.Future | None = None
@@ -1468,11 +1568,7 @@ async def login(
 
                         # Persist the token endpoint for later pre-flight refresh. Do this
                         # independently of any tool call — not every server exposes `whoami`.
-                        if provider.context.oauth_metadata is not None:
-                            endpoint_url = str(provider.context.oauth_metadata.token_endpoint)
-                            creds_data = storage._load()
-                            creds_data.setdefault(server_name, {})["token_endpoint"] = endpoint_url
-                            storage._save(creds_data)
+                        _persist_token_endpoint(storage, server_name, provider)
 
                         # Confirm the authenticated session works with a server-agnostic
                         # call. `list_tools` is part of the MCP protocol — every server
@@ -1486,14 +1582,70 @@ async def login(
                 callback_future.set_result((None, None))
             await asyncio.sleep(0)
 
-    except BaseException:
-        # Restore the stashed credential so a failed login attempt doesn't lock
-        # the user out of a previously-working server.
-        if stashed is not None:
-            restore = storage._load()
-            restore[server_name] = stashed
-            storage._save(restore)
-        raise
+    except BaseException as exc:
+        # Did the flow get far enough to save a token? OAuthClientProvider writes
+        # it from inside the auth handshake, before `initialize()` returns, so a
+        # failure raised out of the session (a 502 from the origin, a transport
+        # error on the first call) leaves a *usable* credential behind. Restoring
+        # the stash over it would throw away the login the user just completed and
+        # send the next run back to the browser — forever, since nothing ever
+        # sticks. Re-read storage rather than trusting the provider object: the
+        # SDK owns that write and this is the same seam it wrote through.
+        # One read, reused for the restore below: nothing writes in between, and on
+        # the keyring backend a second _load() is another keychain round-trip — one
+        # that can even come from a different backend, if the first read tripped the
+        # fallback to file.
+        data = storage._load()
+        produced = data.get(server_name) or {}
+        if not produced.get("tokens"):
+            if stashed is not None:
+                data[server_name] = stashed
+                storage._save(data)
+            raise
+
+        # A token is only as good as the endpoint that can renew it: without one,
+        # _pre_flight_refresh demands a new login the moment it expires — the very
+        # re-prompt this branch exists to avoid. The normal persistence sits after
+        # initialize(), which is what just failed, so do it here. A storage error
+        # must not swallow the classification below, so it is carried into that
+        # message rather than raised. It does not go through warnings.warn: this is
+        # the one condition that silently reinstates the re-prompt this whole branch
+        # exists to prevent, and a UserWarning is shown once per location and
+        # disappears entirely under PYTHONWARNINGS=ignore. It belongs on the line the
+        # operator is already reading.
+        # What the message may claim depends on what is already on disk, not on which
+        # branch got here: initialize() persists the endpoint too, so a list_tools()
+        # failure can reach this point with one already cached. `produced` was read
+        # after that write, so it answers the question directly.
+        unrenewable = ""
+        try:
+            _persist_token_endpoint(storage, server_name, provider)
+        except Exception as save_exc:  # noqa: BLE001 — never mask the original failure
+            if produced.get("token_endpoint"):
+                unrenewable = (
+                    f" The token endpoint could not be updated ({save_exc}); the previously "
+                    f"cached one is still on disk, so a refresh works only if it has not moved."
+                )
+            else:
+                unrenewable = (
+                    f" The token endpoint could not be cached ({save_exc}), so the saved token "
+                    f"cannot be refreshed and the next run will prompt for a new login."
+                )
+
+        # Keep the token, and tell the caller the failure came after authentication —
+        # but never relabel an interrupt as a failed check.
+        if _carries_interrupt(exc):
+            raise
+        # State only what is known. A token was issued; that does not prove the
+        # resource server accepted it — a post-login 401, an MCP-level error from
+        # list_tools(), and a 502 from the origin all land here. What they share is
+        # that another browser round cannot fix them, which is the one thing the
+        # caller has to act on.
+        raise PostLoginCheckFailed(
+            f"Login succeeded ({server_name}) and the token was saved, but the check that follows "
+            f"it failed: {_describe(exc)}. Logging in again will not change this."
+            f"{unrenewable}"
+        ) from exc
 
     print(f"Credentials saved to {creds_path}")
 

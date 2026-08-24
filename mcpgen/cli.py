@@ -732,18 +732,24 @@ def _cmd_check(ns: argparse.Namespace) -> int:
 
 
 def _cmd_login(ns: argparse.Namespace) -> int:
-    asyncio.run(
-        _bridge.login(
-            ns.server,
-            _creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
-            url=ns.url,
-            client_name=ns.client_name,
-            config_path=ns.config,
-            cred_backend=ns.cred_backend,
-            headless=ns.headless,
-            callback_timeout=ns.callback_timeout,
+    try:
+        asyncio.run(
+            _bridge.login(
+                ns.server,
+                _creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
+                url=ns.url,
+                client_name=ns.client_name,
+                config_path=ns.config,
+                cred_backend=ns.cred_backend,
+                headless=ns.headless,
+                callback_timeout=ns.callback_timeout,
+            )
         )
-    )
+    except _bridge.PostLoginCheckFailed as exc:
+        # The token is cached; only the server is at fault. A traceback here reads
+        # as "your login broke" and invites a pointless second browser round.
+        print(f"[login] error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

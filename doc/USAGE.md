@@ -176,7 +176,13 @@ Re-run when you see `ReauthenticationRequired`.
 The browser flow waits up to 300 seconds for the redirect. If you cancel on the consent
 screen, many authorization servers just close the tab without redirecting back, so mcpgen
 never hears anything — the wait then ends with `TimeoutError` instead of hanging. Your
-existing credential is left untouched by a failed or timed-out attempt.
+existing credential is left untouched by an attempt that never got as far as a token.
+
+Once the authorization server *has* issued a token, that token wins. If the login
+completes and the check that follows it fails — a `502` from the origin, a `401` over
+scope or audience, an MCP-level error on the first call — the new credential is kept
+and `login` raises `PostLoginCheckFailed` instead of the raw error. Whatever the cause,
+logging in again will not change it, so read the message before retrying.
 
 Adjust the bound when the default doesn't fit — a hardware token or an approve-on-phone
 step can outlast it, and a scripted login may want to fail sooner:
@@ -422,8 +428,12 @@ How it works:
   accept `headless=True`/`False` to force the paste-the-URL or browser flow explicitly.
 - **Lower-level alternative** — skip `ensure_login` and catch
   `ReauthenticationRequired` from the first failing `.call()`, then call
-  `login(SERVER, url=URL)` and retry. `ReauthenticationRequired` and `login` are
-  also exported from `mcpgen`.
+  `login(SERVER, url=URL)` and retry. `ReauthenticationRequired`, `PostLoginCheckFailed`
+  and `login` are all exported from `mcpgen`.
+- **Batch callers** — catch `PostLoginCheckFailed` separately from
+  `ReauthenticationRequired`. The first means the token was issued and cached but the
+  post-login check failed, whatever the cause; another browser round cannot fix it, so
+  abort the batch instead of re-prompting once per item.
 
 `McpBridgeCaller` kwargs mirror the CLI connection flags — `url=`, `bearer=` (PAT),
 `cmd=` (stdio), `config_path=`, `client_name=`. One instance is reusable across
@@ -653,6 +663,7 @@ accepts values outside the declared enum, the appropriate fix is to update the s
 |---------|-----|
 | Skill not listed in `/help` | Plugin not installed — run `/plugin marketplace add …` |
 | `ReauthenticationRequired` | Run `mcpgen login <server>` |
+| `PostLoginCheckFailed` | The counterpart: the token was issued and saved, but the check after login failed. Read the cause in the message — logging in again changes nothing |
 | Config not found | Check the search order above; paths resolve from your cwd |
 | Bearer token rejected | Confirm the env var is exported in the current shell |
 | `uses SSE transport, which this mcpgen version does not support` | Only stdio and Streamable HTTP are implemented — see [§ Supported transports](#supported-transports) |
