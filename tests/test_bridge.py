@@ -1435,9 +1435,7 @@ def test_sdk_saves_tokens_before_initialize_returns(tmp_path):
         callback_handler=callback_handler,
     )
 
-    token_body = json.dumps(
-        {"access_token": "issued_tok", "token_type": "Bearer", "expires_in": 3600}
-    ).encode()
+    token_body = json.dumps({"access_token": "issued_tok", "token_type": "Bearer", "expires_in": 3600}).encode()
 
     # Recorded inside the flow, asserted outside it: raising through `asend` unwinds
     # the SDK's own lock and surfaces as an unrelated "task is not holding this lock".
