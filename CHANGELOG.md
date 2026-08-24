@@ -1,6 +1,56 @@
 # Changelog
 
-## [Unreleased] — 0.6.0
+## [Unreleased] — 0.7.0
+
+## [0.6.0] — 2026-08-24
+
+### Fixed
+
+- **A completed login was thrown away whenever the server failed right after it, turning a
+  transient outage into an endless browser re-prompt.** `login()` stashed the existing
+  credential, ran the OAuth flow, then smoke-tested the result with `initialize()` +
+  `list_tools()` — with the whole block under one `except BaseException` that restored the
+  stash. But the SDK's `OAuthClientProvider` saves the exchanged token from inside the auth
+  handshake, before `initialize()` returns, so any failure after that point rolled a valid
+  new token back to the stale one. A `502` from the resource server was indistinguishable
+  from "your login failed", and nothing was ever cached, so the next run re-prompted — one
+  reported batch produced 16 completed browser logins, all discarded, and no useful work.
+  The restore is now conditional: it fires only when the flow produced no token at all. When
+  a token *was* issued it is kept, together with the token endpoint needed to refresh it later,
+  and the failure surfaces as the new `PostLoginCheckFailed` rather than the raw transport
+  error. A login that fails *before* the token exchange — a cancelled consent screen, a
+  callback timeout — still restores the previous credential whole, `client_info` included:
+  pairing a freshly registered `client_id` with a refresh token the authorization server
+  issued to the *old* client would break the refresh the restore exists to preserve.
+
+- **Servers that publish no OAuth discovery document re-prompted at every token expiry.**
+  The token endpoint was cached only when discovery returned metadata, so for those servers
+  `login()` stored a token with no way to renew it, and the next pre-flight refresh had no
+  choice but to demand a new browser login — every hour, forever. The endpoint now comes from
+  the SDK's own resolution, which covers the no-discovery case with its `<origin>/token`
+  fallback, so the cached URL is the one that demonstrably just issued the token rather than a
+  guess.
+
+### Added
+
+- **`PostLoginCheckFailed`**, exported from `mcpgen`. The counterpart to
+  `ReauthenticationRequired`, and deliberately not named for a cause: the token was issued
+  and cached, which says nothing about whether the resource server accepted it. A `502` from
+  the origin, a post-login `401` over scope or audience, and an MCP-level error from
+  `list_tools()` all raise it; what they share is that another browser round cannot fix them.
+  Batch callers can now abort on the first failure instead of walking a user through one
+  browser prompt per item. `mcpgen login` reports it as a single `[login] error: …` line —
+  naming the underlying cause, which anyio otherwise hides behind "unhandled errors in a
+  TaskGroup (1 sub-exception)" — and exits `1`. User interrupts (`KeyboardInterrupt`,
+  `SystemExit`, cancellation) are never relabelled, even when a task group wraps them.
+
+### Changed
+
+- **Generated OAuth runners now stop on `PostLoginCheckFailed` instead of printing a
+  traceback.** The `generate-mcp-runner` skill's HTTP + OAuth template called `ensure_login()`
+  bare, so the one place mcpgen writes caller code did not demonstrate the contract it
+  documents. It now prints the message and exits `1` — the failure is not something a rerun,
+  or another trip through the browser, can clear.
 
 ## [0.5.0] — 2026-08-09
 

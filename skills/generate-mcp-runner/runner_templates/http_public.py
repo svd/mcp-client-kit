@@ -1,6 +1,6 @@
 """
 Smoke-test runner for generated $server_name/ wrappers.
-Transport: HTTP/SSE  ($launch)
+Transport: Streamable HTTP  ($launch)
 Auth: none (public endpoint)
 
 Usage:
@@ -21,6 +21,9 @@ SERVER_URL = "$launch"
 async def main() -> None:
     caller = McpBridgeCaller(url=SERVER_URL)
 
+    # One connection for the whole run: a single initialize() instead of
+    # reconnecting for every tool call.
+    async with caller.connected():
 $demo_calls
 
 if __name__ == "__main__":

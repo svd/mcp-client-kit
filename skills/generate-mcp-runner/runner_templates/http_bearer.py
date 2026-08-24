@@ -1,6 +1,6 @@
 """
 Smoke-test runner for generated $server_name/ wrappers.
-Transport: HTTP  ($launch)
+Transport: Streamable HTTP  ($launch)
 Auth: Bearer token (set ${bearer_env_var} env var)
 
 Usage:
@@ -25,6 +25,9 @@ async def main() -> None:
 
     caller = McpBridgeCaller(url=SERVER_URL, bearer=bearer)
 
+    # One connection for the whole run: a single initialize() instead of
+    # reconnecting for every tool call.
+    async with caller.connected():
 $demo_calls
 
 if __name__ == "__main__":

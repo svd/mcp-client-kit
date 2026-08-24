@@ -52,7 +52,7 @@ import sys
 import time
 import warnings
 import webbrowser
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -215,6 +215,11 @@ _stdio_cache: dict[str, dict] = {}
 # servers() from config entries that have both "url" and "headers". Values in "headers"
 # have ``${VAR}`` references expanded at parse time (same as stdio "env").
 _headers_cache: dict[str, dict[str, str]] = {}
+# Declared transport type keyed by server name, e.g. {"legacy": "sse"}. Populated
+# alongside _servers_cache by servers(). Only entries with an explicit "type" are
+# present. Used to refuse SSE up front — this client has no SSE transport adapter,
+# and without the guard an SSE URL silently takes the Streamable HTTP path.
+_types_cache: dict[str, str] = {}
 
 
 def _filter_str_dict(raw: dict, *, require_nonempty_key: bool = False) -> dict[str, str]:
@@ -285,6 +290,22 @@ def _parse_servers(
     return urls, names, cmds, hdrs
 
 
+def _parse_server_types(raw: dict) -> dict[str, str]:
+    """Return {name: declared transport type} for entries carrying an explicit "type".
+
+    Kept separate from _parse_servers() so that function's 4-tuple contract, which
+    several callers unpack positionally, stays stable.
+    """
+    block = raw.get("mcpServers", raw)
+    types: dict[str, str] = {}
+    for name, val in block.items():
+        if isinstance(val, dict):
+            declared = val.get("type")
+            if isinstance(declared, str) and declared:
+                types[name] = declared.lower()
+    return types
+
+
 def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> dict[str, str]:
     """Return the {name: url} registry loaded from user config (cached).
 
@@ -292,7 +313,7 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
     search-order fallback) and always fresh, bypassing the cache.  A missing or
     unparseable explicit config raises rather than silently returning an empty dict.
     """
-    global _servers_cache, _client_names_cache, _stdio_cache, _headers_cache
+    global _servers_cache, _client_names_cache, _stdio_cache, _headers_cache, _types_cache
     if config_path is None and _servers_cache is not None and not refresh:
         return _servers_cache
     if config_path is not None:
@@ -301,9 +322,9 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
         if not path.exists():
             raise FileNotFoundError(f"config not found: {config_path}")
         try:
-            _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(
-                json.loads(path.read_text())
-            )
+            raw = json.loads(path.read_text())
+            _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(raw)
+            _types_cache = _parse_server_types(raw)
         except (json.JSONDecodeError, OSError, AttributeError) as e:
             raise ValueError(f"failed to parse config {path}: {e}") from e
         return _servers_cache
@@ -314,13 +335,14 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
     for path in candidates:
         if path.exists():
             try:
-                _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(
-                    json.loads(path.read_text())
-                )
+                raw = json.loads(path.read_text())
+                _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(raw)
+                _types_cache = _parse_server_types(raw)
                 return _servers_cache
             except (json.JSONDecodeError, OSError, AttributeError):
                 continue
     _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = {}, {}, {}, {}
+    _types_cache = {}
     return _servers_cache
 
 
@@ -383,6 +405,19 @@ _CALLBACK_TIMEOUT = 300
 
 class ReauthenticationRequired(Exception):
     """Tokens absent or refresh failed. Run: mcpgen login <server>"""
+
+
+class PostLoginCheckFailed(Exception):
+    """The OAuth flow finished and the token is cached, but the check after it failed.
+
+    The counterpart to ``ReauthenticationRequired``, and deliberately not named for
+    a cause: the token was issued, which says nothing about whether the resource
+    server accepted it. A 502 from the origin, a post-login 401 over scope or
+    audience, and an MCP-level error from ``list_tools()`` all raise this. What
+    they have in common — and the only thing a caller can act on — is that another
+    browser round will not fix them. Batch callers should abort here rather than
+    re-prompting once per item; that distinction is why this type exists.
+    """
 
 
 class FileTokenStorage(TokenStorage):
@@ -942,6 +977,25 @@ async def session(
         No-op for non-stdio transports.
     """
     _servers = servers(config_path=config_path)
+    # SSE is discovered by discovery.py but has no transport adapter here. Refuse
+    # up front rather than letting the URL fall into the Streamable HTTP path and
+    # fail with an opaque protocol error.
+    #
+    # Only --stdio and --url are exempt, because only those re-target the
+    # transport. --bearer must NOT exempt: it is an auth override, so with a
+    # config-declared SSE entry the URL still resolves from that same entry and
+    # `--bearer` would route an SSE endpoint into _bearer_session → Streamable
+    # HTTP → exactly the opaque error this guard exists to prevent.
+    #
+    # An inline --url carries no declared type, so config-declared entries are
+    # all this can catch; that limit is documented rather than guessed at from
+    # URL shape.
+    if cmd is None and url is None and _types_cache.get(server) == "sse":
+        raise ValueError(
+            f"server {server!r} uses SSE transport, which this mcpgen version does not support. "
+            'Re-register it with "type": "http" if the server speaks Streamable HTTP, '
+            "or pass --stdio to run it locally."
+        )
     resolved_url = url or _servers.get(server)
     # Resolve a stdio spec: explicit --stdio flag takes precedence over config.
     stdio_spec: dict | None = None
@@ -982,6 +1036,78 @@ async def session(
                 yield s
 
 
+class _SessionBlock:
+    """Owns every live session for one ``McpBridgeCaller.connected()`` block.
+
+    All context managers are entered and exited by a single owner task. This is
+    load-bearing, not stylistic: ``stdio_client`` and ``streamable_http_client``
+    open anyio task groups, and anyio requires a cancel scope to be exited in the
+    task that entered it. A session opened lazily inside an ``asyncio.gather()``
+    child and closed from the parent would raise "Attempted to exit cancel scope
+    in a different task". Funnelling every open through the owner removes that
+    failure mode by construction.
+    """
+
+    def __init__(self, caller: McpBridgeCaller) -> None:
+        self._caller = caller
+        self._requests: asyncio.Queue = asyncio.Queue()
+        self._sessions: dict[str, Any] = {}
+        # Guards the open path only. call_tool() itself runs unserialized, so
+        # asyncio.gather() over wrappers stays genuinely concurrent — the SDK's
+        # ClientSession multiplexes on JSON-RPC request id.
+        self._open_lock = asyncio.Lock()
+        self._ready = asyncio.Event()
+        self._task: asyncio.Task | None = None
+
+    async def _owner(self) -> None:
+        """Serve open-requests until a None sentinel arrives, then unwind."""
+        async with AsyncExitStack() as stack:
+            # Entering an empty AsyncExitStack cannot fail, so signalling ready
+            # here cannot deadlock the starter.
+            self._ready.set()
+            while True:
+                item = await self._requests.get()
+                if item is None:
+                    return
+                server, future = item
+                try:
+                    opened = await stack.enter_async_context(self._caller._session_cm(server))
+                except BaseException as exc:  # noqa: BLE001 — relayed to the requester
+                    if not future.done():
+                        future.set_exception(exc)
+                else:
+                    if future.done():
+                        # Requester was cancelled while waiting. The session is
+                        # already on the stack and will close at block exit.
+                        continue
+                    future.set_result(opened)
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._owner())
+        await self._ready.wait()
+
+    async def close(self) -> None:
+        """Stop the owner and wait for the stack to unwind in the owner's task."""
+        await self._requests.put(None)
+        if self._task is not None:
+            await self._task
+
+    async def session_for(self, server: str) -> Any:
+        """Return this block's session for *server*, opening it on first use."""
+        existing = self._sessions.get(server)
+        if existing is not None:
+            return existing
+        async with self._open_lock:
+            existing = self._sessions.get(server)
+            if existing is not None:
+                return existing
+            future: asyncio.Future = asyncio.get_running_loop().create_future()
+            await self._requests.put((server, future))
+            opened = await future
+            self._sessions[server] = opened
+            return opened
+
+
 class McpBridgeCaller:
     """McpCaller implementation backed by the standalone MCP client."""
 
@@ -1005,9 +1131,11 @@ class McpBridgeCaller:
         self._cred_backend = cred_backend
         self._creds_path = creds_path
         self._env = env
+        self._block: _SessionBlock | None = None
 
-    async def call(self, server: str, tool: str, arguments: dict) -> Any:
-        async with session(
+    def _session_cm(self, server: str):
+        """The session context manager for *server* under this caller's config."""
+        return session(
             server,
             cmd=self._cmd,
             url=self._url,
@@ -1017,10 +1145,51 @@ class McpBridgeCaller:
             cred_backend=self._cred_backend,
             creds_path=self._creds_path,
             env=self._env,
-        ) as s:
-            result = await s.call_tool(tool, arguments)
-            content = [_summarize_content_item(item) for item in result.content]
-            return parse(content)
+        )
+
+    @asynccontextmanager
+    async def connected(self):
+        """Reuse one initialized session per server for the duration of the block.
+
+        Inside the block every ``call()`` to the same server reuses one
+        ``ClientSession``: one ``initialize()``, one stdio subprocess, one OAuth
+        pre-flight refresh. Outside the block ``call()`` is unchanged — it opens
+        and closes a session per invocation.
+
+            caller = McpBridgeCaller(cmd="python server.py")
+            async with caller.connected():
+                await gh.get_me(caller)
+                await gh.list_issues(caller, owner="octocat", repo="hello-world")
+
+        Connection arguments are fixed per caller instance, so within one block
+        the server name fully determines the connection; two callers never share
+        a session. Not re-entrant. Sessions close on exit, including when the
+        block body raises.
+        """
+        if self._block is not None:
+            raise RuntimeError("McpBridgeCaller.connected() is not re-entrant")
+        block = _SessionBlock(self)
+        await block.start()
+        self._block = block
+        try:
+            yield self
+        finally:
+            self._block = None
+            await block.close()
+
+    async def call(self, server: str, tool: str, arguments: dict) -> Any:
+        block = self._block
+        if block is None:
+            # One-shot: open, call, close. Unchanged behaviour.
+            async with self._session_cm(server) as s:
+                return await self._invoke(s, tool, arguments)
+        return await self._invoke(await block.session_for(server), tool, arguments)
+
+    @staticmethod
+    async def _invoke(s: Any, tool: str, arguments: dict) -> Any:
+        result = await s.call_tool(tool, arguments)
+        content = [_summarize_content_item(item) for item in result.content]
+        return parse(content)
 
 
 def _summarize_content_item(item: Any) -> dict:
@@ -1057,8 +1226,8 @@ def _summarize_content_item(item: Any) -> dict:
     return {"type": item_type, "text": getattr(item, "text", "")}
 
 
-def parse(content_items: list) -> Any:
-    """Extract and JSON-parse the text payload from an MCP tool result.
+def _parse_one(item: Any) -> Any:
+    """Parse a single MCP content block into a Python value.
 
     Falls back to ``ast.literal_eval`` for Python-repr payloads (e.g. servers
     that return single-quoted dicts like sqlite), then to a plain string as a
@@ -1068,9 +1237,6 @@ def parse(content_items: list) -> Any:
     to parse — return the block's own summary dict as-is rather than falling
     through to an empty string, so the shape-spec records something real.
     """
-    if not content_items:
-        raise ValueError("MCP tool result has empty content")
-    item = content_items[0]
     item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
     if item_type in ("image", "resource", "resource_link"):
         return item if isinstance(item, dict) else _summarize_content_item(item)
@@ -1082,6 +1248,30 @@ def parse(content_items: list) -> Any:
             return ast.literal_eval(text)
         except (ValueError, SyntaxError):
             return text
+
+
+def parse(content_items: list) -> Any:
+    """Extract the payload from an MCP tool result.
+
+    MCP serializes a list return value as one content block per element, so a
+    multi-block result must fold into a list — reading only the first block
+    silently drops data, which is what this function used to do.
+
+    A single block returns its value directly rather than a one-element list:
+    that is the overwhelmingly common case and wrapping it would change the
+    return type of every existing wrapper.
+
+    ``structuredContent`` is deliberately not consulted. Its presence depends on
+    whether the tool author annotated the return type, and its wrapping depends
+    on whether the value is a JSON object, so relying on it would make
+    correctness a function of someone else's type hints. Content blocks are
+    transport-level and always present.
+    """
+    if not content_items:
+        raise ValueError("MCP tool result has empty content")
+    if len(content_items) == 1:
+        return _parse_one(content_items[0])
+    return [_parse_one(item) for item in content_items]
 
 
 # ---------------------------------------------------------------------------
@@ -1181,6 +1371,86 @@ async def _local_callback_server(port: int = 0) -> tuple[int, asyncio.Future]:
     return actual_port, future
 
 
+def _persist_token_endpoint(
+    storage: FileTokenStorage,
+    server_name: str,
+    provider: OAuthClientProvider | None,
+) -> None:
+    """Cache the exact token endpoint the SDK exchanged this token against.
+
+    `_pre_flight_refresh` refuses to renew without it, so this has to be saved
+    wherever a token is — including the paths where the session itself failed.
+    Runs twice when the session fails *after* `initialize()`; the second write is
+    the same value, so it costs a load/save and nothing else.
+
+    `_get_token_endpoint()` is the SDK's own resolution: the discovered
+    `oauth_metadata.token_endpoint`, or `<origin>/token` when the server publishes
+    no discovery document. Asking it — rather than reading the metadata ourselves
+    and improvising a fallback — is what makes the cached URL the one that just
+    demonstrably worked: we are only ever called with a token in hand, so whatever
+    endpoint issued it is proven, while any endpoint we reconstruct is a guess.
+
+    It is private API, and access is direct on purpose: a `getattr` chain would
+    turn an SDK rename into a silent no-op — no endpoint written, every credential
+    expiring into a browser prompt — which is the failure this path exists to stop.
+    `mcp` is pinned to a range, so let a rename raise loudly.
+    `test_sdk_provider_resolves_token_endpoint` pins the name cheaply.
+    """
+    if provider is None:  # only reachable before the handshake, when no token exists
+        return
+    endpoint = provider._get_token_endpoint()
+    if not endpoint:
+        return
+    data = storage._load()
+    data.setdefault(server_name, {})["token_endpoint"] = str(endpoint)
+    storage._save(data)
+
+
+_DESCRIBE_LIMIT = 200
+"""Per-leaf cap on the exception text in a one-line error. Matches the response-body
+bound in ``_pre_flight_refresh``: enough to identify the failure, short enough to read."""
+
+
+def _carries_interrupt(exc: BaseException) -> bool:
+    """True if *exc* is, or wraps, a control-flow exception we must not relabel.
+
+    anyio task groups wrap even a single exception, so a Ctrl-C raised inside the
+    session surfaces as ``BaseExceptionGroup([KeyboardInterrupt])`` — a flat
+    isinstance check on the outermost exception would miss it and report a server
+    fault instead of an interrupt.
+
+    A group holding *both* an interrupt and a real failure counts as an interrupt
+    and propagates unconverted. That is deliberate: the user asked to stop, and
+    the group still carries the other exception for anyone who wants it, whereas
+    converting would discard the interrupt and keep the process running.
+    """
+    if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_carries_interrupt(inner) for inner in exc.exceptions)
+    return False
+
+
+def _describe(exc: BaseException) -> str:
+    """Render *exc* with its real cause visible, flattening exception groups.
+
+    ``str(BaseExceptionGroup)`` is only ever "unhandled errors in a TaskGroup
+    (1 sub-exception)" — useless to whoever has to decide whether the server
+    returned 502, DNS failed, or TLS did. The transport error always arrives
+    wrapped, so the leaves are the whole message.
+
+    Each leaf is capped: an ``HTTPStatusError`` can carry a whole HTML error page
+    in its message, and this ends up on one CLI line. Same reasoning — and same
+    bound — as the response-body truncation in ``_pre_flight_refresh``.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        return "; ".join(_describe(inner) for inner in exc.exceptions)
+    text = str(exc)
+    if len(text) > _DESCRIBE_LIMIT:
+        text = text[:_DESCRIBE_LIMIT] + "…"
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 async def login(
     server_name: str,
     creds_path: Path = DEFAULT_CREDS_PATH,
@@ -1202,6 +1472,9 @@ async def login(
     callback_timeout: seconds to wait for the browser redirect; None (default) uses
         _CALLBACK_TIMEOUT, and any value <= 0 waits indefinitely. Ignored in
         headless mode, where the stdin read is never bounded.
+
+    Raises PostLoginCheckFailed when the OAuth flow succeeded but the post-login
+    session failed: the token is saved and re-running login will not help.
     """
     _servers = servers(config_path=config_path)
     server_url = url or _servers.get(server_name)
@@ -1210,9 +1483,11 @@ async def login(
 
     storage = FileTokenStorage(server_name, creds_path, backend=resolve_cred_backend(cred_backend))
 
-    # Stash the existing entry before clearing it. If the OAuth flow fails for
-    # any reason (user cancel, network error, bad registration), we restore it
-    # so the caller is not locked out of a previously-working server.
+    # Stash the existing entry before clearing it. If the OAuth flow fails before
+    # it produces a token (user cancel, network error, bad registration), we
+    # restore it so the caller is not locked out of a previously-working server.
+    # Once a token *has* been exchanged the stash is stale by definition — see
+    # the handler at the bottom of this function.
     data = storage._load()
     stashed = data.pop(server_name, None)
     storage._save(data)
@@ -1220,6 +1495,8 @@ async def login(
     if headless is None:
         headless = _is_headless()
     timeout = _CALLBACK_TIMEOUT if callback_timeout is None else callback_timeout
+
+    provider: OAuthClientProvider | None = None
 
     try:
         callback_future: asyncio.Future | None = None
@@ -1291,11 +1568,7 @@ async def login(
 
                         # Persist the token endpoint for later pre-flight refresh. Do this
                         # independently of any tool call — not every server exposes `whoami`.
-                        if provider.context.oauth_metadata is not None:
-                            endpoint_url = str(provider.context.oauth_metadata.token_endpoint)
-                            creds_data = storage._load()
-                            creds_data.setdefault(server_name, {})["token_endpoint"] = endpoint_url
-                            storage._save(creds_data)
+                        _persist_token_endpoint(storage, server_name, provider)
 
                         # Confirm the authenticated session works with a server-agnostic
                         # call. `list_tools` is part of the MCP protocol — every server
@@ -1309,14 +1582,70 @@ async def login(
                 callback_future.set_result((None, None))
             await asyncio.sleep(0)
 
-    except BaseException:
-        # Restore the stashed credential so a failed login attempt doesn't lock
-        # the user out of a previously-working server.
-        if stashed is not None:
-            restore = storage._load()
-            restore[server_name] = stashed
-            storage._save(restore)
-        raise
+    except BaseException as exc:
+        # Did the flow get far enough to save a token? OAuthClientProvider writes
+        # it from inside the auth handshake, before `initialize()` returns, so a
+        # failure raised out of the session (a 502 from the origin, a transport
+        # error on the first call) leaves a *usable* credential behind. Restoring
+        # the stash over it would throw away the login the user just completed and
+        # send the next run back to the browser — forever, since nothing ever
+        # sticks. Re-read storage rather than trusting the provider object: the
+        # SDK owns that write and this is the same seam it wrote through.
+        # One read, reused for the restore below: nothing writes in between, and on
+        # the keyring backend a second _load() is another keychain round-trip — one
+        # that can even come from a different backend, if the first read tripped the
+        # fallback to file.
+        data = storage._load()
+        produced = data.get(server_name) or {}
+        if not produced.get("tokens"):
+            if stashed is not None:
+                data[server_name] = stashed
+                storage._save(data)
+            raise
+
+        # A token is only as good as the endpoint that can renew it: without one,
+        # _pre_flight_refresh demands a new login the moment it expires — the very
+        # re-prompt this branch exists to avoid. The normal persistence sits after
+        # initialize(), which is what just failed, so do it here. A storage error
+        # must not swallow the classification below, so it is carried into that
+        # message rather than raised. It does not go through warnings.warn: this is
+        # the one condition that silently reinstates the re-prompt this whole branch
+        # exists to prevent, and a UserWarning is shown once per location and
+        # disappears entirely under PYTHONWARNINGS=ignore. It belongs on the line the
+        # operator is already reading.
+        # What the message may claim depends on what is already on disk, not on which
+        # branch got here: initialize() persists the endpoint too, so a list_tools()
+        # failure can reach this point with one already cached. `produced` was read
+        # after that write, so it answers the question directly.
+        unrenewable = ""
+        try:
+            _persist_token_endpoint(storage, server_name, provider)
+        except Exception as save_exc:  # noqa: BLE001 — never mask the original failure
+            if produced.get("token_endpoint"):
+                unrenewable = (
+                    f" The token endpoint could not be updated ({save_exc}); the previously "
+                    f"cached one is still on disk, so a refresh works only if it has not moved."
+                )
+            else:
+                unrenewable = (
+                    f" The token endpoint could not be cached ({save_exc}), so the saved token "
+                    f"cannot be refreshed and the next run will prompt for a new login."
+                )
+
+        # Keep the token, and tell the caller the failure came after authentication —
+        # but never relabel an interrupt as a failed check.
+        if _carries_interrupt(exc):
+            raise
+        # State only what is known. A token was issued; that does not prove the
+        # resource server accepted it — a post-login 401, an MCP-level error from
+        # list_tools(), and a 502 from the origin all land here. What they share is
+        # that another browser round cannot fix them, which is the one thing the
+        # caller has to act on.
+        raise PostLoginCheckFailed(
+            f"Login succeeded ({server_name}) and the token was saved, but the check that follows "
+            f"it failed: {_describe(exc)}. Logging in again will not change this."
+            f"{unrenewable}"
+        ) from exc
 
     print(f"Credentials saved to {creds_path}")
 

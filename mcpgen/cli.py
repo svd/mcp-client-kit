@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import quote as _url_quote
 
 from . import _bridge, codegen, discovery
+from . import manifest as manifest_mod
 
 
 async def _list_tools(
@@ -270,6 +271,25 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
     return shapes
 
 
+def _manifest_path(ns: argparse.Namespace) -> Path | None:
+    """Resolve where codegen should write the tool-inventory manifest.
+
+    Derived from --out (``gen/wrapper.py`` → ``gen/wrapper.mcpgen.json``) so the
+    manifest stays beside the module it describes even when the module name
+    differs from the server name. --manifest overrides; --no-manifest and
+    stdout mode suppress.
+    """
+    if getattr(ns, "no_manifest", False):
+        return None
+    override = getattr(ns, "manifest", None)
+    if override:
+        return Path(override)
+    if not ns.out:
+        return None
+    out = Path(ns.out)
+    return out.with_name(out.stem + ".mcpgen.json")
+
+
 def _cmd_codegen(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
     conn = dict(
@@ -310,6 +330,11 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         print(f"[codegen] wrote {ns.out} ({len(source)} bytes)", file=sys.stderr)
     else:
         sys.stdout.write(source)
+
+    target = _manifest_path(ns)
+    if target is not None:
+        _atomic_write_text(target, manifest_mod.dumps(manifest_mod.build(ns.server, tools)))
+        print(f"[codegen] wrote {target} ({len(tools)} tool(s))", file=sys.stderr)
     return 0
 
 
@@ -626,19 +651,105 @@ def _cmd_list(ns: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_login(ns: argparse.Namespace) -> int:
-    asyncio.run(
-        _bridge.login(
-            ns.server,
-            _creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
-            url=ns.url,
-            client_name=ns.client_name,
-            config_path=ns.config,
-            cred_backend=ns.cred_backend,
-            headless=ns.headless,
-            callback_timeout=ns.callback_timeout,
-        )
+# Exit contract for `mcpgen check`. Deliberately different from the other
+# subcommands, which return 1 for operational failures: here 1 means drift and
+# only drift, so a CI job with a dead token or an unreachable server can never
+# be misread as a changed tool contract.
+CHECK_OK = 0
+CHECK_DRIFT = 1
+CHECK_ERROR = 2
+
+
+def _cmd_check(ns: argparse.Namespace) -> int:
+    """Compare a server's live tool inventory against a stored manifest."""
+    manifest_path = Path(ns.manifest) if ns.manifest else Path(f"{ns.server}.mcpgen.json")
+
+    def _fail(message: str) -> int:
+        if getattr(ns, "json", False):
+            sys.stdout.write(json.dumps({"server": ns.server, "error": message}, indent=2) + "\n")
+        print(f"[check] error: {message}", file=sys.stderr)
+        return CHECK_ERROR
+
+    bootstrapping = False
+    try:
+        stored = json.loads(manifest_path.read_text())
+    except FileNotFoundError:
+        if not getattr(ns, "update", False):
+            return _fail(
+                f"manifest not found: {manifest_path}. Generate one with `mcpgen codegen --out <file>.py`, "
+                f"or bootstrap it with `mcpgen check {ns.server} --manifest {manifest_path} --update`."
+            )
+        bootstrapping = True
+        stored = manifest_mod.build(ns.server, [])
+    except (OSError, json.JSONDecodeError) as exc:
+        return _fail(f"cannot read manifest {manifest_path}: {exc}")
+
+    cmd = getattr(ns, "stdio", None)
+    conn = dict(
+        url=ns.url,
+        bearer=ns.bearer,
+        client_name=ns.client_name,
+        config_path=ns.config,
+        cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
+        env=_parse_env(ns),
     )
+    # No probing: tools/list only. `check` never calls a tool and never touches
+    # the shape-spec sidecar.
+    try:
+        tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
+    except Exception as exc:  # transport, auth, config — all operational
+        return _fail(f"{type(exc).__name__}: {exc}")
+
+    try:
+        live = manifest_mod.build(ns.server, tools)
+        report = manifest_mod.diff(stored, live)
+    except ValueError as exc:
+        return _fail(str(exc))
+
+    updated = False
+    if getattr(ns, "update", False):
+        # The only write path outside `codegen`, and it requires the explicit
+        # flag. Nothing above this line ever touches the manifest file.
+        _atomic_write_text(manifest_path, manifest_mod.dumps(live))
+        updated = True
+
+    if getattr(ns, "json", False):
+        payload = manifest_mod.to_json(report)
+        if updated:
+            payload["updated"] = True
+        sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+    else:
+        sys.stdout.write(manifest_mod.render_text(report) + "\n")
+        if updated:
+            accepted = len(report.added) + len(report.removed) + len(report.changed)
+            verb = "created" if bootstrapping else "updated"
+            sys.stdout.write(f"[check] {verb} {manifest_path} (accepted {accepted} change(s))\n")
+
+    if updated:
+        return CHECK_OK
+    return CHECK_DRIFT if report.has_drift else CHECK_OK
+
+
+def _cmd_login(ns: argparse.Namespace) -> int:
+    try:
+        asyncio.run(
+            _bridge.login(
+                ns.server,
+                _creds_path(ns) or _bridge.DEFAULT_CREDS_PATH,
+                url=ns.url,
+                client_name=ns.client_name,
+                config_path=ns.config,
+                cred_backend=ns.cred_backend,
+                headless=ns.headless,
+                callback_timeout=ns.callback_timeout,
+            )
+        )
+    except _bridge.PostLoginCheckFailed as exc:
+        # The token is cached; only the server is at fault. A traceback here reads
+        # as "your login broke" and invites a pointless second browser round.
+        print(f"[login] error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -849,6 +960,17 @@ def main(argv: list[str] | None = None) -> int:
         dest="embed_schema",
         help="embed raw inputSchema as __schema__ attribute and Args docstring per tool",
     )
+    cg.add_argument(
+        "--manifest",
+        metavar="PATH",
+        help="tool-inventory manifest path for `mcpgen check` (default: <out-stem>.mcpgen.json beside --out)",
+    )
+    cg.add_argument(
+        "--no-manifest",
+        action="store_true",
+        dest="no_manifest",
+        help="do not write a tool-inventory manifest",
+    )
     _add_conn_args(cg)
     cg.set_defaults(func=_cmd_codegen)
 
@@ -904,6 +1026,27 @@ def main(argv: list[str] | None = None) -> int:
     ls.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(ls)
     ls.set_defaults(func=_cmd_list)
+
+    ck = sub.add_parser(
+        "check",
+        help="compare a server's live tool inventory against a stored manifest",
+        description="Exit codes: 0 = no drift, 1 = drift, 2 = operational/config/auth error.",
+    )
+    ck.add_argument("server", help="server name (e.g. acme) or URL")
+    ck.add_argument(
+        "--manifest",
+        metavar="PATH",
+        help="manifest written by `mcpgen codegen` (default: <server>.mcpgen.json)",
+    )
+    ck.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    ck.add_argument("--json", action="store_true", help="emit a structured report instead of the human diff")
+    ck.add_argument(
+        "--update",
+        action="store_true",
+        help="accept the live inventory and rewrite the manifest (never happens without this flag)",
+    )
+    _add_conn_args(ck)
+    ck.set_defaults(func=_cmd_check)
 
     lg = sub.add_parser("login", help="browser OAuth login for a named server")
     lg.add_argument("server", help="server name (e.g. acme)")

@@ -19,9 +19,14 @@ import time
 import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
+from mcp.shared.auth import OAuthClientMetadata
+from pydantic import AnyUrl
 
 from mcpgen import _bridge
 
@@ -935,6 +940,572 @@ def test_login_no_prior_credential_does_not_create_on_failure(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# login() — failures *after* the token exchange
+# ---------------------------------------------------------------------------
+
+
+def _provider_that_completes_token_exchange(server_name, fresh_tokens, token_endpoint=None):
+    """Stand-in for OAuthClientProvider that writes a token as it is constructed.
+
+    The real SDK saves the exchanged token from inside the auth handshake, i.e.
+    before `ClientSession.initialize()` returns. So by the time anything later in
+    login() blows up, a perfectly good credential is already on disk — that is the
+    state these tests reproduce. Metadata discovery happens earlier still, so the
+    provider can already resolve the token endpoint by then.
+
+    `_get_token_endpoint` mirrors the SDK's own: the discovered endpoint when there
+    is one, else `<origin>/token`. Pass `token_endpoint=None` to model a server that
+    publishes no discovery document.
+    """
+
+    def fake_provider(**kwargs):
+        storage = kwargs["storage"]
+        data = storage._load()
+        data.setdefault(server_name, {})["tokens"] = fresh_tokens
+        storage._save(data)
+        metadata = SimpleNamespace(token_endpoint=token_endpoint) if token_endpoint else None
+        origin = urlparse(kwargs["server_url"])
+        return SimpleNamespace(
+            context=SimpleNamespace(oauth_metadata=metadata),
+            _get_token_endpoint=lambda: (
+                str(token_endpoint) if token_endpoint else f"{origin.scheme}://{origin.netloc}/token"
+            ),
+        )
+
+    return fake_provider
+
+
+def _run_login_failing_after_exchange(creds, exc, fresh_tokens, token_endpoint=None):
+    """Drive login() to the point where the token is saved, then fail with *exc*."""
+
+    @asynccontextmanager
+    async def fake_http(*args, **kwargs):
+        raise exc
+        yield  # makes this an async generator; unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", fake_http),
+            patch(
+                "mcpgen._bridge.OAuthClientProvider",
+                _provider_that_completes_token_exchange("acme", fresh_tokens, token_endpoint),
+            ),
+        ):
+            await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    return run
+
+
+def test_login_keeps_token_when_server_fails_after_token_exchange(tmp_path):
+    """A freshly-exchanged token must survive a post-authentication failure.
+
+    The stash/restore exists for a login that never produced a credential. Rolling
+    it back over a token the authorization server just issued turns a transient
+    origin outage (e.g. a 502 on `initialize`) into an endless browser re-prompt:
+    every later run finds the stale entry, reauthenticates, and discards the
+    result again.
+    """
+    creds = tmp_path / "credentials.json"
+    stale_entry = {
+        "tokens": {"access_token": "stale_tok", "token_type": "bearer", "expires_at": 1},
+        "client_info": {"client_id": "old_id"},
+    }
+    creds.write_text(json.dumps({"acme": stale_entry}))
+    os.chmod(creds, 0o600)
+
+    fresh = {"access_token": "fresh_tok", "token_type": "bearer", "expires_at": 9999999999}
+    run = _run_login_failing_after_exchange(creds, RuntimeError("502 Bad Gateway"), fresh)
+
+    with pytest.raises(_bridge.PostLoginCheckFailed):
+        asyncio.run(run())
+
+    assert json.loads(creds.read_text())["acme"]["tokens"] == fresh
+
+
+def test_login_reports_server_unavailable_distinctly(tmp_path):
+    """A post-auth failure raises PostLoginCheckFailed, not the raw transport error.
+
+    Callers (batch runs especially) need to tell "the server is down, the token is
+    fine" apart from "you must log in again" — retrying login for the former is
+    pure interactive churn.
+    """
+    creds = tmp_path / "credentials.json"
+    original = RuntimeError("Server error '502 Bad Gateway'")
+    run = _run_login_failing_after_exchange(creds, original, {"access_token": "fresh_tok"})
+
+    with pytest.raises(_bridge.PostLoginCheckFailed) as excinfo:
+        asyncio.run(run())
+
+    assert excinfo.value.__cause__ is original
+    assert "502 Bad Gateway" in str(excinfo.value)
+
+
+def test_login_classifies_wrapped_transport_failure_as_server_unavailable(tmp_path):
+    """The real failure arrives as an ExceptionGroup out of the anyio task group."""
+    creds = tmp_path / "credentials.json"
+    group = ExceptionGroup("unhandled errors in a TaskGroup", [RuntimeError("502 Bad Gateway")])
+    run = _run_login_failing_after_exchange(creds, group, {"access_token": "fresh_tok"})
+
+    with pytest.raises(_bridge.PostLoginCheckFailed) as excinfo:
+        asyncio.run(run())
+
+    # The wrapper's own str() is "unhandled errors in a TaskGroup (1 sub-exception)":
+    # useless to whoever has to tell a 502 from a DNS failure. The leaf must survive.
+    assert "502 Bad Gateway" in str(excinfo.value)
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "fresh_tok"
+
+
+def test_describe_flattens_nested_groups_and_keeps_bare_exception_types():
+    """_describe() is what stands between the operator and a useless error line."""
+    nested = ExceptionGroup(
+        "outer",
+        [ExceptionGroup("inner", [RuntimeError("502 Bad Gateway")]), ValueError("bad state")],
+    )
+    described = _bridge._describe(nested)
+    assert "502 Bad Gateway" in described
+    assert "bad state" in described
+    # An exception with an empty message still has to name itself.
+    assert _bridge._describe(RuntimeError()) == "RuntimeError"
+
+
+def test_login_does_not_convert_keyboard_interrupt(tmp_path):
+    """Ctrl-C stays Ctrl-C, even once a token has been saved."""
+    creds = tmp_path / "credentials.json"
+    run = _run_login_failing_after_exchange(creds, KeyboardInterrupt(), {"access_token": "fresh_tok"})
+
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(run())
+
+    # Still no rollback: the token is real regardless of how the run ended.
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "fresh_tok"
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), SystemExit(1), asyncio.CancelledError()])
+def test_login_does_not_convert_interrupt_wrapped_by_a_task_group(tmp_path, interrupt):
+    """A Ctrl-C inside the session arrives wrapped — it must still read as an interrupt.
+
+    anyio task groups wrap even a single exception (that is how the transport
+    error surfaces too), so a flat isinstance check on the outermost exception
+    would relabel a user's Ctrl-C as a server fault and exit 1.
+    """
+    creds = tmp_path / "credentials.json"
+    wrapped = BaseExceptionGroup("unhandled errors in a TaskGroup", [interrupt])
+    run = _run_login_failing_after_exchange(creds, wrapped, {"access_token": "fresh_tok"})
+
+    with pytest.raises(BaseExceptionGroup) as excinfo:
+        asyncio.run(run())
+
+    assert not isinstance(excinfo.value, _bridge.PostLoginCheckFailed)
+    assert excinfo.value.exceptions[0] is interrupt
+
+
+def test_login_persists_token_endpoint_when_server_fails_after_token_exchange(tmp_path):
+    """The kept token needs its token endpoint kept alongside it.
+
+    `_pre_flight_refresh` treats a missing `token_endpoint` as "must log in
+    again", so a token saved without one silently expires into the very browser
+    re-prompt this path exists to prevent. The normal persistence runs after
+    `initialize()`, which is exactly what failed here.
+    """
+    creds = tmp_path / "credentials.json"
+    run = _run_login_failing_after_exchange(
+        creds,
+        RuntimeError("502 Bad Gateway"),
+        {"access_token": "fresh_tok", "refresh_token": "fresh_refresh", "expires_at": 1},
+        token_endpoint="https://auth.example.com/token",
+    )
+
+    with pytest.raises(_bridge.PostLoginCheckFailed):
+        asyncio.run(run())
+
+    assert json.loads(creds.read_text())["acme"]["token_endpoint"] == "https://auth.example.com/token"
+
+
+def test_sdk_provider_resolves_token_endpoint(tmp_path):
+    """Pin the SDK member `_persist_token_endpoint` calls.
+
+    Every test around it drives a SimpleNamespace stand-in, so nothing else here
+    would notice `mcp` renaming `context` or `_get_token_endpoint` — the endpoint
+    would silently stop being cached and every credential would expire into a
+    browser prompt with the suite still green. `mcp` is pinned to a range, not a
+    version, and `_get_token_endpoint` is private, so this is a live risk.
+    Constructing the provider and resolving the URL are both pure; no network.
+    """
+    from mcp.client.auth import OAuthClientProvider
+
+    async def _unused(*args, **kwargs):  # pragma: no cover — handlers are never invoked
+        raise AssertionError("handler must not run")
+
+    provider = OAuthClientProvider(
+        server_url="https://acme.example.com/mcp",
+        client_metadata=_bridge._client_metadata("acme", "http://localhost:9999/callback"),
+        storage=_bridge.FileTokenStorage("acme", tmp_path / "credentials.json"),
+        redirect_handler=_unused,
+        callback_handler=_unused,
+    )
+
+    # Undiscovered — the state a server publishing no metadata document leaves it in.
+    assert provider.context.oauth_metadata is None
+    # …and the SDK still resolves a usable endpoint, which is the whole reason we ask
+    # it instead of reading oauth_metadata ourselves.
+    assert provider._get_token_endpoint() == "https://acme.example.com/token"
+
+
+def test_login_persists_the_endpoint_that_issued_the_token(tmp_path):
+    """With no discovery document, cache the SDK's fallback — not the old login's URL.
+
+    Reaching this branch means the exchange succeeded, and with `oauth_metadata`
+    unset it succeeded against `<origin>/token`. That URL is therefore proven to
+    work; the endpoint a previous login discovered is not, and inheriting it would
+    point the next refresh somewhere the token was never issued.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(
+        json.dumps(
+            {
+                "acme": {
+                    "tokens": {"access_token": "stale_tok", "expires_at": 1},
+                    "token_endpoint": "https://auth.example.com/oauth/token",
+                }
+            }
+        )
+    )
+    os.chmod(creds, 0o600)
+
+    run = _run_login_failing_after_exchange(
+        creds,
+        RuntimeError("502 Bad Gateway"),
+        {"access_token": "fresh_tok", "expires_at": 9999999999},
+        token_endpoint=None,  # discovery produced nothing
+    )
+
+    with pytest.raises(_bridge.PostLoginCheckFailed):
+        asyncio.run(run())
+
+    entry = json.loads(creds.read_text())["acme"]
+    assert entry["tokens"]["access_token"] == "fresh_tok", "the fresh token still wins"
+    assert entry["token_endpoint"] == "https://acme.example.com/token"
+
+
+def test_login_discovered_token_endpoint_beats_the_stashed_one(tmp_path):
+    """A rediscovered endpoint must not be shadowed by the previous login's copy."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "stale"}, "token_endpoint": "https://old/token"}}))
+    os.chmod(creds, 0o600)
+
+    run = _run_login_failing_after_exchange(
+        creds,
+        RuntimeError("502 Bad Gateway"),
+        {"access_token": "fresh_tok"},
+        token_endpoint="https://new/token",
+    )
+
+    with pytest.raises(_bridge.PostLoginCheckFailed):
+        asyncio.run(run())
+
+    assert json.loads(creds.read_text())["acme"]["token_endpoint"] == "https://new/token"
+
+
+def test_login_post_auth_message_does_not_claim_the_credential_works(tmp_path):
+    """A post-login 401 reaches this path too — the message must not vouch for the token.
+
+    Token issuance says nothing about whether the resource server accepts it. The one
+    thing that holds for every cause is that logging in again will not change it.
+    """
+    creds = tmp_path / "credentials.json"
+    run = _run_login_failing_after_exchange(
+        creds,
+        ExceptionGroup("tg", [RuntimeError("Client error '401 Unauthorized'")]),
+        {"access_token": "fresh_tok"},
+        token_endpoint="https://auth.example.com/token",
+    )
+
+    with pytest.raises(_bridge.PostLoginCheckFailed) as excinfo:
+        asyncio.run(run())
+
+    message = str(excinfo.value)
+    assert "401 Unauthorized" in message, "the cause has to reach the operator"
+    assert "credential is valid" not in message
+    assert "Logging in again will not change this" in message
+
+
+def test_login_kept_token_is_refreshable_without_a_new_login(tmp_path):
+    """End to end: after the 502, the next run refreshes silently instead of re-prompting."""
+    creds = tmp_path / "credentials.json"
+    run = _run_login_failing_after_exchange(
+        creds,
+        RuntimeError("502 Bad Gateway"),
+        {"access_token": "fresh_tok", "refresh_token": "fresh_refresh", "expires_at": 1},
+        token_endpoint="https://auth.example.com/token",
+    )
+
+    with pytest.raises(_bridge.PostLoginCheckFailed):
+        asyncio.run(run())
+
+    # login() cleared client_info and the fake provider never registered one, so
+    # supply what a real registration would have left behind.
+    data = json.loads(creds.read_text())
+    data["acme"]["client_info"] = {"client_id": "new_id"}
+    creds.write_text(json.dumps(data))
+
+    posted = {}
+
+    class _FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"access_token": "renewed_tok", "token_type": "bearer"}
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, data):
+            posted["url"] = url
+            return _FakeResponse()
+
+    async def refresh():
+        storage = _bridge.FileTokenStorage("acme", creds)
+        with patch("mcpgen._bridge.httpx.AsyncClient", _FakeClient):
+            await _bridge._pre_flight_refresh("acme", storage)
+
+    asyncio.run(refresh())
+    assert posted["url"] == "https://auth.example.com/token"
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "renewed_tok"
+
+
+def test_login_says_so_when_the_kept_token_cannot_be_refreshed(tmp_path):
+    """A token kept but left unrenewable must say so on the line the operator reads.
+
+    Failing to cache the token endpoint is the one condition that quietly reinstates
+    the re-prompt this whole branch exists to prevent: the token survives the outage
+    and then expires with no way to renew it. It used to go through warnings.warn —
+    shown once per location, and gone entirely under PYTHONWARNINGS=ignore.
+    """
+    creds = tmp_path / "credentials.json"
+    run = _run_login_failing_after_exchange(
+        creds,
+        RuntimeError("502 Bad Gateway"),
+        {"access_token": "fresh_tok"},
+        token_endpoint="https://auth.example.com/token",
+    )
+
+    def explode(*args, **kwargs):
+        raise OSError("disk full")
+
+    with (
+        patch("mcpgen._bridge._persist_token_endpoint", explode),
+        pytest.raises(_bridge.PostLoginCheckFailed) as excinfo,
+    ):
+        asyncio.run(run())
+
+    message = str(excinfo.value)
+    assert "disk full" in message, "the operator has to know why it cannot be refreshed"
+    assert "502 Bad Gateway" in message, "and the original failure must still be there"
+    # The token is still kept — an unrenewable token beats no token at all.
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "fresh_tok"
+
+
+def test_login_does_not_claim_unrenewable_when_an_endpoint_is_already_cached(tmp_path):
+    """Only claim the token cannot be refreshed when no endpoint is actually on disk.
+
+    initialize() persists the endpoint too, so a list_tools() failure reaches the
+    handler with one already cached. Saying "cannot be refreshed and the next run
+    will prompt" there is simply false, and false remediation advice is how an
+    operator ends up back at the browser for no reason.
+    """
+    creds = tmp_path / "credentials.json"
+
+    # login() pops the whole entry before the flow (_bridge.py:1492), so a previous
+    # login's endpoint is never on disk here — the only way one is cached is the
+    # persist that follows a successful initialize(). Write it from the provider to
+    # reproduce that state: initialize() succeeded, list_tools() is what failed.
+    def provider_that_also_caches_the_endpoint(**kwargs):
+        storage = kwargs["storage"]
+        data = storage._load()
+        entry = data.setdefault("acme", {})
+        entry["tokens"] = {"access_token": "fresh_tok"}
+        entry["token_endpoint"] = "https://auth.example.com/token"
+        storage._save(data)
+        return SimpleNamespace(
+            context=SimpleNamespace(oauth_metadata=None),
+            _get_token_endpoint=lambda: "https://auth.example.com/token",
+        )
+
+    @asynccontextmanager
+    async def fake_http(*args, **kwargs):
+        raise RuntimeError("502 Bad Gateway")
+        yield  # makes this an async generator; unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", fake_http),
+            patch("mcpgen._bridge.OAuthClientProvider", provider_that_also_caches_the_endpoint),
+        ):
+            await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    def explode(*args, **kwargs):
+        raise OSError("disk full")
+
+    with (
+        patch("mcpgen._bridge._persist_token_endpoint", explode),
+        pytest.raises(_bridge.PostLoginCheckFailed) as excinfo,
+    ):
+        asyncio.run(run())
+
+    message = str(excinfo.value)
+    assert "disk full" in message, "the operator still has to know the save failed"
+    assert "will prompt for a new login" not in message, "there is a cached endpoint to refresh with"
+    assert "has not moved" in message
+
+
+def test_describe_caps_a_runaway_exception_message():
+    """One CLI line, so a leaf carrying an HTML error page has to be truncated."""
+    described = _bridge._describe(RuntimeError("x" * 5000))
+
+    assert len(described) < 400
+    assert described.startswith("RuntimeError: xxx")
+    assert described.endswith("…")
+
+
+def test_sdk_saves_tokens_before_initialize_returns(tmp_path):
+    """Pin the SDK ordering the whole fix rests on, against the real SDK.
+
+    login() keeps a token only because OAuthClientProvider persists it from inside
+    the httpx auth handshake — i.e. before `ClientSession.initialize()` returns. If
+    a future mcp 1.x moved that write after the retry, the "no token produced"
+    branch would take over, the stash would be restored, and the original bug would
+    come back with every test still green: the fake in these tests writes the token
+    itself, so it can never catch that drift.
+
+    Driving `async_auth_flow` directly is the cheapest honest check. A source grep
+    would pass on a refactor that breaks the ordering and fail on a rename that
+    does not.
+    """
+    from mcp.client.auth import OAuthClientProvider
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+    saved: list[OAuthToken] = []
+
+    class _Storage:
+        async def get_tokens(self):
+            return None
+
+        async def set_tokens(self, tokens):
+            saved.append(tokens)
+
+        async def get_client_info(self):
+            return OAuthClientInformationFull(
+                client_id="cid",
+                redirect_uris=[AnyUrl("http://localhost:9999/callback")],
+                token_endpoint_auth_method="none",
+            )
+
+        async def set_client_info(self, info):
+            return None
+
+    issued_state = {}
+
+    async def redirect_handler(url: str) -> None:
+        # The SDK checks the returned state with compare_digest, so echo its own.
+        issued_state["value"] = parse_qs(urlparse(url).query)["state"][0]
+
+    async def callback_handler():
+        # KeyError here means the SDK stopped putting `state` in the authorization
+        # URL — again a change of flow shape, not of the write ordering.
+        return "auth_code", issued_state["value"]
+
+    provider = OAuthClientProvider(
+        server_url="https://acme.example.com/mcp",
+        client_metadata=OAuthClientMetadata(
+            client_name="mcpgen",
+            redirect_uris=[AnyUrl("http://localhost:9999/callback")],
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            token_endpoint_auth_method="none",
+        ),
+        storage=_Storage(),
+        redirect_handler=redirect_handler,
+        callback_handler=callback_handler,
+    )
+
+    token_body = json.dumps({"access_token": "issued_tok", "token_type": "Bearer", "expires_in": 3600}).encode()
+
+    # Recorded inside the flow, asserted outside it: raising through `asend` unwinds
+    # the SDK's own lock and surfaces as an unrelated "task is not holding this lock".
+    saved_before_retry = {}
+
+    async def drive():
+        flow = provider.async_auth_flow(httpx.Request("POST", "https://acme.example.com/mcp"))
+        request = await flow.__anext__()
+        # Feed the 401 that starts the OAuth dance, then answer whatever the SDK asks
+        # for until it stops. The token response is the only one that matters here.
+        response = httpx.Response(401, request=request)
+        # Bounded, not `while True`: the current SDK yields a handful of times (two
+        # finite discovery lists, an optional registration, the token POST, the
+        # retry), but an SDK that loops would hang the suite instead of failing it.
+        # Falling out of the loop leaves `saved_before_retry` unset, which fails.
+        for _ in range(20):
+            try:
+                request = await flow.asend(response)
+            except StopAsyncIteration:
+                return
+            url = str(request.url)
+            # Routing keys on the SDK's current URL shapes. If those move, requests
+            # fall to the `else` below and surface as a pydantic validation error:
+            # that means the flow's shape changed, not that the ordering broke.
+            if url.endswith("/token"):
+                response = httpx.Response(200, content=token_body, request=request)
+            elif "well-known" in url:
+                response = httpx.Response(404, request=request)
+            else:
+                response = httpx.Response(200, content=b"{}", request=request)
+            # The retried request is the original one: the handshake is over by the
+            # time the SDK yields it, so the token has to be on disk already.
+            if url.startswith("https://acme.example.com/mcp"):
+                saved_before_retry["value"] = bool(saved)
+                return
+
+    asyncio.run(drive())
+    assert saved_before_retry.get("value") is True, (
+        "the SDK must persist the token before it yields the retried request — "
+        "login() keeps a post-failure token only because of this ordering"
+    )
+    assert saved[0].access_token == "issued_tok"
+
+
+def test_ensure_login_all_aborts_the_batch_on_post_login_failure(tmp_path):
+    """The contract USAGE.md sells to batch callers: stop, do not walk the rest.
+
+    ensure_login() catches ReauthenticationRequired and only that, so
+    PostLoginCheckFailed propagates and the loop stops. That is the entire point of
+    the new type — a batch that keeps going prompts once per remaining server, which
+    is the reported incident.
+    """
+    creds = tmp_path / "credentials.json"
+    attempted = []
+
+    async def fake_login(server_name, *args, **kwargs):
+        attempted.append(server_name)
+        raise _bridge.PostLoginCheckFailed(f"post-login check failed ({server_name})")
+
+    async def run():
+        with patch("mcpgen._bridge.login", fake_login):
+            await _bridge.ensure_login_all(["first", "second"], creds_path=creds)
+
+    with pytest.raises(_bridge.PostLoginCheckFailed):
+        asyncio.run(run())
+
+    assert attempted == ["first"], "the second server must never reach the browser"
+
+
+# ---------------------------------------------------------------------------
 # Public-client registration (token_endpoint_auth_method="none")
 # ---------------------------------------------------------------------------
 
@@ -1551,6 +2122,19 @@ def test_cli_login_headless_flag(argv_flag, expected):
     assert login_mock.await_args.kwargs["headless"] is expected
 
 
+def test_cli_login_server_unavailable_is_reported_not_traced(capsys):
+    """`mcpgen login` on a down server: one line, nonzero exit, no traceback.
+
+    The credential is good, so the message must not read as "log in again".
+    """
+    from mcpgen.cli import main
+
+    login_mock = AsyncMock(side_effect=_bridge.PostLoginCheckFailed("acme is not answering (502)"))
+    with patch("mcpgen._bridge.login", login_mock):
+        assert main(["login", "acme"]) == 1
+    assert "502" in capsys.readouterr().err
+
+
 def test_login_headless_pasted_url_without_code_rejected(tmp_path):
     """A URL pasted without ?code= (e.g. the bare redirect) fails loudly."""
     creds = tmp_path / "credentials.json"
@@ -1969,3 +2553,584 @@ def test_cli_migrate_creds_passes_creds_path(argv_flag, expected):
     with patch("mcpgen._bridge.migrate_creds", return_value=result) as migrate_mock:
         assert main(["migrate-creds", "--from", "file", "--to", "keyring", *argv_flag]) == 0
     assert migrate_mock.call_args.kwargs["credentials_path"] == expected
+
+
+# ---------------------------------------------------------------------------
+# SSE: discovered, not supported
+# ---------------------------------------------------------------------------
+
+
+def test_session_rejects_config_declared_sse_server(tmp_path):
+    """An SSE server must fail fast with a clear message, not silently take the
+    Streamable HTTP path and produce an opaque transport error.
+
+    Hermetic: _http_session is patched to raise, so a regression fails here
+    instead of attempting real DNS from an otherwise network-free suite.
+    """
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+
+    @asynccontextmanager
+    async def unreachable_http_session(*args, **kwargs):
+        raise AssertionError("SSE entry reached the Streamable HTTP transport")
+        yield  # pragma: no cover — makes this a generator
+
+    async def run():
+        with patch("mcpgen._bridge._http_session", unreachable_http_session):
+            async with _bridge.session("legacy", config_path=str(config)):
+                pass  # pragma: no cover — must raise before yielding
+
+    with pytest.raises(ValueError, match="SSE transport"):
+        asyncio.run(run())
+
+
+def test_session_allows_config_declared_http_server(tmp_path):
+    """The guard must be narrow: only type=='sse' is refused."""
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"modern": {"type": "http", "url": "https://x.example/mcp"}}}))
+    opened: dict = {}
+
+    @asynccontextmanager
+    async def fake_http_session(server_name, server_url, **kwargs):
+        opened["url"] = server_url
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge._http_session", fake_http_session):
+            async with _bridge.session("modern", config_path=str(config)):
+                pass
+
+    asyncio.run(run())
+    assert opened["url"] == "https://x.example/mcp"
+
+
+def test_session_sse_guard_does_not_block_stdio_override(tmp_path):
+    """--stdio explicitly overrides config, so the SSE guard must not fire."""
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+    started: dict = {}
+
+    @asynccontextmanager
+    async def fake_stdio_session(command, args, env=None):
+        started["command"] = command
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge._stdio_session", fake_stdio_session):
+            async with _bridge.session("legacy", cmd="python srv.py", config_path=str(config)):
+                pass
+
+    asyncio.run(run())
+    assert started["command"] == "python"
+
+
+# ---------------------------------------------------------------------------
+# Session reuse: block lifecycle
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _tracking_session(log: list, name: str = "s"):
+    """A fake session context manager that records the task it enters/exits in."""
+    log.append(("enter", name, asyncio.current_task()))
+    try:
+        yield _make_mock_session({"ok": name})
+    finally:
+        log.append(("exit", name, asyncio.current_task()))
+
+
+def test_connected_opens_one_session_for_two_calls():
+    """Two calls in one block share a single session (one initialize)."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                await caller.call("demo", "greet", {})
+                await caller.call("demo", "add", {})
+
+    asyncio.run(run())
+    assert [e[0] for e in log] == ["enter", "exit"]
+
+
+def test_one_shot_calls_still_open_a_session_each():
+    """Outside a block, behaviour is unchanged: one session per call."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            await caller.call("demo", "greet", {})
+            await caller.call("demo", "add", {})
+
+    asyncio.run(run())
+    assert [e[0] for e in log] == ["enter", "exit", "enter", "exit"]
+
+
+def test_connected_returns_the_caller():
+    """`async with caller.connected() as c` yields the same caller, for convenience."""
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected() as c:
+                assert c is caller
+
+    asyncio.run(run())
+
+
+def test_connected_closes_session_on_exit():
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                await caller.call("demo", "greet", {})
+
+    asyncio.run(run())
+    assert log[-1][0] == "exit"
+
+
+def test_connected_closes_session_when_body_raises():
+    """Cleanup on the exception path — the audit's constraint 4."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                await caller.call("demo", "greet", {})
+                raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(run())
+    assert log[-1][0] == "exit"
+
+
+def test_connected_enter_and_exit_happen_in_the_same_task():
+    """The anyio cancel-scope rule: whatever task triggers the open, the context
+    manager must be entered and exited by one and the same task."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                # Open from a child task, close from the parent — this is the
+                # combination that breaks a naive AsyncExitStack.
+                await asyncio.gather(caller.call("demo", "greet", {}))
+
+    asyncio.run(run())
+    enter_task = next(e[2] for e in log if e[0] == "enter")
+    exit_task = next(e[2] for e in log if e[0] == "exit")
+    assert enter_task is exit_task
+
+
+def test_connected_is_not_reentrant():
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                async with caller.connected():
+                    pass  # pragma: no cover
+
+    with pytest.raises(RuntimeError, match="not re-entrant"):
+        asyncio.run(run())
+
+
+def test_block_state_is_cleared_after_exit():
+    """After a block, the caller is one-shot again — including after an exception."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            try:
+                async with caller.connected():
+                    raise RuntimeError("boom")
+            except RuntimeError:
+                pass
+            await caller.call("demo", "greet", {})
+            await caller.call("demo", "add", {})
+
+    asyncio.run(run())
+    # The failed block opened nothing; the two one-shot calls opened one each.
+    assert [e[0] for e in log] == ["enter", "exit", "enter", "exit"]
+
+
+def test_connected_reuses_session_across_calls_and_returns_results():
+    calls: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        s = MagicMock()
+
+        async def call_tool(tool, arguments):
+            calls.append(tool)
+            return MagicMock(content=[SimpleNamespace(type="text", text=json.dumps({"tool": tool}))])
+
+        s.call_tool = call_tool
+        yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                first = await caller.call("demo", "greet", {})
+                second = await caller.call("demo", "add", {})
+            return first, second
+
+    first, second = asyncio.run(run())
+    assert first == {"tool": "greet"}
+    assert second == {"tool": "add"}
+    assert calls == ["greet", "add"]
+
+
+def test_connected_opens_one_session_per_distinct_server():
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller()
+            async with caller.connected():
+                await caller.call("alpha", "t", {})
+                await caller.call("beta", "t", {})
+                await caller.call("alpha", "t", {})
+
+    asyncio.run(run())
+    opened = [e[1] for e in log if e[0] == "enter"]
+    closed = [e[1] for e in log if e[0] == "exit"]
+    assert sorted(opened) == ["alpha", "beta"]
+    assert sorted(closed) == ["alpha", "beta"]
+
+
+def test_connected_concurrent_first_calls_open_one_session():
+    """The open lock: two concurrent first-calls must not start two subprocesses."""
+    log: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        await asyncio.sleep(0)  # yield control, widening the race window
+        async with _tracking_session(log, server) as s:
+            yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                return await asyncio.gather(
+                    caller.call("demo", "greet", {}),
+                    caller.call("demo", "add", {}),
+                )
+
+    results = asyncio.run(run())
+    assert len([e for e in log if e[0] == "enter"]) == 1
+    assert len(results) == 2
+
+
+def test_connected_concurrent_calls_are_not_serialized():
+    """call_tool() must run unserialized so gather() stays genuinely concurrent."""
+    in_flight = 0
+    peak = 0
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        s = MagicMock()
+
+        async def call_tool(tool, arguments):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            return MagicMock(content=[SimpleNamespace(type="text", text="{}")])
+
+        s.call_tool = call_tool
+        yield s
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                await caller.call("demo", "warmup", {})  # open the session first
+                await asyncio.gather(
+                    caller.call("demo", "a", {}),
+                    caller.call("demo", "b", {}),
+                    caller.call("demo", "c", {}),
+                )
+
+    asyncio.run(run())
+    assert peak >= 2
+
+
+def test_connected_open_failure_propagates_to_the_caller():
+    """A transport error on open surfaces at the call site, not as a hang."""
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        raise ConnectionError("refused")
+        yield  # pragma: no cover
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                await caller.call("demo", "greet", {})
+
+    with pytest.raises(ConnectionError, match="refused"):
+        asyncio.run(run())
+
+
+def test_connected_open_failure_does_not_wedge_the_block():
+    """After a failed open, the block still closes cleanly."""
+
+    attempts = {"n": 0}
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ConnectionError("refused")
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                with pytest.raises(ConnectionError):
+                    await caller.call("demo", "greet", {})
+                return await caller.call("demo", "add", {})
+
+    assert asyncio.run(run()) == {"ok": True}
+
+
+def test_connected_is_public_api():
+    """`connected` is part of the documented surface, not an internal."""
+    from mcpgen import McpBridgeCaller
+
+    assert hasattr(McpBridgeCaller, "connected")
+    assert McpBridgeCaller.connected.__doc__
+
+
+def test_pre_flight_refresh_runs_once_per_block():
+    """OAuth pre-flight must fire per block, not per call (audit §4 constraint 6)."""
+    refreshes = {"n": 0}
+
+    @asynccontextmanager
+    async def fake_http_session(server_name, server_url, **kwargs):
+        refreshes["n"] += 1
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge._http_session", fake_http_session):
+            with patch("mcpgen._bridge.servers", return_value={"acme": "https://acme.example/mcp"}):
+                caller = _bridge.McpBridgeCaller()
+                async with caller.connected():
+                    await caller.call("acme", "a", {})
+                    await caller.call("acme", "b", {})
+                    await caller.call("acme", "c", {})
+
+    asyncio.run(run())
+    # _http_session is where _pre_flight_refresh lives; entering it once per
+    # block means one refresh, not three.
+    assert refreshes["n"] == 1
+
+
+def test_session_rejects_sse_from_the_default_config_search_path(tmp_path, monkeypatch):
+    """The guard must work without --config — that is how real users hit it."""
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+    # Start from an empty cache, otherwise an earlier config_path= test leaves
+    # {"legacy": "sse"} behind and this passes without ever exercising the
+    # search-order assignment it exists to cover.
+    monkeypatch.setattr(_bridge, "_types_cache", {})
+    monkeypatch.setattr(_bridge, "_servers_cache", None)
+    monkeypatch.setenv(_bridge._SERVERS_CONFIG_ENV, str(config))
+    _bridge.servers(refresh=True)
+    assert _bridge._types_cache == {"legacy": "sse"}
+
+    async def run():
+        async with _bridge.session("legacy"):
+            pass  # pragma: no cover
+
+    with pytest.raises(ValueError, match="SSE transport"):
+        asyncio.run(run())
+
+
+def test_types_cache_is_cleared_when_no_config_is_found(tmp_path, monkeypatch):
+    """A stale _types_cache would refuse a server that is no longer SSE."""
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+    monkeypatch.setattr(_bridge, "_types_cache", {})
+    monkeypatch.setattr(_bridge, "_servers_cache", None)
+    monkeypatch.setenv(_bridge._SERVERS_CONFIG_ENV, str(config))
+    _bridge.servers(refresh=True)
+    assert _bridge._types_cache == {"legacy": "sse"}
+
+    monkeypatch.setenv(_bridge._SERVERS_CONFIG_ENV, str(tmp_path / "absent.json"))
+    monkeypatch.setattr(_bridge, "_SERVERS_SEARCH", [])
+    _bridge.servers(refresh=True)
+
+    # Assert both the cache state and the observable behaviour: the first alone
+    # tests the assignment, the second alone tests the guard.
+    assert _bridge._types_cache == {}
+
+    opened: dict = {}
+
+    @asynccontextmanager
+    async def fake_http_session(server_name, server_url, **kwargs):
+        opened["hit"] = True
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge._http_session", fake_http_session):
+            with patch("mcpgen._bridge.servers", return_value={"legacy": "https://x.example/mcp"}):
+                async with _bridge.session("legacy"):
+                    pass
+
+    asyncio.run(run())
+    assert opened.get("hit") is True
+
+
+def test_bearer_does_not_bypass_the_sse_guard(tmp_path):
+    """--bearer is an auth override, not a transport override.
+
+    Without this, `mcpgen list legacy --bearer $TOK` skips the guard, resolves
+    the SSE URL from that same config entry, and routes it into _bearer_session
+    → Streamable HTTP → the opaque error the guard exists to prevent.
+    """
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+
+    async def run():
+        async with _bridge.session("legacy", bearer="tok", config_path=str(config)):
+            pass  # pragma: no cover
+
+    with pytest.raises(ValueError, match="SSE transport"):
+        asyncio.run(run())
+
+
+def test_url_override_bypasses_the_sse_guard(tmp_path):
+    """--url re-targets the transport, so it must still be exempt."""
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://x.example/sse"}}}))
+    opened: dict = {}
+
+    @asynccontextmanager
+    async def fake_http_session(server_name, server_url, **kwargs):
+        opened["url"] = server_url
+        yield _make_mock_session({"ok": True})
+
+    async def run():
+        with patch("mcpgen._bridge._http_session", fake_http_session):
+            async with _bridge.session("legacy", url="https://x.example/mcp", config_path=str(config)):
+                pass
+
+    asyncio.run(run())
+    assert opened["url"] == "https://x.example/mcp"
+
+
+# ---------------------------------------------------------------------------
+# parse(): multi-block results must not lose data
+# ---------------------------------------------------------------------------
+
+
+def test_parse_multiple_text_blocks_returns_a_list():
+    """MCP serializes a list return as one content block per element."""
+    blocks = [
+        {"type": "text", "text": '{"id": 1, "name": "record-1"}'},
+        {"type": "text", "text": '{"id": 2, "name": "record-2"}'},
+        {"type": "text", "text": '{"id": 3, "name": "record-3"}'},
+    ]
+    assert _bridge.parse(blocks) == [
+        {"id": 1, "name": "record-1"},
+        {"id": 2, "name": "record-2"},
+        {"id": 3, "name": "record-3"},
+    ]
+
+
+def test_parse_single_block_is_unchanged():
+    """The common case must stay byte-compatible — no list wrapping."""
+    assert _bridge.parse([{"type": "text", "text": '{"a": 1}'}]) == {"a": 1}
+
+
+def test_parse_single_block_scalar_is_unchanged():
+    assert _bridge.parse([{"type": "text", "text": "42"}]) == 42
+
+
+def test_parse_multiple_plain_string_blocks():
+    """Non-JSON text blocks fold into a list of strings rather than vanishing."""
+    blocks = [{"type": "text", "text": "alpha"}, {"type": "text", "text": "beta"}]
+    assert _bridge.parse(blocks) == ["alpha", "beta"]
+
+
+def test_parse_multiple_blocks_of_mixed_types():
+    """A text block plus an image block keeps both, in order."""
+    blocks = [
+        {"type": "text", "text": '{"a": 1}'},
+        {"type": "image", "mimeType": "image/png", "data": "…"},
+    ]
+    result = _bridge.parse(blocks)
+    assert result[0] == {"a": 1}
+    assert result[1]["type"] == "image"
+
+
+def test_parse_empty_still_raises():
+    with pytest.raises(ValueError, match="empty content"):
+        _bridge.parse([])
+
+
+def test_parse_single_image_block_is_unchanged():
+    block = {"type": "image", "mimeType": "image/png", "data": "…"}
+    assert _bridge.parse([block]) == block
+
+
+def test_parse_multiple_python_repr_blocks():
+    """The ast.literal_eval fallback applies per block, not just to the first."""
+    blocks = [{"type": "text", "text": "{'a': 1}"}, {"type": "text", "text": "{'b': 2}"}]
+    assert _bridge.parse(blocks) == [{"a": 1}, {"b": 2}]

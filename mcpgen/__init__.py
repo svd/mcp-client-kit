@@ -3,6 +3,7 @@
 from mcpgen._bridge import (
     DEFAULT_CREDS_PATH,
     McpBridgeCaller,
+    PostLoginCheckFailed,
     ReauthenticationRequired,
     delete_cred,
     ensure_login,
@@ -18,6 +19,7 @@ __all__ = [
     "McpBridgeCaller",
     "McpCaller",
     "ReauthenticationRequired",
+    "PostLoginCheckFailed",
     "delete_cred",
     "ensure_login",
     "ensure_login_all",
