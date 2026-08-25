@@ -16,6 +16,7 @@ from eval_harness.report import (
     verdict_cell,
     _check_cell,
     _humanize_skip,
+    render_version_line,
 )
 
 
@@ -244,3 +245,56 @@ def test_generate_report_with_result(tmp_path: Path) -> None:
     content = out_file.read_text(encoding="utf-8")
     assert "github" in content
     assert "✅ pass" in content
+
+
+# ---------------------------------------------------------------------------
+# Version line
+# ---------------------------------------------------------------------------
+
+
+def _stamped(server: str, engine: str | None, skill_ref: str | None) -> dict:
+    result = dict(SAMPLE_RESULT, server=server)
+    result["versions"] = {"engine": engine, "skill_ref": skill_ref, "skill_path": None}
+    return result
+
+
+def test_render_version_line_uniform() -> None:
+    """One engine and one skill ref across all servers → a single provenance line."""
+    results = [_stamped("time", "0.7.0", "v0.7.0"), _stamped("git", "0.7.0", "v0.7.0")]
+    line = render_version_line(results)
+    assert line == "Engine: mcp-client-kit 0.7.0 · skill ref: v0.7.0"
+
+
+def test_render_version_line_mixed_engines() -> None:
+    """Servers verified against different engines must be flagged, not averaged."""
+    results = [_stamped("time", "0.2.0", "v0.2.0"), _stamped("git", "0.7.0", "v0.7.0")]
+    line = render_version_line(results)
+    assert line.startswith("⚠️")
+    assert "0.2.0" in line and "0.7.0" in line
+    assert "time" in line and "git" in line
+
+
+def test_render_version_line_missing_stamp() -> None:
+    """Results predating version stamping report unknown rather than crashing."""
+    assert render_version_line([SAMPLE_RESULT]) == "Engine: unknown · skill ref: unknown"
+
+
+def test_render_version_line_no_results() -> None:
+    """An empty run still renders a line."""
+    assert render_version_line([]) == "Engine: unknown · skill ref: unknown"
+
+
+def test_generate_report_includes_version_line(tmp_path: Path) -> None:
+    """The provenance line reaches the rendered report header."""
+    server_dir = tmp_path / "github"
+    server_dir.mkdir()
+    (server_dir / "result.json").write_text(
+        json.dumps(_stamped("github", "0.7.0", "v0.7.0")), encoding="utf-8"
+    )
+
+    out_file = tmp_path / "EVAL_REPORT.md"
+    generate_report(tmp_path, out_file)
+
+    assert "Engine: mcp-client-kit 0.7.0 · skill ref: v0.7.0" in out_file.read_text(
+        encoding="utf-8"
+    )

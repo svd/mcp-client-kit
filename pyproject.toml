@@ -5,8 +5,9 @@ description = "Eval framework for the mcp-client-kit generate-mcp-wrappers skill
 authors = [{name = "Sviatoslav Sviridov", email = "sviridov@gmail.com"}]
 requires-python = ">=3.11"
 dependencies = [
+    # Exact pin: the version under test. Change it via /rerun-eval-at-version, not by hand.
     "mcp-client-kit==0.7.0",
-]   # mcp-client-kit must be installed separately; see README
+]
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.9", "mypy>=1.14"]

@@ -12,6 +12,7 @@ from eval_harness.verify import (
     check_signatures,
     check_pii,
     check_roundtrip,
+    verify_server,
     CheckResult,
 )
 from eval_harness.manifest import ServerSpec
@@ -260,3 +261,39 @@ def test_check_roundtrip_with_sidecar_bypasses_placeholder_guard(tmp_path: Path)
     assert not (result.status == "skip" and "placeholder" in result.detail), (
         f"Sidecar should have bypassed placeholder guard, got: {result.status!r} {result.detail!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Version stamping
+# ---------------------------------------------------------------------------
+
+
+def test_verify_server_stamps_versions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """result.json records which engine/skill produced the artifacts."""
+    server_dir = tmp_path / "testserver"
+    server_dir.mkdir()
+    (server_dir / "testserver.py").write_text("x = 1\n", encoding="utf-8")
+
+    stamp = {"engine": "0.7.0", "skill_ref": "v0.7.0", "skill_path": "/plugins/kit"}
+    monkeypatch.setattr("eval_harness.verify.runtime_versions", lambda: stamp)
+
+    result = verify_server(_SPEC_FAKE, base_dir=tmp_path)
+
+    assert result["versions"] == stamp
+    on_disk = json.loads((server_dir / "result.json").read_text(encoding="utf-8"))
+    assert on_disk["versions"] == stamp
+
+
+def test_verify_server_stamps_versions_when_module_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The early error return carries versions too — a failed run is still attributable."""
+    (tmp_path / "testserver").mkdir()
+
+    stamp = {"engine": "0.7.0", "skill_ref": None, "skill_path": None}
+    monkeypatch.setattr("eval_harness.verify.runtime_versions", lambda: stamp)
+
+    result = verify_server(_SPEC_FAKE, base_dir=tmp_path)
+
+    assert result["verdict"] == "error"
+    assert result["versions"] == stamp

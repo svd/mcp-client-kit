@@ -24,15 +24,28 @@ uv venv
 # 2. Install this framework + dev group (generates uv.lock on first run)
 uv sync
 
-# 3. Install mcp-client-kit (required — not on PyPI; do this after uv sync)
-uv pip install -e ../mcp-client-kit
-
-# 4. Verify
+# 3. Verify
 uv run eval-kit --help
 ```
 
-> **Note:** `mcp-client-kit` is intentionally not listed in `dependencies` because it must be
-> installed from a local clone. PyPI does not have it.
+`mcp-client-kit` is an ordinary dependency, pinned to an exact release in `pyproject.toml`
+so runs stay reproducible. `uv sync` installs it — no editable install needed.
+
+## Pinning the version under test
+
+An eval result means nothing without the version that produced it. Two things move
+independently: the **engine** (the `mcp-client-kit` distribution providing `mcpgen`) and the
+**skill** (`generate-mcp-wrappers` SKILL.md, loaded from the `mcp-client-kit` plugin
+marketplace directory). To move to a new release, use the skill that pins both and refuses
+to start until they agree:
+
+```
+/rerun-eval-at-version 0.7.0     # or: latest
+```
+
+Both versions are recorded in every `result.json` under `"versions"` and rendered in the
+`doc/EVAL_REPORT.md` header. A `⚠️ mixed engine versions` line there means some servers were
+not re-run.
 
 ## Server manifest
 
@@ -114,6 +127,7 @@ eval_harness/           # Python package (eval-kit CLI)
   manifest.py
   verify.py
   report.py
+  versions.py           # engine + skill version detection (stamped into result.json)
   gen_config.py
   cli.py
 servers/

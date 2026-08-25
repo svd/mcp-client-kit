@@ -7,6 +7,9 @@ Checks:
   3. idempotency  — render_module() is deterministic (offline, stub schemas)
   4. pii          — shapes.json probed_args contain no PII-like values
   5. roundtrip    — live call returns typed dict (requires creds + non-mutating tool)
+
+Every result also carries a "versions" stamp (engine + skill ref) so runs stay
+comparable across mcp-client-kit releases.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from eval_harness.manifest import ServerSpec
+from eval_harness.versions import runtime_versions
 
 # ── Result types ─────────────────────────────────────────────────────────────
 
@@ -499,6 +503,7 @@ def verify_server(spec: ServerSpec, base_dir: Path = Path("eval")) -> dict[str, 
             "modes_hit": [],
             "verdict": "error",
             "error": "no generated file found",
+            "versions": runtime_versions(),
         }
         return result
 
@@ -551,6 +556,7 @@ def verify_server(spec: ServerSpec, base_dir: Path = Path("eval")) -> dict[str, 
         "check_details": {c.name: c.detail for c in all_checks},
         "modes_hit": modes_hit,
         "verdict": verdict,
+        "versions": runtime_versions(),
     }
 
     # Write result.json
