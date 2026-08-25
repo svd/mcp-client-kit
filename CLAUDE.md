@@ -12,8 +12,9 @@ Eval framework for the `generate-mcp-wrappers` skill from `mcp-client-kit`. Runs
 uv venv && uv sync
 ```
 
-`mcp-client-kit` is a normal dependency, pinned to an exact release in `pyproject.toml`.
-No editable install.
+`mcp-client-kit` is a normal dependency resolved through `[tool.uv.sources]`. It currently
+points at the local dev checkout `../mcp-client-kit` (editable), so the engine follows
+whatever branch is checked out there.
 
 ## Commands
 
@@ -97,7 +98,8 @@ Each eval run writes to `eval/<server>/`:
 
 ## Key invariants
 
-- `mcp-client-kit` is pinned with `==` in pyproject.toml — the version under test. Bump it through `/rerun-eval-at-version`, never by hand, so the plugin worktree moves with it.
+- `mcp-client-kit` in pyproject.toml is the version under test, in one of two modes: local dev (`[tool.uv.sources]` editable path to `../mcp-client-kit` — current) or a pinned release (`==<X>` plus a plugin worktree at tag `v<X>`). Switch to a release through `/rerun-eval-at-version`, never by hand, so the plugin moves with the engine.
+- The plugin marketplace directory and the installed engine must point at the same checkout. A dev engine against a release skill (or the reverse) produces results attributable to neither.
 - Every `result.json` carries a `versions` stamp (`engine`, `skill_ref`, `skill_path`) from `eval_harness/versions.py`; `report.py` renders it in the report header and flags mixed runs.
 - `${VAR}` placeholders in `.mcp.eval.json` stay literal (not expanded at gen time).
 - `*.probe-raw.json` files may contain PII — gitignored, never commit.

@@ -22,6 +22,11 @@ already installed, skip this and call `/run-eval` directly.
 
 Invoke as `/rerun-eval-at-version 0.7.0` or `/rerun-eval-at-version latest`.
 
+This skill moves the repo from local-dev mode (editable `[tool.uv.sources]` path to
+`../mcp-client-kit`, plugin served from that same checkout) to pinned-release mode. Going
+the other way is the reverse of Steps 2 and 4: restore the `[tool.uv.sources]` entry, point
+the plugin marketplace back at `../mcp-client-kit`, and drop the release worktree.
+
 ## The 7-step workflow
 
 Steps 1, 3, 4 and 6 are **hard gates** — a failure there stops the run. Do not work around
@@ -47,7 +52,9 @@ pinned to the same code as the engine, and the run would mix versions.
 
 **Step 2 — Pin the engine**
 
-Set the exact pin in `pyproject.toml` (`==`, never `>=` — the run must be reproducible):
+Set the exact pin in `pyproject.toml` (`==`, never `>=` — the run must be reproducible) and
+drop the `[tool.uv.sources]` entry if the repo is in local-dev mode, otherwise the editable
+checkout wins over the pin:
 
 ```toml
 dependencies = ["mcp-client-kit==<X>"]

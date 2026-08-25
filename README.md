@@ -28,8 +28,8 @@ uv sync
 uv run eval-kit --help
 ```
 
-`mcp-client-kit` is an ordinary dependency, pinned to an exact release in `pyproject.toml`
-so runs stay reproducible. `uv sync` installs it — no editable install needed.
+`mcp-client-kit` is an ordinary dependency resolved through `[tool.uv.sources]` in
+`pyproject.toml`. `uv sync` installs it — there is nothing to install by hand.
 
 ## Pinning the version under test
 
@@ -42,6 +42,18 @@ to start until they agree:
 ```
 /rerun-eval-at-version 0.7.0     # or: latest
 ```
+
+The repo has two modes:
+
+| Mode | `pyproject.toml` | Plugin marketplace |
+|---|---|---|
+| **Local dev** (current) | `[tool.uv.sources]` editable path to `../mcp-client-kit` | `../mcp-client-kit` |
+| **Pinned release** | `"mcp-client-kit==<X>"`, no `[tool.uv.sources]` entry | worktree `../mcp-client-kit-v<X>` at tag `v<X>` |
+
+In local-dev mode both engine and skill follow whatever branch is checked out in
+`../mcp-client-kit`; the engine reports a `.dev` version and `skill_ref` carries the
+`git describe` of that branch, so dev results are never mistaken for a release.
+Reproducible comparisons need pinned-release mode.
 
 Both versions are recorded in every `result.json` under `"versions"` and rendered in the
 `doc/EVAL_REPORT.md` header. A `⚠️ mixed engine versions` line there means some servers were
