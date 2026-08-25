@@ -121,6 +121,21 @@ git push && git push --tags          # 'v*' tag fires the publish workflow
 # in agent-skills repo: bump the entry ref to v0.2.0 (or plugin-v0.2.0 if also re-tagged)
 ```
 
+The workflow publishes the GitHub Release itself, with notes taken from the tag's
+`CHANGELOG.md` section via `extract-changelog.sh` — so every engine tag has a Release
+and the two never drift. It fails the job if that section is missing, which is the
+signal that CHANGELOG.md was not updated before tagging. To publish one by hand
+(a backfill, or a tag that predates the workflow step):
+
+```bash
+gh release create "vX.Y.Z" --title "vX.Y.Z" \
+  --notes-file <(./extract-changelog.sh X.Y.Z) --latest --verify-tag
+```
+
+No build artifacts are attached to Releases: PyPI is the one distribution channel,
+and a second unsigned copy of the wheels could drift from it. The four `v0.0.x`
+bootstrap tags have no Release, deliberately.
+
 **Skill-only changed** (SKILL.md, docs — no engine code):
 
 ```bash
@@ -162,11 +177,13 @@ jobs:
     environment: pypi                 # required for Trusted Publishing
     permissions:
       id-token: write                 # OIDC token for uv publish
+      contents: write                 # create the GitHub Release
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv build
       - run: uv publish
+      - run: gh release create "$GITHUB_REF_NAME" ...   # notes from extract-changelog.sh
 ```
 
 **One-time setup:** register a Trusted Publisher on PyPI (Settings → Publishing →
