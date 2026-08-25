@@ -11,10 +11,14 @@ no pytest-asyncio dependency needed).
 from __future__ import annotations
 
 import asyncio
+import errno as _errno
 import io
+import itertools
 import json
 import os
 import stat
+import sys
+import threading
 import time
 import traceback
 import warnings
@@ -31,6 +35,24 @@ from mcp.shared.auth import OAuthClientMetadata, OAuthToken
 from pydantic import AnyUrl
 
 from mcpgen import _bridge
+
+
+@pytest.fixture(autouse=True)
+def _keyring_lock_under_tmp(tmp_path, monkeypatch):
+    """Keep the keyring store lock out of the developer's real ``~/.mcpgen``.
+
+    The keyring is one global item, so its lock path is a module constant rather
+    than something derived from ``--creds`` — which means every keyring-backend
+    test, and every ``migrate_creds`` test, would otherwise create and block on a
+    lock in the real home directory. That is both a suite that escapes ``tmp_path``
+    and the one real flake vector here: under xdist, two CI jobs on one box, or a
+    developer running ``mcpgen login`` while the suite runs, a worker blocks on that
+    machine-global lock until ``_run_concurrently``'s join times out and reports a
+    deadlock that is not one. Autouse, because the trap is the tests that do *not*
+    think they touch the keyring lock.
+    """
+    monkeypatch.setattr(_bridge, "_KEYRING_LOCK_PATH", tmp_path / "keyring-store")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -4786,3 +4808,915 @@ def test_parse_multiple_python_repr_blocks():
     """The ast.literal_eval fallback applies per block, not just to the first."""
     blocks = [{"type": "text", "text": "{'a': 1}"}, {"type": "text", "text": "{'b': 2}"}]
     assert _bridge.parse(blocks) == [{"a": 1}, {"b": 2}]
+
+
+# ---------------------------------------------------------------------------
+# Concurrent credential writes: the store lock and the _mutate seam
+# ---------------------------------------------------------------------------
+
+
+def _run_concurrently(fns, stagger=0.05):
+    """Start each callable on its own thread, `stagger` seconds apart, and join.
+
+    Threads rather than processes on purpose: `flock` is held per open file
+    description, not per process, so two `open()` calls from one interpreter
+    contend exactly as two interpreters would. That keeps the test honest
+    without paying for a process spawn.
+    """
+    import threading
+
+    errors: list[BaseException] = []
+
+    def guard(fn):
+        def run():
+            try:
+                fn()
+            except BaseException as exc:  # noqa: BLE001 — surfaced by the assert below
+                errors.append(exc)
+
+        return run
+
+    # Daemon threads: a worker that deadlocks on the lock never returns, and a
+    # non-daemon one would hold the interpreter open at exit — so a regression would
+    # hang the suite forever instead of failing the assert below.
+    threads = [threading.Thread(target=guard(fn), daemon=True) for fn in fns]
+    for t in threads:
+        t.start()
+        time.sleep(stagger)
+    for t in threads:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in threads), "a worker thread deadlocked"
+    assert not errors, f"worker raised: {errors!r}"
+
+
+def test_concurrent_set_tokens_for_different_servers_keep_both_entries(tmp_path):
+    """The reported bug: two processes read-modify-write the whole store, last wins.
+
+    Without serialisation the second writer's snapshot predates the first
+    writer's `os.replace`, so the first server's freshly-issued token is
+    silently dropped and its next run goes back to the browser.
+    """
+    creds = tmp_path / "credentials.json"
+    real_load = _bridge.FileTokenStorage._file_load
+
+    def slow_load(self):
+        data = real_load(self)
+        time.sleep(0.2)  # widen the read-modify-write window past the stagger
+        return data
+
+    def writer(name):
+        def run():
+            storage = _bridge.FileTokenStorage(name, credentials_path=creds, backend="file")
+            asyncio.run(storage.set_tokens(OAuthToken(access_token=f"tok-{name}", token_type="bearer")))
+
+        return run
+
+    with patch.object(_bridge.FileTokenStorage, "_file_load", slow_load):
+        _run_concurrently([writer("alpha"), writer("beta")])
+
+    stored = json.loads(creds.read_text())
+    assert stored["alpha"]["tokens"]["access_token"] == "tok-alpha"
+    assert stored["beta"]["tokens"]["access_token"] == "tok-beta"
+
+
+def test_concurrent_keyring_writes_keep_both_entries(tmp_path):
+    """The keyring backend has the same read-modify-write shape and needs the same lock.
+
+    A fix that only covers the file backend leaves half the surface open, so the
+    lock file — which exists on disk regardless of backend — is the rendezvous
+    for both.
+    """
+    fake_kr = _FakeKeyring()
+    creds = tmp_path / "credentials.json"
+    real_read = _bridge._keyring_read_raw
+
+    def slow_read():
+        data = real_read()
+        time.sleep(0.2)
+        return data
+
+    def writer(name):
+        def run():
+            storage = _bridge.FileTokenStorage(name, credentials_path=creds, backend="keyring")
+            asyncio.run(storage.set_tokens(OAuthToken(access_token=f"tok-{name}", token_type="bearer")))
+
+        return run
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}), patch.object(_bridge, "_keyring_read_raw", slow_read):
+        _run_concurrently([writer("alpha"), writer("beta")])
+
+    stored = json.loads(fake_kr._store[(_bridge._KEYRING_SERVICE, _bridge._KEYRING_USER)])
+    assert stored["alpha"]["tokens"]["access_token"] == "tok-alpha"
+    assert stored["beta"]["tokens"]["access_token"] == "tok-beta"
+
+
+def test_concurrent_token_endpoint_writes_keep_both_entries(tmp_path):
+    """_persist_token_endpoint is a read-modify-write of the whole store too."""
+    creds = tmp_path / "credentials.json"
+    real_load = _bridge.FileTokenStorage._file_load
+
+    def slow_load(self):
+        data = real_load(self)
+        time.sleep(0.2)
+        return data
+
+    def writer(name):
+        def run():
+            storage = _bridge.FileTokenStorage(name, credentials_path=creds, backend="file")
+            provider = SimpleNamespace(_get_token_endpoint=lambda: f"https://{name}.example/token")
+            _bridge._persist_token_endpoint(storage, name, provider)
+
+        return run
+
+    with patch.object(_bridge.FileTokenStorage, "_file_load", slow_load):
+        _run_concurrently([writer("alpha"), writer("beta")])
+
+    stored = json.loads(creds.read_text())
+    assert stored["alpha"]["token_endpoint"] == "https://alpha.example/token"
+    assert stored["beta"]["token_endpoint"] == "https://beta.example/token"
+
+
+def test_mutate_reads_the_store_fresh_inside_the_lock(tmp_path):
+    """The callback must see the store as of lock acquisition, not an earlier read.
+
+    A `_mutate` that merged into a dict captured before the lock would reinstate
+    the lost update it exists to prevent.
+    """
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("alpha", credentials_path=creds, backend="file")
+    storage._save({"beta": {"tokens": {"access_token": "written-by-someone-else"}}})
+
+    seen: list[dict] = []
+
+    def add_alpha(data):
+        seen.append(json.loads(json.dumps(data)))
+        data.setdefault("alpha", {})["tokens"] = {"access_token": "tok"}
+        return "result"
+
+    assert storage._mutate(add_alpha) == "result", "_mutate returns the callback's value"
+    assert seen == [{"beta": {"tokens": {"access_token": "written-by-someone-else"}}}]
+    assert json.loads(creds.read_text())["beta"]["tokens"]["access_token"] == "written-by-someone-else"
+
+
+def test_mutate_does_not_write_when_the_callback_raises(tmp_path):
+    """A callback that fails half-way must leave the store as it found it."""
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("alpha", credentials_path=creds, backend="file")
+    storage._save({"beta": {"tokens": {"access_token": "keep-me"}}})
+
+    def boom(data):
+        data.clear()
+        raise RuntimeError("callback failed")
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        storage._mutate(boom)
+
+    assert json.loads(creds.read_text()) == {"beta": {"tokens": {"access_token": "keep-me"}}}
+
+
+def test_store_lock_serialises_two_open_file_descriptions(tmp_path):
+    """Two holders of the lock must not be inside it at once."""
+    creds = tmp_path / "credentials.json"
+    overlap = []
+    inside = []
+
+    def hold():
+        with _bridge._store_lock(creds):
+            inside.append(1)
+            overlap.append(len(inside))
+            time.sleep(0.2)
+            inside.pop()
+
+    _run_concurrently([hold, hold])
+    assert overlap == [1, 1], "the lock allowed two holders inside at once"
+
+
+def test_store_lock_is_reentrant_within_one_thread(tmp_path):
+    """A nested acquire must not self-deadlock.
+
+    `flock` is per open file description, so a second `open()` + `LOCK_EX` from a
+    thread that already holds the lock blocks on itself forever. Any future
+    `_mutate` nested inside another would hang rather than fail.
+    """
+    creds = tmp_path / "credentials.json"
+    reached = []
+
+    def nest():
+        with _bridge._store_lock(creds):
+            with _bridge._store_lock(creds):
+                reached.append(True)
+
+    _run_concurrently([nest])
+    assert reached == [True]
+
+
+def test_store_lock_file_is_0600_in_a_0700_directory(tmp_path):
+    """The lock file sits next to the credentials and gets the same hardening."""
+    creds = tmp_path / "sub" / "credentials.json"
+    with _bridge._store_lock(creds):
+        pass
+    lock = creds.with_name(creds.name + ".lock")
+    assert lock.exists(), "the lock file must be created next to the store"
+    assert stat.S_IMODE(os.stat(lock).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(lock.parent).st_mode) == 0o700
+
+
+def test_store_lock_degrades_to_a_noop_without_a_platform_primitive(tmp_path):
+    """No fcntl and no msvcrt: yield anyway rather than fail every credential write."""
+    creds = tmp_path / "credentials.json"
+    with patch.object(_bridge, "_lock_fd", None):
+        with _bridge._store_lock(creds):
+            pass
+    assert not list(tmp_path.iterdir()), "a no-op lock must not leave a lock file behind"
+
+
+_LOGIN_FAILURE_PATH_READS = 3
+"""How many times a failing login() reads the whole store for its own server.
+
+1 is the stash-pop at the top (locked), 2 is the failure handler's branch-deciding
+read (deliberately *unlocked* — it only picks a branch and writes nothing), 3 is the
+restore's read inside `_mutate` (locked). `_login_racing_a_foreign_writer` aims its
+race window by this numbering, so a refactor that adds or drops a read moves every
+window; the helper asserts the count rather than trusting it.
+"""
+
+
+def _login_racing_a_foreign_writer(tmp_path, window_call_index):
+    """Run a failing login() while another mcpgen writes a *different* server.
+
+    `window_call_index` picks which of login()'s store reads to open the race in —
+    see `_LOGIN_FAILURE_PATH_READS` for the numbering. Only the two locked reads (1
+    and 3) are worth aiming at: they open a read-modify-write cycle, and the competing
+    writer is released from inside the window and then races the save that closes it,
+    so an unserialised cycle loses the foreign entry and a serialised one makes the
+    writer wait its turn. Aiming at 2 tests nothing — the restore re-reads afterwards
+    either way, so the assertion holds with the lock removed.
+
+    Returns the store as it ends up on disk.
+    """
+    import threading
+
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "orig_tok", "token_type": "bearer"}}}))
+    os.chmod(creds, 0o600)
+
+    window_open = threading.Event()
+    reads = 0
+    real_load = _bridge.FileTokenStorage._file_load
+
+    def load_then_open_the_window(self):
+        data = real_load(self)
+        # Count only the login's own reads. `_file_load` is patched at class level, so
+        # the racing writer's own load runs through here too — counting it would shift
+        # the index after the window opens and aim later windows at the wrong call site.
+        if self._key == "acme":
+            nonlocal reads
+            reads += 1
+            if reads == window_call_index:
+                window_open.set()
+                time.sleep(0.2)
+        return data
+
+    def foreign_writer():
+        # Hard-fail rather than fall through: `window_call_index` is coupled to an exact
+        # count of internal reads, so a refactor that adds one would silently aim this
+        # test at the wrong window and pass without racing anything.
+        assert window_open.wait(timeout=5), "the race window never opened"
+        other = _bridge.FileTokenStorage("other", credentials_path=creds, backend="file")
+        asyncio.run(other.set_tokens(OAuthToken(access_token="tok-other", token_type="bearer")))
+
+    async def fake_callback_server():
+        fut = asyncio.get_event_loop().create_future()
+        fut.set_result(("code", "state"))
+        return 9999, fut
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield  # makes this an async generator; unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", fake_callback_server),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    writer = threading.Thread(target=foreign_writer, daemon=True)
+    with patch.object(_bridge.FileTokenStorage, "_file_load", load_then_open_the_window):
+        writer.start()
+        asyncio.run(run())
+        writer.join(timeout=10)
+    assert not writer.is_alive(), "the competing writer deadlocked"
+    # The index above names one specific read. A refactor that adds or removes one
+    # renumbers the rest, and the window would silently move to a call site this test
+    # does not claim to cover — passing without exercising the lock at all.
+    assert reads == _LOGIN_FAILURE_PATH_READS, (
+        f"login()'s failure path read the store {reads} times, not {_LOGIN_FAILURE_PATH_READS}; "
+        "re-check which read `window_call_index` now names"
+    )
+    return json.loads(creds.read_text())
+
+
+def test_login_stash_does_not_drop_a_concurrent_write_to_another_server(tmp_path):
+    """login() clears its own entry by saving the whole store — under the lock."""
+    stored = _login_racing_a_foreign_writer(tmp_path, window_call_index=1)
+    assert stored["other"]["tokens"]["access_token"] == "tok-other"
+
+
+def test_login_restore_does_not_drop_a_concurrent_write_to_another_server(tmp_path):
+    """The failure handler's restore is a whole-store write too, and races the same way.
+
+    Window 3, not 2: 2 is the handler's unlocked branch-deciding read, and the restore
+    re-reads after it, so a race opened there is repaired by the very read under test.
+    """
+    stored = _login_racing_a_foreign_writer(tmp_path, window_call_index=3)
+    assert stored["other"]["tokens"]["access_token"] == "tok-other"
+    assert stored["acme"]["tokens"]["access_token"] == "orig_tok", "the restore itself must still happen"
+
+
+def test_delete_cred_does_not_destroy_a_concurrently_written_entry(tmp_path):
+    """delete_cred clears the whole store when its (stale) view says nothing is left.
+
+    Reading outside a lock makes that decision on a snapshot: a login that lands
+    between the read and the unlink writes an entry into a file `delete_cred` is
+    about to delete, and the credential is gone with no error anywhere.
+    """
+    import threading
+
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "orig"}}}))
+    os.chmod(creds, 0o600)
+
+    window_open = threading.Event()
+    real_read = _bridge._read_backend
+
+    def slow_read(backend, path):
+        data = real_read(backend, path)
+        window_open.set()
+        time.sleep(0.2)
+        return data
+
+    def foreign_writer():
+        # Hard-fail rather than fall through: a window that never opens would otherwise
+        # let this test pass without ever having raced anything.
+        assert window_open.wait(timeout=5), "the race window never opened"
+        other = _bridge.FileTokenStorage("other", credentials_path=creds, backend="file")
+        asyncio.run(other.set_tokens(OAuthToken(access_token="tok-other", token_type="bearer")))
+
+    writer = threading.Thread(target=foreign_writer, daemon=True)
+    with patch.object(_bridge, "_read_backend", slow_read):
+        writer.start()
+        assert _bridge.delete_cred("acme", backend="file", credentials_path=creds) is True
+        writer.join(timeout=10)
+    assert not writer.is_alive(), "the competing writer deadlocked"
+
+    assert creds.exists(), "the store was cleared on a stale view of what was left"
+    stored = json.loads(creds.read_text())
+    assert stored["other"]["tokens"]["access_token"] == "tok-other"
+    assert "acme" not in stored, "the requested deletion must still happen"
+
+
+def test_migrate_purge_does_not_drop_a_concurrent_write_to_the_source(tmp_path):
+    """The purge re-reads the source, and that read races every other mcpgen write."""
+    import threading
+
+    fake_kr = _FakeKeyringMig()
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "orig"}}}))
+    os.chmod(creds, 0o600)
+
+    window_open = threading.Event()
+    real_read = _bridge._read_backend
+    file_reads = itertools.count(1)
+
+    def slow_read(backend, path):
+        data = real_read(backend, path)
+        # The second file read is the purge's; the window that matters is between it
+        # and the write that follows, not between the first read and anything.
+        if backend == "file" and next(file_reads) == 2:
+            window_open.set()
+            time.sleep(0.2)
+        return data
+
+    def foreign_writer():
+        # Hard-fail rather than fall through: a window that never opens would otherwise
+        # let this test pass without ever having raced anything.
+        assert window_open.wait(timeout=5), "the race window never opened"
+        other = _bridge.FileTokenStorage("other", credentials_path=creds, backend="file")
+        asyncio.run(other.set_tokens(OAuthToken(access_token="tok-other", token_type="bearer")))
+
+    writer = threading.Thread(target=foreign_writer, daemon=True)
+    with patch.dict("sys.modules", {"keyring": fake_kr}), patch.object(_bridge, "_read_backend", slow_read):
+        writer.start()
+        _bridge.migrate_creds(
+            from_backend="file",
+            to_backend="keyring",
+            purge=True,
+            credentials_path=creds,
+            config_path=tmp_path / "config.json",
+        )
+        writer.join(timeout=10)
+    assert not writer.is_alive(), "the competing writer deadlocked"
+
+    stored = json.loads(creds.read_text())
+    assert stored["other"]["tokens"]["access_token"] == "tok-other"
+    assert "acme" not in stored, "the migrated entry must still be purged"
+
+
+_CONCURRENT_WRITER = """
+import asyncio, sys, time
+from pathlib import Path
+from unittest.mock import patch
+from mcp.shared.auth import OAuthToken
+from mcpgen import _bridge
+
+name, creds = sys.argv[1], Path(sys.argv[2])
+real = _bridge.FileTokenStorage._file_load
+
+
+def slow(self):
+    data = real(self)
+    time.sleep(0.4)
+    return data
+
+
+with patch.object(_bridge.FileTokenStorage, "_file_load", slow):
+    storage = _bridge.FileTokenStorage(name, credentials_path=creds, backend="file")
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="tok-" + name, token_type="bearer")))
+"""
+
+
+def test_two_processes_writing_different_servers_keep_both_entries(tmp_path):
+    """The reported bug was two processes, and only two processes prove the fix.
+
+    The threaded tests exercise the same primitive — `flock` is held per open file
+    description, so two `open()` calls contend whether or not they share an
+    interpreter — but they cannot catch a fix that accidentally depends on shared
+    process state. This one can, at the cost of two interpreter startups.
+    """
+    import subprocess
+
+    creds = tmp_path / "credentials.json"
+    script = tmp_path / "writer.py"
+    script.write_text(_CONCURRENT_WRITER)
+
+    procs = [subprocess.Popen([sys.executable, str(script), name, str(creds)]) for name in ("alpha", "beta")]
+    try:
+        for proc in procs:
+            assert proc.wait(timeout=60) == 0, "writer process failed"
+    finally:
+        # A timeout here means one writer is blocked on a lock it will never get.
+        # Leaving it running would outlive the test and hold that lock against the
+        # rest of the suite.
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+
+    stored = json.loads(creds.read_text())
+    assert stored["alpha"]["tokens"]["access_token"] == "tok-alpha"
+    assert stored["beta"]["tokens"]["access_token"] == "tok-beta"
+
+
+def test_store_lock_leaves_an_existing_directory_alone(tmp_path):
+    """Taking a lock must not chmod a directory it did not create.
+
+    `_file_save` hardens the parent because secrets land in it. The lock file is
+    empty and 0600 and protects nothing, so doing it here reached paths that never
+    write — including the current working directory, when `--creds` is relative.
+    """
+    loose = tmp_path / "loose"
+    loose.mkdir(mode=0o755)
+    os.chmod(loose, 0o755)  # mkdir's mode is masked by umask; set it outright
+    with _bridge._store_lock(loose / "credentials.json"):
+        pass
+    assert stat.S_IMODE(os.stat(loose).st_mode) == 0o755, "an existing directory must not be re-moded"
+
+
+def test_store_lock_creates_its_own_directory_private(tmp_path):
+    """A directory the lock itself creates is born 0700 — it may hold the store next."""
+    creds = tmp_path / "fresh" / "credentials.json"
+    with _bridge._store_lock(creds):
+        pass
+    assert stat.S_IMODE(os.stat(creds.parent).st_mode) == 0o700
+
+
+def test_store_lock_reports_and_proceeds_when_it_cannot_be_created(tmp_path, capsys):
+    """A lock that cannot be set up is a lost update, never a failed credential write.
+
+    Under `simplefilter("error")` — `-W error`, or a downstream suite running with
+    `filterwarnings = error` — a `warnings.warn` here would raise and abort the very
+    write this branch exists to keep working. So it goes to stderr, for the same
+    reason the corrupt-store quarantine message does: it has to reach the operator
+    whatever their warnings filter says, and it must never be fatal.
+    """
+    unwritable = tmp_path / "ro"
+    unwritable.mkdir()
+    os.chmod(unwritable, 0o500)
+    reached = []
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with _bridge._store_lock(unwritable / "sub" / "credentials.json"):
+                reached.append(True)
+    finally:
+        os.chmod(unwritable, 0o700)
+    assert reached == [True], "the body must run even though the lock could not be created"
+    assert "proceeding without cross-process locking" in capsys.readouterr().err
+
+
+def test_store_lock_reports_and_proceeds_when_the_acquire_fails(tmp_path, capsys):
+    """`flock` raises ENOLCK on some NFS mounts, and Windows `LK_LOCK` gives up after ~10s.
+
+    Both are the same situation as having no primitive at all, and the module's
+    policy for that is to degrade rather than fail the write.
+    """
+    creds = tmp_path / "credentials.json"
+
+    def refuse(fd):
+        raise OSError(_errno.ENOLCK, "No locks available")
+
+    reached = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with patch.object(_bridge, "_lock_fd", refuse):
+            with _bridge._store_lock(creds):
+                reached.append(True)
+    assert reached == [True], "a refused acquire must not abort the write"
+    assert "proceeding without cross-process locking" in capsys.readouterr().err
+
+
+def test_keyring_set_tokens_survives_a_credentials_dir_it_cannot_create(tmp_path, capsys):
+    """The keyring backend never touched disk before; a lock must not change that.
+
+    Raising here puts a raw OSError in the middle of the SDK's httpx auth
+    handshake, replacing a login that used to work.
+    """
+    fake_kr = _FakeKeyring()
+    unwritable = tmp_path / "ro"
+    unwritable.mkdir()
+    os.chmod(unwritable, 0o500)
+    creds = unwritable / "sub" / "credentials.json"
+    try:
+        with patch.dict("sys.modules", {"keyring": fake_kr}), warnings.catch_warnings():
+            warnings.simplefilter("error")  # the degrade must survive a fatal warnings filter
+            storage = _bridge.FileTokenStorage("srv", credentials_path=creds, backend="keyring")
+            asyncio.run(storage.set_tokens(OAuthToken(access_token="kr_token", token_type="bearer")))
+    finally:
+        os.chmod(unwritable, 0o700)
+    stored = json.loads(fake_kr._store[(_bridge._KEYRING_SERVICE, _bridge._KEYRING_USER)])
+    assert stored["srv"]["tokens"]["access_token"] == "kr_token"
+    assert "proceeding without cross-process locking" in capsys.readouterr().err, (
+        "the degrade branch must actually have been reached"
+    )
+
+
+def test_delete_cred_of_an_absent_name_still_reports_false(tmp_path):
+    """The lock is taken before the read that decides this, and that ordering is the fix."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "t"}}}))
+    os.chmod(creds, 0o600)
+    assert _bridge.delete_cred("nope", backend="file", credentials_path=creds) is False
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "t"
+
+
+def test_store_lock_reentrancy_survives_a_differently_spelled_path(tmp_path):
+    """Two spellings of one file must be one key, or the nested acquire self-deadlocks.
+
+    `flock` is per open file description: a miss opens a second descriptor to a lock
+    this thread already holds and blocks on it forever. Cross-*process* exclusion is
+    unaffected either way — different spellings resolve to the same inode — so only
+    the in-process guard needs the resolution.
+    """
+    creds = tmp_path / "credentials.json"
+    (tmp_path / "sub").mkdir()  # pathlib keeps "..", so this is a genuinely other spelling
+    reached = []
+
+    def nest():
+        with _bridge._store_lock(creds):
+            with _bridge._store_lock(tmp_path / "sub" / ".." / "credentials.json"):
+                reached.append(True)
+
+    _run_concurrently([nest])
+    assert reached == [True]
+
+
+def test_mutate_reads_the_store_only_once_it_holds_the_lock(tmp_path):
+    """Not just "fresh" — fresh *as of the acquire*, which is the whole fix.
+
+    A `_mutate` that read the store and only then blocked on the lock would look
+    correct in a single-threaded test and still lose every update it was written to
+    prevent. So the competing write lands while this caller is already waiting.
+    """
+    import threading
+
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("alpha", credentials_path=creds, backend="file")
+    storage._save({"beta": {"tokens": {"access_token": "v1"}}})
+
+    holding = threading.Event()
+
+    def holder():
+        with _bridge._store_lock(creds):
+            holding.set()
+            time.sleep(0.1)  # long enough for the caller below to be blocked on the lock
+            # `_save` does not lock — this is the write of a holder that already has it.
+            storage._save({"beta": {"tokens": {"access_token": "v2"}}})
+            time.sleep(0.05)
+
+    seen: list[dict] = []
+    thread = threading.Thread(target=holder, daemon=True)
+    thread.start()
+    assert holding.wait(timeout=5), "the holder never took the lock"
+    storage._mutate(lambda data: seen.append(json.loads(json.dumps(data))))
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+
+    assert seen == [{"beta": {"tokens": {"access_token": "v2"}}}], "_mutate read the store before it held the lock"
+
+
+def test_concurrent_keyring_writes_at_different_creds_paths_keep_both_entries(tmp_path):
+    """The keyring is one global item; the file path is not its identity.
+
+    `--creds` is accepted on every command and documented as ignored by the keyring
+    backend, so two keyring processes may legitimately carry different paths. Keying
+    the lock on the path alone puts them on different sidecars while they read and
+    rewrite the same keyring document — no exclusion at all, on the backend the
+    whole both-backends claim rests on.
+    """
+    fake_kr = _FakeKeyring()
+    real_read = _bridge._keyring_read_raw
+
+    def slow_read():
+        data = real_read()
+        time.sleep(0.2)
+        return data
+
+    def writer(name, creds):
+        def run():
+            storage = _bridge.FileTokenStorage(name, credentials_path=creds, backend="keyring")
+            asyncio.run(storage.set_tokens(OAuthToken(access_token=f"tok-{name}", token_type="bearer")))
+
+        return run
+
+    with (
+        patch.dict("sys.modules", {"keyring": fake_kr}),
+        patch.object(_bridge, "_keyring_read_raw", slow_read),
+    ):
+        _run_concurrently(
+            [
+                writer("alpha", tmp_path / "alpha-creds.json"),
+                writer("beta", tmp_path / "beta-creds.json"),
+            ]
+        )
+
+    stored = json.loads(fake_kr._store[(_bridge._KEYRING_SERVICE, _bridge._KEYRING_USER)])
+    assert stored["alpha"]["tokens"]["access_token"] == "tok-alpha"
+    assert stored["beta"]["tokens"]["access_token"] == "tok-beta"
+
+
+def test_migrate_holds_the_keyring_lock_against_a_writer_at_another_path(tmp_path):
+    """A migration always pairs the keyring with the file, so it needs both locks."""
+    fake_kr = _FakeKeyringMig()
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "orig"}}}))
+    os.chmod(creds, 0o600)
+
+    window_open = threading.Event()
+    real_read = _bridge._keyring_read_raw
+
+    def slow_read():
+        data = real_read()
+        window_open.set()
+        time.sleep(0.2)
+        return data
+
+    def foreign_writer():
+        assert window_open.wait(timeout=5), "the race window never opened"
+        other = _bridge.FileTokenStorage("other", credentials_path=tmp_path / "other-creds.json", backend="keyring")
+        asyncio.run(other.set_tokens(OAuthToken(access_token="tok-other", token_type="bearer")))
+
+    writer = threading.Thread(target=foreign_writer, daemon=True)
+    with (
+        patch.dict("sys.modules", {"keyring": fake_kr}),
+        patch.object(_bridge, "_keyring_read_raw", slow_read),
+    ):
+        writer.start()
+        _bridge.migrate_creds(
+            from_backend="file",
+            to_backend="keyring",
+            credentials_path=creds,
+            config_path=tmp_path / "config.json",
+        )
+        writer.join(timeout=10)
+    assert not writer.is_alive(), "the competing writer deadlocked"
+
+    stored = json.loads(fake_kr._store[(_bridge._KEYRING_SERVICE, _bridge._KEYRING_USER)])
+    assert stored["other"]["tokens"]["access_token"] == "tok-other"
+    assert stored["acme"]["tokens"]["access_token"] == "orig", "the migration must still land"
+
+
+# ---------------------------------------------------------------------------
+# _pre_flight_refresh: the write must still belong to the credential it started from
+# ---------------------------------------------------------------------------
+
+
+def _expired_entry(refresh_token="old-rt"):
+    return {
+        "tokens": {
+            "access_token": "expired",
+            "token_type": "Bearer",
+            "refresh_token": refresh_token,
+            "expires_at": int(time.time()) - 10,
+        },
+        "client_info": {"client_id": "cid"},
+        "token_endpoint": "https://auth.example/token",
+    }
+
+
+def _refresh_racing(creds, during_post):
+    """Drive _pre_flight_refresh with *during_post* running inside the network round.
+
+    The lock cannot cover this window — it is an HTTP round-trip — so what the
+    callback does is exactly what a concurrent login or second refresh does: install
+    a newer credential while this one is waiting on the wire.
+    """
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, data, headers=None):
+            during_post()
+            return SimpleNamespace(
+                status_code=200,
+                text="",
+                headers={},
+                json=lambda: {
+                    "access_token": "late-old-refresh",
+                    "token_type": "Bearer",
+                    "refresh_token": "rotated-rt",
+                },
+            )
+
+    async def run():
+        storage = _bridge.FileTokenStorage("acme", creds)
+        with patch("mcpgen._bridge.httpx.AsyncClient", _FakeClient):
+            await _bridge._pre_flight_refresh("acme", storage)
+
+    asyncio.run(run())
+
+
+def test_pre_flight_refresh_does_not_overwrite_a_credential_that_arrived_meanwhile(tmp_path):
+    """A login landing inside the refresh round-trip must survive it.
+
+    The response chains from the refresh token this call read *before* the request.
+    Under refresh-token rotation the authorization server invalidates that chain when
+    it issues the newer one, so writing the late response over the login does not
+    merely lose an update — it caches a credential that is already dead, and the next
+    run goes to the browser. Same shape as `login()`'s restore, one window over.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": _expired_entry()}))
+    os.chmod(creds, 0o600)
+
+    def concurrent_login():
+        # Through the same seam a real login writes, but synchronously: this runs
+        # inside the caller's event loop, where asyncio.run() cannot.
+        other = _bridge.FileTokenStorage("acme", credentials_path=creds, backend="file")
+        other._mutate(
+            lambda data: data.setdefault("acme", {}).__setitem__(
+                "tokens", {"access_token": "new-login", "token_type": "Bearer", "refresh_token": "new-rt"}
+            )
+        )
+
+    _refresh_racing(creds, concurrent_login)
+
+    stored = json.loads(creds.read_text())["acme"]["tokens"]
+    assert stored["access_token"] == "new-login", "the newer credential must win"
+    assert stored["refresh_token"] == "new-rt"
+
+
+def test_pre_flight_refresh_does_not_resurrect_a_credential_deleted_meanwhile(tmp_path):
+    """`delete_cred` landing inside the round-trip must not be undone by the response."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": _expired_entry(), "other": {"tokens": {"access_token": "keep"}}}))
+    os.chmod(creds, 0o600)
+
+    def concurrent_delete():
+        _bridge.delete_cred("acme", backend="file", credentials_path=creds)
+
+    _refresh_racing(creds, concurrent_delete)
+
+    stored = json.loads(creds.read_text())
+    assert "acme" not in stored, "a deleted credential must not come back"
+    assert stored["other"]["tokens"]["access_token"] == "keep"
+
+
+def test_pre_flight_refresh_stores_the_new_token_when_nothing_raced_it(tmp_path):
+    """The uncontended path must still write — a veto that fires always is no fix."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": _expired_entry()}))
+    os.chmod(creds, 0o600)
+
+    _refresh_racing(creds, lambda: None)
+
+    stored = json.loads(creds.read_text())["acme"]["tokens"]
+    assert stored["access_token"] == "late-old-refresh"
+    assert stored["refresh_token"] == "rotated-rt"
+
+
+# ---------------------------------------------------------------------------
+# A refresh response may legally omit refresh_token (RFC 6749 §6)
+# ---------------------------------------------------------------------------
+
+
+def test_set_tokens_keeps_a_refresh_token_the_response_omitted(tmp_path):
+    """§6 makes the refresh token optional in a refresh response; Google omits it.
+
+    Writing the entry wholesale erases the stored one, and the next expiry then has
+    nothing to refresh with — a browser prompt every token lifetime, on a server that
+    did nothing wrong.
+    """
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("acme", credentials_path=creds, backend="file")
+    storage._save({"acme": {"tokens": {"access_token": "old", "token_type": "Bearer", "refresh_token": "RT"}}})
+
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="new", token_type="bearer", expires_in=3600)))
+
+    stored = json.loads(creds.read_text())["acme"]["tokens"]
+    assert stored["access_token"] == "new"
+    assert stored["refresh_token"] == "RT", "an omitted refresh token means keep using the one you have"
+
+
+def test_set_tokens_replaces_a_rotated_refresh_token(tmp_path):
+    """§6 also says: when the server *does* issue a new one, discard the old."""
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("acme", credentials_path=creds, backend="file")
+    storage._save({"acme": {"tokens": {"access_token": "old", "token_type": "Bearer", "refresh_token": "RT"}}})
+
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="new", token_type="bearer", refresh_token="RT2")))
+
+    assert json.loads(creds.read_text())["acme"]["tokens"]["refresh_token"] == "RT2"
+
+
+def test_set_tokens_does_not_invent_a_refresh_token_for_a_new_entry(tmp_path):
+    """Carrying forward must mean carrying, not fabricating."""
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("acme", credentials_path=creds, backend="file")
+
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="new", token_type="bearer")))
+
+    assert "refresh_token" not in json.loads(creds.read_text())["acme"]["tokens"]
+
+
+def test_pre_flight_refresh_keeps_the_refresh_token_when_the_response_omits_it(tmp_path):
+    """The whole point of the compare-and-set key is that it must survive its own write."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": _expired_entry()}))
+    os.chmod(creds, 0o600)
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, data, headers=None):
+            return SimpleNamespace(
+                status_code=200,
+                text="",
+                headers={},
+                json=lambda: {"access_token": "NEW", "token_type": "Bearer", "expires_in": 3600},
+            )
+
+    async def run():
+        storage = _bridge.FileTokenStorage("acme", creds)
+        with patch("mcpgen._bridge.httpx.AsyncClient", _FakeClient):
+            await _bridge._pre_flight_refresh("acme", storage)
+
+    asyncio.run(run())
+    stored = json.loads(creds.read_text())["acme"]["tokens"]
+    assert stored["access_token"] == "NEW"
+    assert stored["refresh_token"] == "old-rt", "the next refresh must still have something to send"
+
+
+def test_store_lock_degrades_on_a_path_with_no_sidecar_name(tmp_path, capsys):
+    """Deriving the sidecar name can fail too, and that is still not a failed write.
+
+    `Path("/").with_name(...)` raises `ValueError`, not `OSError`. Left outside the
+    guard it escapes as a traceback — from a keyring operation, where `--creds` is
+    documented as ignored, so the path that broke it was never even used.
+    """
+    reached = []
+    with _bridge._store_lock(Path("/")):
+        reached.append(True)
+    assert reached == [True]
+    assert "proceeding without cross-process locking" in capsys.readouterr().err

@@ -4,6 +4,79 @@
 
 ### Fixed
 
+- **Two mcpgen processes writing credentials at the same time silently dropped one of the
+  updates.** The store is a single JSON document keyed by server, so every write is a
+  read-modify-write of the *whole* file: a process touching one server saves everyone's
+  entry. With the read outside any lock, the second writer's snapshot predates the first
+  writer's `os.replace`, and saving it puts the stale view back — the first server's
+  freshly-issued token is gone, with no error anywhere, and its next run goes to the
+  browser. 0.7.0 had already closed the corruption half of this (each process stages
+  through a pid-unique temp name, so neither can write into the other's partial file);
+  what remained was the lost update. Whole-store cycles now run under an advisory lock —
+  a sidecar `credentials.json.lock`, `flock` on POSIX and `msvcrt.locking` on Windows —
+  and, critically, **re-read the store inside the lock**, so no write is ever built on a
+  snapshot older than the lock it is under. `delete_cred` was the sharpest edge: it clears
+  the entire store when its view says the entry it removed was the last one, so a login
+  landing in that window had its brand-new credential unlinked by a command that was never
+  asked to touch it. Also covered: `set_tokens`, `set_client_info`, the token-endpoint
+  cache, `login()`'s stash and restore, and `migrate-creds` — whose merge and purge are now
+  one operation rather than four races. Both primitives are released by the OS when the
+  holder's descriptor closes, so a killed process leaves nothing stale to break or time out.
+
+  The lock set follows the *backend*, not the path — a fix covering only the file backend
+  would have left half the surface open. The keyring is one global item, and `--creds` is
+  documented as ignored there, so two keyring processes carrying different paths would
+  otherwise lock different sidecars around the same document and exclude nothing. The
+  keyring backend therefore takes a fixed `~/.mcpgen/keyring.lock` *and* the path sidecar,
+  always in that order (the second is not redundant: a keyring failure falls back to
+  writing the file, and that write has to be covered too).
+
+- **A credential that arrived during a token refresh could be overwritten by the refresh
+  that was already in flight.** No lock can span this one: `_pre_flight_refresh` reads a
+  refresh token, `await`s an HTTP round-trip, and writes what comes back. A login landing
+  inside that window was replaced by a response chained to the refresh token the request
+  had *started* from — and where the authorization server rotates refresh tokens, that
+  chain is already invalid, so the overwrite cached a dead credential and sent the next run
+  to the browser. It now compares and sets: the response is stored only while the store
+  still holds the refresh token it was derived from. A credential deleted meanwhile is not
+  resurrected either, for the same reason. `login()`'s restore does the same check over its
+  own, much longer window.
+
+- **A refresh response that left out `refresh_token` erased the stored one, so the next
+  expiry had nothing to refresh with.** RFC 6749 §6 makes that member optional in a
+  refresh response and says to discard the old token only when a *new* one is issued;
+  Google's token endpoint omits it. mcpgen replaced the whole cached entry with whatever
+  came back, so on a server that does not rotate, the refresh token vanished on the first
+  successful refresh and every token lifetime after that ended in a browser prompt.
+  Both writers now carry the stored refresh token forward when the response has none.
+  A rotated one still replaces it, as §6 requires; revocation is unaffected, because a
+  revoked grant arrives as `invalid_grant` on next use, which is already read as dead.
+
+  Three visible consequences. Keyring-only users now get empty sidecar lock files (0600,
+  holding nothing) under `~/.mcpgen`, the first files mcpgen writes there on that backend.
+  A lock that cannot be created or acquired reports on stderr and proceeds *unlocked*
+  rather than failing the operation — no lock is a lost update under concurrency, while
+  raising would be a failed credential write on a path that worked before (it is not a
+  `warning`, so `-W error` cannot turn that degrade back into the failure it avoids). And
+  the lock is taken before the read that decides whether anything needs writing — that
+  ordering *is* the fix — so deleting an absent credential, or migrating an empty source,
+  now leaves a directory and an empty lock file where both were previously filesystem
+  no-ops. Taking a lock never changes the permissions of a directory it did not create;
+  saving credentials still hardens the directory to 0700, as it always has.
+
+  Three limits. `login()` does **not** hold the lock across the browser round — one person
+  clicking through a consent screen would stall every other mcpgen process for as long as
+  they take — so two concurrent logins for the *same* server remain last-writer-wins; the
+  restore's re-check bounds the damage but does not remove it. The lock is advisory and
+  mcpgen-to-mcpgen: another program writing the same keyring entry is not coordinated, and
+  cannot be. And on Windows the primitive is `msvcrt.locking(LK_LOCK)`, which is not a
+  blocking acquire but a bounded one — about ten retries a second apart, then `OSError`,
+  which is the "cannot be acquired" case above and therefore proceeds unlocked with a line
+  on stderr. Contention lasting longer than ten seconds there is the pre-fix behaviour, and
+  `migrate-creds` is the one operation that holds the lock long enough to reach it. POSIX
+  has no such ceiling: `flock` waits. The 0600 sidecars are likewise a POSIX statement —
+  the mode bits are written on Windows too, and NTFS ACLs are what actually decide.
+
 - **A brief outage at the authorization server sent every run to the browser for a login
   that could not fix it.** `_pre_flight_refresh()` turned *any* non-200 from the token
   endpoint into `ReauthenticationRequired`, which `ensure_login()` converts straight into a

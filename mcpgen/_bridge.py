@@ -50,10 +50,12 @@ import re
 import shlex
 import stat
 import sys
+import threading
 import time
 import warnings
 import webbrowser
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from collections.abc import Callable, Iterator
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlparse
@@ -83,6 +85,14 @@ _CRED_BACKEND_ENV = "MCPGEN_CRED_BACKEND"
 _VALID_BACKENDS: frozenset[str] = frozenset({"file", "keyring", "auto"})
 _KEYRING_SERVICE: str = "mcpgen"
 _KEYRING_USER: str = "credentials"
+
+_KEYRING_LOCK_PATH: Path = DEFAULT_CREDS_PATH.with_name("keyring")
+"""Rendezvous for the keyring store, which is one global item under the fixed service
+and user above. `--creds` is accepted everywhere and documented as ignored on this
+backend, so two keyring processes may legitimately carry different paths — keying
+their lock on the path would put them on different sidecars around the same document.
+This one is fixed for the same reason the keyring item is. No suffix here:
+`_store_lock` appends `.lock`, so the file lands at `~/.mcpgen/keyring.lock`."""
 
 
 def _load_client_config(path: Path | None = None) -> dict:
@@ -504,6 +514,166 @@ class TokenRefreshUnavailable(LoginWontHelp):
     """
 
 
+def _resolve_lock_primitive() -> Callable[[int], None] | None:
+    """Return a blocking exclusive-lock function for a file descriptor, or None.
+
+    Both primitives are released by the OS when the holder's descriptor closes,
+    which includes the process dying — so a SIGKILL mid-write leaves no stale
+    lock to time out or break, and there is no recovery path to get wrong.
+    """
+    if sys.platform == "win32":  # pragma: no cover - Windows
+        try:
+            import msvcrt
+        except ImportError:
+            return None
+        # LK_LOCK is the closest Windows gets to flock's blocking acquire, but it is
+        # bounded: about ten retries a second apart, then OSError. `_store_lock`
+        # treats that failure the way it treats having no primitive at all. One byte
+        # is enough — the range only has to be the one every holder asks for.
+        return lambda fd: msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - no platform primitive at all
+        return None
+    return lambda fd: fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+_lock_fd: Callable[[int], None] | None = _resolve_lock_primitive()
+"""Platform lock primitive, resolved once at import. ``None`` means this
+interpreter has neither ``fcntl`` nor ``msvcrt``, and ``_store_lock`` degrades to
+a no-op — the pre-lock behaviour, which is a lost update under concurrency and
+not a failed credential write."""
+
+_held_locks = threading.local()
+"""Lock paths this thread is already inside. ``flock`` is held per *open file
+description*, so a nested acquire would ``open()`` again and block on a lock this
+same thread holds — a self-deadlock, not an error. Thread-local and not global on
+purpose: two threads must still contend, which is what makes the threaded
+concurrency tests exercise the real primitive."""
+
+
+def _report_unlocked(verb: str, lock_path: Path, exc: Exception) -> None:
+    """Say that this operation is running without the store lock.
+
+    Not ``warnings.warn``, and for both of the reasons the corrupt-store quarantine
+    message gives for the same choice. ``-W error`` — a plausible setting for a
+    library imported by a generated wrapper, and the default in some test suites —
+    would turn this into the failed credential write the degrade exists to avoid,
+    which is the opposite of what a notice about a best-effort path should do. And
+    ``-W ignore`` would hide it entirely, leaving locking silently off. Suppressing
+    the warning instead would be worse than either: the operator would get no
+    message at all.
+    """
+    print(
+        f"[mcpgen] cannot {verb} the credential store lock {lock_path} ({exc}); "
+        f"proceeding without cross-process locking.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+@contextmanager
+def _store_lock(credentials_path: Path) -> Iterator[None]:
+    """Serialise whole-store read-modify-write cycles against other mcpgen processes.
+
+    The lock is a sidecar file next to *credentials_path*, and it is the rendezvous
+    for **both** backends. The keyring has no lock target of its own, and its
+    save path has the same read-modify-write shape, so anchoring both to one path
+    on disk is what keeps the fix from covering only half the surface. The scope
+    is advisory and mcpgen-to-mcpgen: another program writing the same keyring
+    entry is not coordinated, and cannot be.
+
+    The lock file is created and never removed. Unlinking it is the classic race —
+    a second process holding a descriptor to the now-unlinked inode is locking a
+    file nobody else can reach, so both proceed at once. An empty 0600 file is the
+    cheaper end of that trade.
+
+    Every way of not getting the lock degrades to running without one, with a
+    message on stderr — the same answer this module already gives for a platform with no
+    primitive at all, and for the same reason: no lock is a lost update under
+    concurrency, while raising here is a failed credential write on a path that
+    used to work. That covers a directory the lock cannot create (the keyring
+    backend reaches this code without otherwise touching disk), `ENOLCK` from an
+    NFS mount, and Windows, where `LK_LOCK` gives up after about ten seconds. A
+    genuinely broken directory still raises where it matters: `_file_save` does its
+    own unguarded `mkdir`, so a file-backend write fails at the write.
+
+    The acquire is blocking, and the async ``TokenStorage`` methods call it on the
+    event loop. Accepted: inside one ``login()`` no store write overlaps the
+    callback wait — ``set_client_info`` runs during registration before the browser
+    opens, ``set_tokens`` after the callback future has resolved — so a lock held
+    elsewhere delays a write rather than costing a redirect. Holds are microseconds
+    on the file backend; the one long holder is ``migrate_creds``. If that ever
+    stops being true, the fix is ``asyncio.to_thread`` at the async call sites —
+    and note it requires turning ``_held_locks`` into a ``ContextVar`` first, since
+    the acquire would move off the calling thread.
+    """
+    held: set[str] = getattr(_held_locks, "paths", None) or set()
+    _held_locks.paths = held
+    # Resolved, so two spellings of one file are one key. A miss would open a second
+    # descriptor to a lock this thread already holds and block on itself forever.
+    key = os.path.realpath(credentials_path)
+    if _lock_fd is None or key in held:
+        yield
+        return
+    lock_path = credentials_path
+    try:
+        # Inside the guard: `with_name` raises `ValueError`, not `OSError`, on a path
+        # with no final component — `--creds /` reaches here on the keyring backend,
+        # where that option is documented as ignored, so a path nothing ever uses
+        # would otherwise take down the operation with a traceback.
+        lock_path = credentials_path.with_name(credentials_path.name + ".lock")
+        # `mode` hardens only a directory this call creates. An existing one is left
+        # as it is — including the working directory, which a relative `--creds`
+        # would otherwise have this read-only-looking call chmod to 0700. Hardening
+        # the directory belongs to `_file_save`, where the secrets land; the lock
+        # file is empty and protects nothing.
+        credentials_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    except (OSError, ValueError) as exc:
+        _report_unlocked("create", lock_path, exc)
+        yield
+        return
+    try:
+        try:
+            _lock_fd(fd)
+        except OSError as exc:
+            _report_unlocked("acquire", lock_path, exc)
+            yield
+            return
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _store_locks(backend: str, credentials_path: Path) -> Iterator[None]:
+    """Take every lock a *backend* operation can write under.
+
+    The file backend writes only at *credentials_path*, so its sidecar is enough.
+    The keyring backend needs two, and the second one is not redundant: ``
+    _keyring_save`` falls back to ``_file_save`` at *credentials_path* whenever the
+    keyring raises, and ``_warn_keyring_fallback`` flips the instance to the file
+    backend mid-operation. Holding only the keyring lock would leave that fallback
+    write racing an honest file-backend process at the same path.
+
+    Order is fixed — keyring lock first, everywhere both are taken — so two holders
+    can never take them in opposite orders and deadlock. The lock set is chosen from
+    the backend resolved at entry and never revised, which is what turns that
+    mid-operation flip from a hazard into a non-event.
+    """
+    if backend != "keyring":
+        with _store_lock(credentials_path):
+            yield
+        return
+    with _store_lock(_KEYRING_LOCK_PATH), _store_lock(credentials_path):
+        yield
+
+
 class FileTokenStorage(TokenStorage):
     """OAuth token + client info store, keyed by server name.
 
@@ -531,6 +701,13 @@ class FileTokenStorage(TokenStorage):
         self._key = server_name
         self._path = credentials_path
         self._backend = _detect_keyring() if backend == "auto" else backend
+        # Snapshot, and deliberately not kept in step with `_backend`:
+        # `_warn_keyring_fallback` flips that one to "file" on the first keyring
+        # error, and a lock set that followed it would drop the keyring lock
+        # part-way through an operation that had already read the keyring under it.
+        # Fixed at construction, the keyring backend simply holds both locks
+        # throughout, which covers the fallback write too.
+        self._lock_backend = self._backend
 
     # ── File backend ──────────────────────────────────────────────────────────
 
@@ -619,6 +796,30 @@ class FileTokenStorage(TokenStorage):
         else:
             self._file_save(data)
 
+    def _mutate(self, change: Callable[[dict], Any]) -> Any:
+        """Apply *change* to the whole store under the lock, and return its result.
+
+        Every write here is a read-modify-write of one shared document: a caller
+        touches one server's entry and saves everyone's. Reading outside the lock
+        is what loses updates — the snapshot goes stale the moment another process
+        writes, and the save puts the stale view back. So the read happens *inside*
+        the lock, and ``change`` never sees a dict older than the lock it is under.
+
+        ``change`` raising means no save, so a callback that fails half-way through
+        its edits cannot leave a partial one on disk.
+
+        Nothing inside the lock may ``await``. The reentrancy guard is thread-local,
+        not task-local, so a second coroutine reaching this on the same thread while
+        the first is suspended would find the key already held and skip the lock
+        outright — mutual exclusion lost silently, which is worse than the deadlock
+        the guard exists to prevent.
+        """
+        with _store_locks(self._lock_backend, self._path):
+            data = self._load()
+            result = change(data)
+            self._save(data)
+        return result
+
     # ── TokenStorage protocol ─────────────────────────────────────────────────
 
     async def get_tokens(self) -> OAuthToken | None:
@@ -632,13 +833,75 @@ class FileTokenStorage(TokenStorage):
             return None
         return OAuthToken(**raw)
 
-    async def set_tokens(self, tokens: OAuthToken) -> None:
-        data = self._load()
+    @staticmethod
+    def _serialize_tokens(tokens: OAuthToken) -> dict:
+        """The stored shape of a token. Shared so the two writers cannot drift."""
         serialized = tokens.model_dump(mode="json", exclude_none=True)
         if tokens.expires_in is not None:
             serialized["expires_at"] = int(time.time()) + int(tokens.expires_in)
-        data.setdefault(self._key, {})["tokens"] = serialized
-        self._save(data)
+        return serialized
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        serialized = self._serialize_tokens(tokens)
+
+        def apply(data: dict) -> None:
+            # RFC 6749 §6 makes `refresh_token` optional in a refresh response, and says
+            # to discard the old one only when a new one is issued. Google's token
+            # endpoint omits it. Writing the entry wholesale would erase what the server
+            # meant us to keep using, and the next expiry would have nothing to send —
+            # a browser prompt every token lifetime, from a server that did nothing
+            # wrong. Revocation never arrives as an omission; it arrives as
+            # `invalid_grant` on the next use, which is already classified as dead.
+            # Read under the lock, like every other decision here.
+            if "refresh_token" not in serialized:
+                stored = (data.get(self._key) or {}).get("tokens") or {}
+                if "refresh_token" in stored:
+                    serialized["refresh_token"] = stored["refresh_token"]
+            data.setdefault(self._key, {})["tokens"] = serialized
+
+        self._mutate(apply)
+
+    def _set_tokens_if_from(self, tokens: OAuthToken, expected_refresh_token: str) -> bool:
+        """Write *tokens*, but only while the store still holds *expected_refresh_token*.
+
+        ``set_tokens`` is the SDK-facing seam and writes unconditionally, which is
+        right for it: the SDK's writes carry no earlier read to be stale against.
+        ``_pre_flight_refresh`` does — it reads a refresh token, awaits a network
+        round, and writes a response derived from what it read. The lock makes that
+        write atomic, not correct: the decision input predates the lock by an HTTP
+        round-trip, so a login or a second refresh landing inside it is overwritten
+        by a response chained to a credential that is no longer the current one. With
+        refresh-token rotation the authorization server has already invalidated that
+        chain, so the overwrite caches a dead credential and the next run opens the
+        browser — the failure this release exists to remove, through a later door.
+
+        The comparison covers a neighbouring case for free: an entry that
+        ``delete_cred`` removed compares unequal, so a late response cannot resurrect
+        it. Returns whether the write happened; the caller ignoring it is correct,
+        because losing this race means something newer is already in place.
+
+        One case it vetoes that it would rather not: a concurrent ``login()`` for the
+        same server, between its stash-pop and its own write, leaves no entry to
+        compare against — so a refresh that succeeded is discarded, and the caller
+        gets a re-authentication message instead of the token it had just been given.
+        The window is narrow, needs a same-server interactive login, and ends in an
+        actionable message rather than a bad credential; same-server concurrent logins
+        are already last-writer-wins by design. Recorded rather than fixed.
+        """
+        serialized = self._serialize_tokens(tokens)
+
+        def apply(data: dict) -> bool:
+            stored = (data.get(self._key) or {}).get("tokens") or {}
+            if stored.get("refresh_token") != expected_refresh_token:
+                return False
+            # Same §6 rule as `set_tokens`. Here the value is already known: the check
+            # above just established that the store still holds it.
+            if "refresh_token" not in serialized:
+                serialized["refresh_token"] = expected_refresh_token
+            data.setdefault(self._key, {})["tokens"] = serialized
+            return True
+
+        return bool(self._mutate(apply))
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         data = self._load()
@@ -648,9 +911,12 @@ class FileTokenStorage(TokenStorage):
         return OAuthClientInformationFull(**raw)
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
-        data = self._load()
-        data.setdefault(self._key, {})["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
-        self._save(data)
+        serialized = client_info.model_dump(mode="json", exclude_none=True)
+
+        def apply(data: dict) -> None:
+            data.setdefault(self._key, {})["client_info"] = serialized
+
+        self._mutate(apply)
 
 
 # ── Backend-agnostic migration helpers ──────────────────────────────────────
@@ -731,56 +997,69 @@ def migrate_creds(
     if from_backend == to_backend:
         raise ValueError(f"from_backend and to_backend are both {from_backend!r}; nothing to migrate.")
 
-    # Read source
-    source_all = _read_backend(from_backend, credentials_path)
+    # One lock set for the whole migration. Unlike login() there is no browser round in
+    # here, so the window is short enough to hold outright — and holding it makes the
+    # read-merge-write of the target and the read-pop-write of the source one
+    # operation instead of four races. Taking the keyring's set means a file->keyring
+    # migration also excludes a keyring write made from any other `--creds` path.
+    # One exception to "short": a keyring backend can raise an OS keychain prompt
+    # inside this window, which bounds the hold by how long someone takes to answer
+    # it. Other mcpgen processes wait rather than fail, and this is the longest hold
+    # anywhere — accepted for a single-user CLI, and the reason login() does not do
+    # the same across its browser round.
+    # One backend is always the keyring — `from_backend == to_backend` raises above —
+    # so the pair is always the right set here.
+    with _store_locks("keyring", credentials_path):
+        # Read source
+        source_all = _read_backend(from_backend, credentials_path)
 
-    # Filter to requested servers
-    if servers is not None:
-        missing = [s for s in servers if s not in source_all]
-        if missing:
-            raise ValueError(
-                f"Requested server(s) not found in {from_backend!r} backend: " + ", ".join(repr(s) for s in missing)
-            )
-        source_subset = {k: source_all[k] for k in servers}
-    else:
-        source_subset = source_all
-
-    if not source_subset:
-        return {
-            "from": from_backend,
-            "to": to_backend,
-            "migrated": 0,
-            "overwritten": 0,
-            "purged": False,
-            "set_default": False,
-        }
-
-    # Merge into target (source wins on collision)
-    target = _read_backend(to_backend, credentials_path)
-    overwritten = sum(1 for k in source_subset if k in target)
-    merged = {**target, **source_subset}
-    _write_backend(to_backend, credentials_path, merged)
-
-    # Verify write
-    verified = _read_backend(to_backend, credentials_path)
-    missing_after = [k for k in source_subset if k not in verified]
-    if missing_after:
-        raise RuntimeError(
-            f"Migration verification failed: the following server(s) are absent from "
-            f"the {to_backend!r} backend after write: {', '.join(missing_after)}"
-        )
-
-    # Optional purge (remove only the migrated keys from source)
-    did_purge = False
-    if purge:
-        source_remaining = _read_backend(from_backend, credentials_path)
-        for k in source_subset:
-            source_remaining.pop(k, None)
-        if source_remaining:
-            _write_backend(from_backend, credentials_path, source_remaining)
+        # Filter to requested servers
+        if servers is not None:
+            missing = [s for s in servers if s not in source_all]
+            if missing:
+                raise ValueError(
+                    f"Requested server(s) not found in {from_backend!r} backend: " + ", ".join(repr(s) for s in missing)
+                )
+            source_subset = {k: source_all[k] for k in servers}
         else:
-            _clear_backend(from_backend, credentials_path)
-        did_purge = True
+            source_subset = source_all
+
+        if not source_subset:
+            return {
+                "from": from_backend,
+                "to": to_backend,
+                "migrated": 0,
+                "overwritten": 0,
+                "purged": False,
+                "set_default": False,
+            }
+
+        # Merge into target (source wins on collision)
+        target = _read_backend(to_backend, credentials_path)
+        overwritten = sum(1 for k in source_subset if k in target)
+        merged = {**target, **source_subset}
+        _write_backend(to_backend, credentials_path, merged)
+
+        # Verify write
+        verified = _read_backend(to_backend, credentials_path)
+        missing_after = [k for k in source_subset if k not in verified]
+        if missing_after:
+            raise RuntimeError(
+                f"Migration verification failed: the following server(s) are absent from "
+                f"the {to_backend!r} backend after write: {', '.join(missing_after)}"
+            )
+
+        # Optional purge (remove only the migrated keys from source)
+        did_purge = False
+        if purge:
+            source_remaining = _read_backend(from_backend, credentials_path)
+            for k in source_subset:
+                source_remaining.pop(k, None)
+            if source_remaining:
+                _write_backend(from_backend, credentials_path, source_remaining)
+            else:
+                _clear_backend(from_backend, credentials_path)
+            did_purge = True
 
     # Optional config default
     did_set_default = False
@@ -871,14 +1150,19 @@ def delete_cred(
     """
     resolved = resolve_cred_backend(backend)
     resolved = _detect_keyring() if resolved == "auto" else resolved
-    data = _read_backend(resolved, credentials_path)
-    if name not in data:
-        return False
-    data.pop(name)
-    if data:
-        _write_backend(resolved, credentials_path, data)
-    else:
-        _clear_backend(resolved, credentials_path)
+    # Under the lock, and the read is inside it: "was that the last entry?" decides
+    # whether the whole store is unlinked, and a snapshot answers it for a store that
+    # no longer exists. A login for another server landing in that gap would be
+    # deleted by a command that was never asked to touch it.
+    with _store_locks(resolved, credentials_path):
+        data = _read_backend(resolved, credentials_path)
+        if name not in data:
+            return False
+        data.pop(name)
+        if data:
+            _write_backend(resolved, credentials_path, data)
+        else:
+            _clear_backend(resolved, credentials_path)
     return True
 
 
@@ -1290,7 +1574,10 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
                 f"({type(exc).__name__}). Body: {_body_excerpt(resp)}. The refresh token is "
                 f"untouched; retry later, and if it persists run: mcpgen login {server_name}"
             ) from None
-        await storage.set_tokens(token)
+        # Not `set_tokens`: this response was derived from `refresh_token`, read
+        # before the request went out. If the store has moved on since, whatever
+        # moved it is newer than this — see `_set_tokens_if_from`.
+        storage._set_tokens_if_from(token, refresh_token)
         return
 
     # Past here the response is a failure, and what it *says* decides which kind. The
@@ -1926,9 +2213,41 @@ def _persist_token_endpoint(
     endpoint = provider._get_token_endpoint()
     if not endpoint:
         return
-    data = storage._load()
-    data.setdefault(server_name, {})["token_endpoint"] = str(endpoint)
-    storage._save(data)
+
+    def apply(data: dict) -> None:
+        data.setdefault(server_name, {})["token_endpoint"] = str(endpoint)
+
+    storage._mutate(apply)
+
+
+def _restore_stash(server_name: str, stashed: dict) -> Callable[[dict], None]:
+    """Build the ``_mutate`` callback that puts *stashed* back for *server_name*.
+
+    The re-check is the point of doing this under the lock rather than saving the
+    dict the handler already read. That read happened before the lock, and the
+    browser round it is unwinding gave another mcpgen process ample time to finish
+    a login for this same server. Writing the stash over a token that arrived in
+    the meantime is the lockout this restore exists to prevent, aimed at the other
+    process instead.
+
+    The check is on ``tokens`` alone, deliberately, and not on the whole entry: a
+    login's own post-registration failure — cancelled consent, callback timeout —
+    leaves its own fresh ``client_info`` here with no tokens, and skipping the restore
+    then would be that same lockout through the front door. What it costs is a
+    *concurrent* same-server login caught mid-registration: one that has saved its own
+    ``client_info`` but has not yet exchanged its code presents a token-less entry too,
+    so this restore puts the stash back over that registration and the concurrent
+    exchange pairs its fresh tokens with the stale ``client_id``. Same-server concurrent
+    logins are last-writer-wins by design, and that pair is not silent — the next refresh
+    draws ``invalid_client`` or ``invalid_grant``, both already in ``_DEAD_GRANT_ERRORS``,
+    so it costs one browser prompt and heals.
+    """
+
+    def restore(fresh: dict) -> None:
+        if not (fresh.get(server_name) or {}).get("tokens"):
+            fresh[server_name] = stashed
+
+    return restore
 
 
 _DESCRIBE_LIMIT = 200
@@ -2043,48 +2362,56 @@ async def login(
     # Scoped to `login()` on purpose. `_file_load` itself keeps raising, because the
     # other readers (`_pre_flight_refresh`, the SDK's mid-flow reads) run with nobody
     # at the keyboard, and "start fresh" is a decision only this command's caller made.
-    try:
-        data = storage._load()
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        # Both are ValueError, and both mean the same thing: bytes on disk that are not a
-        # store. UnicodeDecodeError comes from the `read_text` a line before `json.loads`,
-        # so catching only the decode error would let a file saved in another encoding
-        # through as a traceback. `_require_store` raises the first of the two for a file
-        # that parses into something other than an object — `[]`, `null`, a bare string —
-        # so that shape lands here rather than on `data.pop` two lines down.
-        # Deliberately narrower than OSError — an unreadable *path*
-        # (permissions, a directory in the way) is not a corrupt store and must propagate.
-        # Nanoseconds, not seconds: two corrupt-store logins inside the same second would
-        # otherwise `os.replace` the second quarantine over the first, destroying the bytes
-        # this exists to keep.
-        quarantine = storage._path.with_name(f"{storage._path.name}.corrupt.{time.time_ns()}")
+    #
+    # Read, pop and save are one cycle and take the store lock together — including
+    # the quarantine, so two logins that find the same corrupt file cannot each move
+    # it aside and race over what the survivor contains. `_store_lock` is not used
+    # around the *whole* function on purpose: the window from here to the restore
+    # spans the browser round, and holding the lock across it would stall every other
+    # mcpgen process for as long as a human takes to click through a consent screen.
+    with _store_locks(storage._lock_backend, storage._path):
         try:
-            os.replace(storage._path, quarantine)
-        except OSError as move_failed:
-            # Continuing here would `_save({})` over the very bytes the quarantine exists
-            # to preserve, after printing a promise to preserve them. Stop instead: the
-            # file is still there, and the message says what to do with it.
-            # `LoginWontHelp` and not one of its subclasses: both would assert something
-            # untrue here. `PostLoginCheckFailed` claims a token is cached, and nothing was
-            # even read; `TokenRefreshUnavailable` claims the token endpoint answered, and
-            # it was never contacted. The base says the one thing that is true and the one
-            # thing a caller can act on — another browser round changes nothing, because the
-            # fix is a human moving a file. It also gets the message out of `cli.py` and the
-            # generated runner as a message rather than a traceback: both already catch the
-            # base, which is what that forward-looking clause was for.
-            raise LoginWontHelp(
-                f"{storage._path} is not a readable credential store ({exc}) and could not be moved aside "
-                f"({move_failed}). Move or delete it by hand, then run login again."
-            ) from exc
-        print(
-            f"[mcpgen] {storage._path} is not a readable credential store ({exc}); moved to {quarantine}. "
-            f"Other servers' entries are in that file if you need them.",
-            file=sys.stderr,
-            flush=True,
-        )
-        data = {}
-    stashed = data.pop(server_name, None)
-    storage._save(data)
+            data = storage._load()
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # Both are ValueError, and both mean the same thing: bytes on disk that are not a
+            # store. UnicodeDecodeError comes from the `read_text` a line before `json.loads`,
+            # so catching only the decode error would let a file saved in another encoding
+            # through as a traceback. `_require_store` raises the first of the two for a file
+            # that parses into something other than an object — `[]`, `null`, a bare string —
+            # so that shape lands here rather than on `data.pop` two lines down.
+            # Deliberately narrower than OSError — an unreadable *path*
+            # (permissions, a directory in the way) is not a corrupt store and must propagate.
+            # Nanoseconds, not seconds: two corrupt-store logins inside the same second would
+            # otherwise `os.replace` the second quarantine over the first, destroying the bytes
+            # this exists to keep.
+            quarantine = storage._path.with_name(f"{storage._path.name}.corrupt.{time.time_ns()}")
+            try:
+                os.replace(storage._path, quarantine)
+            except OSError as move_failed:
+                # Continuing here would `_save({})` over the very bytes the quarantine exists
+                # to preserve, after printing a promise to preserve them. Stop instead: the
+                # file is still there, and the message says what to do with it.
+                # `LoginWontHelp` and not one of its subclasses: both would assert something
+                # untrue here. `PostLoginCheckFailed` claims a token is cached, and nothing was
+                # even read; `TokenRefreshUnavailable` claims the token endpoint answered, and
+                # it was never contacted. The base says the one thing that is true and the one
+                # thing a caller can act on — another browser round changes nothing, because the
+                # fix is a human moving a file. It also gets the message out of `cli.py` and the
+                # generated runner as a message rather than a traceback: both already catch the
+                # base, which is what that forward-looking clause was for.
+                raise LoginWontHelp(
+                    f"{storage._path} is not a readable credential store ({exc}) and could not be moved aside "
+                    f"({move_failed}). Move or delete it by hand, then run login again."
+                ) from exc
+            print(
+                f"[mcpgen] {storage._path} is not a readable credential store ({exc}); moved to {quarantine}. "
+                f"Other servers' entries are in that file if you need them.",
+                file=sys.stderr,
+                flush=True,
+            )
+            data = {}
+        stashed = data.pop(server_name, None)
+        storage._save(data)
 
     if headless is None:
         headless = _is_headless()
@@ -2190,10 +2517,12 @@ async def login(
         # send the next run back to the browser — forever, since nothing ever
         # sticks. Re-read storage rather than trusting the provider object: the
         # SDK owns that write and this is the same seam it wrote through.
-        # One read, reused for the restore below: nothing writes in between, and on
-        # the keyring backend a second _load() is another keychain round-trip — one
-        # that can even come from a different backend, if the first read tripped the
-        # fallback to file.
+        # This read is unlocked, and only decides which branch to take. It is not the
+        # one the restore writes from: another mcpgen process may have written the
+        # store during the browser round this handler is unwinding, so the restore
+        # re-reads under the lock. On the common path — a token was produced, nothing
+        # to restore — that second read never happens, which is what keeps the keyring
+        # backend to one keychain round-trip here.
         # The read itself can fail — a corrupt credentials.json, a keyring backend
         # that errors on read — and raising from inside this handler would replace
         # the transport error the operator actually needs to see.
@@ -2212,15 +2541,21 @@ async def login(
             restorable = True
         produced = data.get(server_name) or {}
         if not produced.get("tokens"):
+            # `restorable` is not redundant with the suppression below. The restore
+            # re-reads under the lock and would very likely succeed on a second try,
+            # so without this flag a store that failed to read once would be written
+            # to anyway — and refusing to write to a store nobody could read is a
+            # decision, not an error-handling detail.
             if stashed is not None and restorable:
                 # The write fails for the same reasons the read does — a keyring backend
                 # that has started refusing, a full disk, a permission change — and a
                 # restore that could not happen must not become the exception the operator
                 # sees. Best effort: the stash is a nicety, the original failure is the
                 # answer. Same rule as the read above, and as the endpoint save below.
+                # The suppression covers the lock too: failing to take it is one more way
+                # the restore can be skipped, never a reason to replace the diagnosis.
                 with suppress(Exception):
-                    data[server_name] = stashed
-                    storage._save(data)
+                    storage._mutate(_restore_stash(server_name, stashed))
             raise
 
         # A token is only as good as the endpoint that can renew it: without one,
