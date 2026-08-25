@@ -133,3 +133,85 @@ transport = "stdio"
 launch = "uvx mcp-server-fetch"
 auth = "none"
 notes = "Web fetch / HTTP content retrieval. Requires uvx."
+
+# ============================================================================
+# Tier A candidates (open remote endpoints, no credentials)
+# Source: ../mcp-client-kit-marketing/EVAL_SERVER_CANDIDATES.md §3 "Tier A"
+# ============================================================================
+
+# --- exa ---
+# Exa Search public MCP endpoint. No auth.
+[[server]]
+name = "exa"
+transport = "http"
+launch = "https://mcp.exa.ai/mcp"
+auth = "none"
+notes = "Exa Search public HTTP MCP endpoint. Deeply nested, schema-lied search results — shape-spec material."
+
+# --- aws-knowledge ---
+# AWS Knowledge MCP endpoint. No auth.
+[[server]]
+name = "aws-knowledge"
+transport = "http"
+launch = "https://knowledge-mcp.global.api.aws"
+auth = "none"
+notes = "AWS Knowledge public HTTP MCP endpoint. Doc-retrieval envelopes."
+
+# --- semgrep ---
+# EVAL_SERVER_CANDIDATES.md lists this as Tier A (open), but verified 2026-08-25:
+#   https://mcp.semgrep.ai/sse -> 404 Not Found
+#   https://mcp.semgrep.ai/mcp -> 401 Unauthorized,
+#     WWW-Authenticate: Bearer, resource_metadata=.../.well-known/oauth-protected-resource
+# It is an OAuth server (Tier C), not Tier A. Requires an interactive OAuth flow before eval.
+[[server]]
+name = "semgrep"
+transport = "http"
+launch = "https://mcp.semgrep.ai/mcp"
+auth = "oauth"
+notes = "Semgrep MCP endpoint. Security-scan findings: arrays of heterogeneous records. OAuth-gated (DCR via .well-known/oauth-protected-resource)."
+
+# --- stackoverflow ---
+# EVAL_SERVER_CANDIDATES.md lists this as Tier A (open), but verified 2026-08-25:
+#   https://mcp.stackoverflow.com      -> 401 Unauthorized, WWW-Authenticate: Bearer
+#   https://mcp.stackoverflow.com/mcp  -> 404 Not Found
+#   https://mcp.stackoverflow.com/sse  -> 404 Not Found
+# It is OAuth-gated (Tier C). Direct streamable-HTTP OAuth via `mcpgen login` fails at
+# dynamic client registration (Stack Exchange edge returns a 403 block page), so we use the
+# vendor-documented path instead: the `mcp-remote` npx bridge, which runs the browser OAuth
+# flow itself and exposes the server over stdio. auth = "none" because the bridge owns the
+# token (cached in ~/.mcp-auth), not mcpgen.
+[[server]]
+name = "stackoverflow"
+transport = "stdio"
+launch = "npx -y mcp-remote https://mcp.stackoverflow.com"
+auth = "none"
+notes = "Stack Overflow MCP endpoint via the vendor-documented mcp-remote stdio bridge (OAuth handled by the bridge). Q&A payloads with optional fields — nullability probing."
+
+# --- cloudflare-docs ---
+# Cloudflare Docs public MCP endpoint. No auth.
+# The /sse endpoint published in EVAL_SERVER_CANDIDATES.md returns 410 Gone as of 2026-08-25;
+# the live endpoint is streamable HTTP at /mcp (verified handshake: docs-ai-search 0.4.13, 2 tools).
+[[server]]
+name = "cloudflare-docs"
+transport = "http"
+launch = "https://docs.mcp.cloudflare.com/mcp"
+auth = "none"
+notes = "Cloudflare Docs streamable-HTTP MCP endpoint. Open-auth counterpart to the OAuth Cloudflare servers."
+
+# --- astro-docs ---
+# Astro Docs public MCP endpoint (streamable HTTP). No auth.
+[[server]]
+name = "astro-docs"
+transport = "http"
+launch = "https://mcp.docs.astro.build/mcp"
+auth = "none"
+notes = "Astro Docs streamable-HTTP MCP endpoint. Transport-variant coverage (/mcp, not SSE)."
+
+# --- openzeppelin-solidity ---
+# OpenZeppelin Contracts (Solidity) MCP endpoint. No auth.
+[[server]]
+name = "openzeppelin-solidity"
+transport = "http"
+launch = "https://mcp.openzeppelin.com/contracts/solidity/mcp"
+auth = "none"
+notes = "OpenZeppelin Solidity contracts MCP endpoint. One of four near-identical variants (solidity/cairo/stellar/stylus) — drift-detection material."
