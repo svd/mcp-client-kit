@@ -746,12 +746,10 @@ def _cmd_login(ns: argparse.Namespace) -> int:
             )
         )
     except _bridge.LoginWontHelp as exc:
-        # The server is at fault, not the login. A traceback here reads as "your
-        # login broke" and invites a pointless second browser round.
-        # Catching the base is deliberate: every current and future member of this
-        # taxonomy means the same thing to a CLI user — the message, exit 1, no
-        # traceback. A subclass that ever needs different handling has to be caught
-        # above this clause, so add it there rather than narrowing this one.
+        # The server is at fault, not the login. A traceback here reads as "your login
+        # broke" and invites a pointless second browser round. The base is caught because
+        # every member of this taxonomy means the same thing to a CLI user: the message,
+        # exit 1, no traceback. A subclass needing other handling goes above this clause.
         print(f"[login] error: {exc}", file=sys.stderr)
         return 1
     return 0
@@ -1159,15 +1157,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return ns.func(ns)
     except (_bridge.ReauthenticationRequired, _bridge.LoginWontHelp) as exc:
-        # Every command that touches a server can hit the auth taxonomy, but only
-        # `login` caught it — the rest died with a traceback on what is a routine
-        # operational condition ("the credential expired and the endpoint is down").
-        # Catching the two roots here covers their subclasses and every command added
-        # later, which is the failure mode of widening each `_cmd_*` except tuple by
-        # hand. Deliberately not `Exception`: a KeyError from a real bug must still
-        # traceback so it gets reported as one. The messages carry their own next step
-        # — "Run: mcpgen login X", "retry later" — so nothing is appended here.
-        # `_cmd_login`'s own handler still runs first and keeps its formatting.
+        # Any command that touches a server can hit the auth taxonomy, and an expired
+        # credential or a down endpoint is a routine operational condition, not a
+        # traceback. Catching the two roots here covers their subclasses and every command
+        # added later. Not `Exception`: a KeyError from a real bug must still traceback.
+        # The messages carry their own next step — "Run: mcpgen login X", "retry later" —
+        # so nothing is appended. `_cmd_login`'s own handler runs first and keeps its
+        # formatting.
         print(f"[mcpgen] error: {exc}", file=sys.stderr)
         return 1
 
