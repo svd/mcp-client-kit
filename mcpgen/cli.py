@@ -745,9 +745,13 @@ def _cmd_login(ns: argparse.Namespace) -> int:
                 callback_timeout=ns.callback_timeout,
             )
         )
-    except _bridge.PostLoginCheckFailed as exc:
-        # The token is cached; only the server is at fault. A traceback here reads
-        # as "your login broke" and invites a pointless second browser round.
+    except _bridge.LoginWontHelp as exc:
+        # The server is at fault, not the login. A traceback here reads as "your
+        # login broke" and invites a pointless second browser round.
+        # Catching the base is deliberate: every current and future member of this
+        # taxonomy means the same thing to a CLI user — the message, exit 1, no
+        # traceback. A subclass that ever needs different handling has to be caught
+        # above this clause, so add it there rather than narrowing this one.
         print(f"[login] error: {exc}", file=sys.stderr)
         return 1
     return 0

@@ -2,6 +2,107 @@
 
 ## [Unreleased] — 0.7.0
 
+### Fixed
+
+- **A brief outage at the authorization server sent every run to the browser for a login
+  that could not fix it.** `_pre_flight_refresh()` turned *any* non-200 from the token
+  endpoint into `ReauthenticationRequired`, which `ensure_login()` converts straight into a
+  browser prompt — so a `502`, a `503`, a `429`, or a Cloudflare error page in front of the
+  authorization server produced an interactive re-login that then asked the same unreachable
+  host for a token. Across a batch that is one impossible prompt per item. `httpx` transport
+  errors escaped unclassified entirely, so callers could not branch on them at all. This is
+  the 0.6.0 `login()` bug one layer up: there a completed login was discarded, here a live
+  refresh token was declared dead because the endpoint that would renew it was briefly down.
+  The failure is now classified by who answered and what they faulted, read from the RFC
+  6749 §5.2 JSON `error` body rather than the status. The grant is treated as dead for
+  exactly three codes — `invalid_grant` (the refresh token) and `invalid_client` /
+  `unauthorized_client` (the registration, which `login()` replaces by dropping the cached
+  `client_info` and re-running dynamic client registration) — on whatever status they
+  arrive with, which covers a non-compliant server reporting a revoked grant as `403`.
+  Everything else raises the new `TokenRefreshUnavailable` and leaves the refresh token
+  untouched: a `5xx`, a transport error, a `408` from a proxy that never passed the request
+  on, a `429`, a `temporarily_unavailable` or `server_error` code, a WAF block page, a `3xx`
+  to a captive portal, a `404` from a moved endpoint, a `200` whose body is not a token, and
+  the codes that fault the request rather than the credential (`invalid_request`,
+  `unsupported_grant_type`, `invalid_scope`) — for those, a browser round produces a fresh
+  token and then resends the identical bad request. §5.2 requires the `error` body on every
+  `400` and `401`, so a bare or HTML one is a proxy rather than the authorization server.
+  Nothing that stays out of the browser path
+  is a dead end: every message whose cause is ambiguous enough that a fresh registration
+  could still be the fix names `mcpgen login <server>` as the manual next step. A `200` is
+  decided by whether it parses as a token, so a server that pads a good response with a
+  blank `error` member still refreshes, and one that reports failure in-band with a `200`
+  (Slack's rotation endpoint) is still classified rather than swallowed.
+
+- **A refresh response that failed to parse printed the token it contained to stderr.** A
+  `200` from a token endpoint *is* the token response, so the near-misses that fail
+  validation — a `token_type` outside the `Bearer` literal, a non-integer `expires_in`, a
+  rotation response with no `access_token` — carry a live `access_token` and
+  `refresh_token`. The error naming that failure is printed by `mcpgen login` and by the
+  `generate-mcp-runner` template, i.e. into CI logs. Response bodies quoted in an error now
+  go through a redaction pass that drops `access_token`, `refresh_token`, and `id_token`
+  values in both JSON and form-encoded bodies, and the pydantic error — which quotes the
+  whole input back on a `missing` field — is reported by type rather than by message.
+  Everything else in the body is kept: `error`, `error_description`, and block-page text are
+  what make the message worth printing.
+
+- **The refresh request now sends `Accept: application/json`.** Servers that answer
+  form-encoded by default (GitHub's token endpoint among them) would otherwise present every
+  rejection — `invalid_grant` included — as a body with no OAuth error code in it, i.e. as
+  an unidentified proxy response, and a genuinely dead grant would never prompt for a login.
+
+- **A credential store that broke mid-login replaced the error the operator needed to
+  see.** `login()`'s `except BaseException` handler re-reads storage to decide whether the
+  flow got far enough to save a token; a corrupt `credentials.json` or a keyring backend
+  that started failing raised from inside that handler, discarding the original transport
+  error. An unreadable store is now treated as "nothing can be said about what was
+  produced": the original failure propagates, and the previous credential is not restored on
+  top of a store that cannot be read. The restore that follows it is guarded the same way —
+  a store that refuses the *write* (a read-only filesystem, a keyring that has started
+  refusing) would otherwise mask the original failure through the adjacent door.
+
+- **A wide exception group could still produce an unreadable "one-line" error.**
+  `_describe()` capped each leaf but not their number, so an N-leaf `BaseExceptionGroup`
+  rendered as N × ~215 characters on a single CLI line. The joined result is now capped too.
+
+- **Two concurrent `mcpgen` processes could corrupt each other's credential write.** Both
+  `FileTokenStorage._file_save()` and the client-config writer staged through a fixed
+  `.tmp` path. The staging name now carries the pid, matching the convention already used
+  for generated files. Note this fixes the corruption only: the last `os.replace` still
+  wins, so one process's update can be lost. Locking is not implemented.
+
+### Added
+
+- **`LoginWontHelp`**, exported from `mcpgen` — the base class for every auth failure
+  another browser round cannot fix. `PostLoginCheckFailed` and the new
+  `TokenRefreshUnavailable` both inherit from it, so batch callers catch one type and abort
+  instead of tracking a growing list. `ReauthenticationRequired` deliberately stays outside
+  it: there the browser *is* the fix, and folding it in would make one `except` clause
+  swallow both answers.
+
+- **`TokenRefreshUnavailable`**, exported from `mcpgen`. Raised when a cached grant was not
+  renewed for any reason other than the authorization server naming the credential dead.
+  The refresh token is untouched in every one of them, so the browser has nothing to
+  replace; the message says which case it was and whether retrying is the move.
+
+### Changed
+
+- **A token endpoint that rejects a dead grant with a bare `400`/`401` and no JSON `error`
+  body no longer triggers an automatic browser login.** This is the most visible change
+  here, and it is a deliberate trade. RFC 6749 §5.2 requires that body on exactly those two
+  statuses, so a bare or HTML one is far more often a proxy, a gateway, or a WAF than the
+  authorization server — and the old behaviour opened a browser that met the same block,
+  once per item across a batch. Servers that violate §5.2 lose the automatic prompt: they
+  now raise `TokenRefreshUnavailable`, whose message names `mcpgen login <server>` as the
+  manual route. If you hit this against a real authorization server, that command still
+  recovers it in one step.
+
+- **A refresh-time `502` no longer raises `ReauthenticationRequired`.** Consumers following
+  `doc/USAGE.md` catch only that type today, so their handler stops firing for this case —
+  which is the point, since it opened a browser that could not help. Catching
+  `LoginWontHelp` alongside it is the one-line migration; `mcpgen login` and the
+  `generate-mcp-runner` OAuth template already do.
+
 ## [0.6.0] — 2026-08-24
 
 ### Fixed

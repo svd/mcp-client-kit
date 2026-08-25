@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import $module_name
 
-from mcpgen import McpBridgeCaller, PostLoginCheckFailed, ensure_login
+from mcpgen import LoginWontHelp, McpBridgeCaller, ensure_login
 
 SERVER_URL = "$launch"
 SERVER_NAME = "$server_name"
@@ -25,12 +25,13 @@ SERVER_NAME = "$server_name"
 
 async def main() -> None:
     # Ensure a valid OAuth token is available (silent refresh or browser prompt).
-    # PostLoginCheckFailed means the token was issued and cached but the server
-    # rejected the check that follows — logging in again cannot fix it, so stop
-    # rather than sending the user back to the browser.
+    # LoginWontHelp covers both failures the browser cannot fix: the token was
+    # issued but the check after it failed, or the token endpoint was unreachable
+    # so the cached grant could not be renewed. Stop rather than sending the user
+    # back to the browser.
     try:
         await ensure_login(SERVER_NAME)
-    except PostLoginCheckFailed as exc:
+    except LoginWontHelp as exc:
         print(f"[{SERVER_NAME}] {exc}", file=sys.stderr)
         sys.exit(1)
     caller = McpBridgeCaller(url=SERVER_URL)

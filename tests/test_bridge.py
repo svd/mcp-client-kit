@@ -909,6 +909,54 @@ def test_login_restores_credential_on_oauth_failure(tmp_path):
     assert data["acme"] == original_entry
 
 
+def test_login_survives_a_credential_store_that_cannot_be_written(tmp_path):
+    """A restore that cannot happen must not become the error the operator sees.
+
+    Guarding the re-read alone left the adjacent door open: the restore right after it
+    calls `_save`, and a keyring backend that has started refusing, a full disk, or a
+    permission change fails on write at least as readily as on read. The save error
+    would then replace the original failure — the same masking bug, one line down.
+
+    The stash is a nicety; the original failure is the answer. Losing the restore is
+    survivable (the credential that could not be written was already unusable enough
+    to be worth re-authenticating), losing the diagnosis is not.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "orig_tok"}}}))
+    os.chmod(creds, 0o600)
+
+    async def fake_callback_server():
+        fut = asyncio.get_event_loop().create_future()
+        fut.set_result(("code", "state"))
+        return 9999, fut
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield  # makes this an async generator; unreachable
+
+    real_save = _bridge.FileTokenStorage._save
+
+    def refuses_to_write_the_restore(self, data):
+        # Keyed on what is being written, not on call count: the stash-clearing save
+        # before the flow must succeed, and only the restore in the handler must fail.
+        if data.get("acme", {}).get("tokens", {}).get("access_token") == "orig_tok":
+            raise OSError("Read-only file system")
+        real_save(self, data)
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", fake_callback_server),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+            patch.object(_bridge.FileTokenStorage, "_save", refuses_to_write_the_restore),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+
+
 def test_login_no_prior_credential_does_not_create_on_failure(tmp_path):
     """login() failure when no prior credential existed leaves no partial entry."""
     creds = tmp_path / "credentials.json"
@@ -1250,13 +1298,77 @@ def test_login_kept_token_is_refreshable_without_a_new_login(tmp_path):
     creds.write_text(json.dumps(data))
 
     posted = {}
+    endpoint = _token_endpoint_replying(
+        200, json_body={"access_token": "renewed_tok", "token_type": "bearer"}, record=posted
+    )
+
+    asyncio.run(_run_pre_flight(creds, endpoint)())
+
+    assert posted["url"] == "https://auth.example.com/token"
+    assert posted["data"]["refresh_token"] == "fresh_refresh", "the kept grant is what gets renewed"
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "renewed_tok"
+
+
+# ---------------------------------------------------------------------------
+# _pre_flight_refresh() — classifying what comes back from the token endpoint
+# ---------------------------------------------------------------------------
+
+
+def _refreshable_creds(tmp_path, token_endpoint="https://auth.example.com/token"):
+    """A credential that is past expiry and has everything needed to renew itself."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(
+        json.dumps(
+            {
+                "acme": {
+                    "tokens": {
+                        "access_token": "stale_tok",
+                        "refresh_token": "live_refresh",
+                        "expires_at": 1,  # long past; forces the refresh
+                    },
+                    "client_info": {"client_id": "acme_id"},
+                    "token_endpoint": token_endpoint,
+                }
+            }
+        )
+    )
+    os.chmod(creds, 0o600)
+    return creds
+
+
+class _CaseInsensitiveHeaders(dict):
+    """The one behaviour of `httpx.Headers` the classification depends on."""
+
+    def get(self, key, default=None):
+        return super().get(key.lower(), default)
+
+
+def _token_endpoint_replying(status_code, body="", json_body=None, record=None, headers=None):
+    """Fake httpx.AsyncClient whose token-endpoint POST answers with *status_code*.
+
+    `.json()` parses `.text` the way httpx does — so a non-JSON body raises rather
+    than yielding an empty dict. The classification reads the body shape to tell an
+    authorization server apart from a WAF in front of one, so a fake that quietly
+    turned an HTML error page into `{}` would let those tests pass for free.
+
+    `.headers` is case-insensitive on lookup, as httpx's is: the code reads
+    `retry-after` while servers send `Retry-After`, and a plain dict would make that
+    silently miss.
+
+    Pass *record* a dict to capture the posted url, form data, and request headers.
+    """
+    text = json.dumps(json_body) if json_body is not None else body
+    sent_headers = {k.lower(): v for k, v in (headers or {}).items()}
 
     class _FakeResponse:
-        status_code = 200
+        def __init__(self):
+            self.status_code = status_code
+            self.text = text
+            self.headers = _CaseInsensitiveHeaders(sent_headers)
 
         @staticmethod
         def json():
-            return {"access_token": "renewed_tok", "token_type": "bearer"}
+            return json.loads(text)
 
     class _FakeClient:
         async def __aenter__(self):
@@ -1265,18 +1377,604 @@ def test_login_kept_token_is_refreshable_without_a_new_login(tmp_path):
         async def __aexit__(self, *exc):
             return False
 
-        async def post(self, url, data):
-            posted["url"] = url
+        async def post(self, url, data, headers=None):
+            if record is not None:
+                record["url"] = url
+                record["data"] = data
+                record["headers"] = headers
             return _FakeResponse()
 
-    async def refresh():
+    return _FakeClient
+
+
+def _run_pre_flight(creds, fake_client):
+    """Drive _pre_flight_refresh against *creds* with httpx.AsyncClient faked out."""
+
+    async def run():
         storage = _bridge.FileTokenStorage("acme", creds)
-        with patch("mcpgen._bridge.httpx.AsyncClient", _FakeClient):
+        with patch("mcpgen._bridge.httpx.AsyncClient", fake_client):
             await _bridge._pre_flight_refresh("acme", storage)
 
-    asyncio.run(refresh())
-    assert posted["url"] == "https://auth.example.com/token"
+    return run
+
+
+@pytest.mark.parametrize("status_code", [500, 502, 503, 504, 408, 429])
+def test_pre_flight_refresh_does_not_demand_a_new_login_when_the_endpoint_is_down(tmp_path, status_code):
+    """A retryable status from the authorization server must not open the browser.
+
+    The refresh token is untouched — what failed is the host that would renew it,
+    and another browser round asks that same unreachable host for a token. Before
+    this classification every non-200 became ReauthenticationRequired, so a batch
+    produced one impossible interactive login per item.
+
+    408 belongs here for the same reason as a 5xx even though it is a 4xx: RFC 6749
+    §5.2 has the token endpoint report a dead grant as 400 (401 for client auth), so
+    a 408 is the proxy in front of it saying the request never got processed.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, "<html>bad gateway</html>"))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+    message = str(excinfo.value)
+    assert str(status_code) in message
+    assert "mcpgen login" not in message, "re-logging in cannot fix an unreachable endpoint"
+    # The credential must survive: it is what the retry will use.
+    assert json.loads(creds.read_text())["acme"]["tokens"]["refresh_token"] == "live_refresh"
+
+
+@pytest.mark.parametrize("status_code", [403, 302, 404, 405])
+def test_pre_flight_refresh_does_not_demand_a_new_login_for_a_block_page(tmp_path, status_code):
+    """A WAF blocking the request is not the authorization server rejecting the grant.
+
+    403 is the one that bites: a Cloudflare block, a bot-fight challenge, an IP
+    denylist. Classifying it as a dead grant opens a browser that meets the very
+    same block — the impossible re-prompt this whole change exists to remove. Same
+    for a 3xx to a captive portal and a 404 from a moved endpoint: in none of them
+    did a token request ever reach the authorization server.
+
+    The type is what matters, not the wording: `ensure_login` branches on
+    ReauthenticationRequired alone, so anything else keeps the browser shut. The
+    message does name `mcpgen login` as a manual last resort, which is a suggestion
+    the operator can weigh rather than a browser opening on its own.
+    """
+    creds = _refreshable_creds(tmp_path)
+    blocked = "<html><body>Access denied (Cloudflare error 1020)</body></html>"
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, blocked))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+    assert json.loads(creds.read_text())["acme"]["tokens"]["refresh_token"] == "live_refresh"
+
+
+def test_pre_flight_refresh_believes_an_oauth_error_on_any_status(tmp_path):
+    """Status alone does not decide it: the RFC error format identifies the speaker.
+
+    A server that reports a revoked grant as 403 with a proper `error` body is
+    non-compliant but real, and classifying it as retryable would strand the user —
+    `ensure_login` would never offer the browser that is the actual fix. Nothing in
+    front of an authorization server invents an `error` code, so the body is the
+    thing worth trusting when the status disagrees.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(403, json_body={"error": "invalid_grant"}))
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(run())
+
+    assert "mcpgen login acme" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "status_code,error_code",
+    [
+        (400, "invalid_request"),  # malformed request — the same one login would resend
+        (400, "unsupported_grant_type"),  # refresh_token not enabled on this client
+        (400, "invalid_scope"),
+    ],
+)
+def test_pre_flight_refresh_does_not_demand_a_new_login_for_a_faulted_request(tmp_path, status_code, error_code):
+    """An `error` body is not by itself proof the grant died — the code says which it is.
+
+    RFC 6749 §5.2 splits these: `invalid_grant` and `invalid_client` fault the
+    credential, everything else faults the request. The first classification here read
+    only the *shape* of the body, so a server answering `invalid_request` sent the user
+    to a browser that produced a fresh token and then resent the identical malformed
+    refresh — the re-prompt-per-item loop this whole change exists to remove, reached
+    by a different door.
+
+    The wording assertion is load-bearing. Every other branch also raises
+    TokenRefreshUnavailable and also embeds the body, so a test that only checked the
+    type and the echoed code would pass with this branch deleted outright — and the
+    operator would then be told there was "no OAuth error body" when there was one.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, json_body={"error": error_code}))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    message = str(excinfo.value)
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+    assert "rejected the refresh request itself" in message, "this branch, not the no-error-body fallback"
+    assert error_code in message, "the operator needs the code to act on it"
+    # Diagnosis first, but never a dead end: `unauthorized_client` and codes from
+    # outside the RFC can mean a registration a fresh login would replace.
+    assert "mcpgen login acme" in message
+    assert json.loads(creds.read_text())["acme"]["tokens"]["refresh_token"] == "live_refresh"
+
+
+@pytest.mark.parametrize(
+    "status_code,error_code",
+    [
+        (403, "temporarily_unavailable"),  # a status that is otherwise a block page
+        (400, "server_error"),  # a status that would otherwise read as a rejection
+    ],
+)
+def test_pre_flight_refresh_reads_a_retryable_error_code_on_any_status(tmp_path, status_code, error_code):
+    """These codes name a passing condition, so the advice is retry — not reconfigure.
+
+    Each pairs the code with a status that would classify differently on its own,
+    which is what makes `_RETRYABLE_REFRESH_ERRORS` load-bearing: drop the set and
+    these fall through to the configuration-problem branch, telling the operator to
+    audit a client that is fine while the server is merely busy.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, json_body={"error": error_code}))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    message = str(excinfo.value)
+    assert "retry later" in message
+    assert "configuration problem" not in message, "nothing here is misconfigured"
+    assert json.loads(creds.read_text())["acme"]["tokens"]["refresh_token"] == "live_refresh"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '["invalid_grant"]',  # a JSON array — .get() does not exist on a list
+        '"invalid_grant"',  # a bare JSON string, same
+        "123",
+        '{"error": 123}',  # an object, but the code is not a string
+        '{"error": {"code": "invalid_grant"}}',  # nested, not the §5.2 shape
+        '{"error": null}',
+    ],
+)
+def test_oauth_error_code_reads_only_the_rfc_shape(body):
+    """A body that is JSON but not §5.2 must read as "no error code", not crash or match.
+
+    Both guards in `_oauth_error_code` are load-bearing and neither is obvious. Valid
+    JSON that is not an object makes `.get` an AttributeError, and a non-string `error`
+    would otherwise flow into the frozenset lookups as an int or a dict. Dropping the
+    `isinstance` check passes every other test in this file, so this is the only thing
+    holding it.
+    """
+
+    class _Resp:
+        text = body
+
+        @staticmethod
+        def json():
+            return json.loads(body)
+
+    assert _bridge._oauth_error_code(_Resp()) is None
+
+
+def test_ensure_login_all_stops_at_the_first_failure_a_browser_cannot_fix(tmp_path):
+    """The batch case the taxonomy exists for: abort, do not walk the whole list.
+
+    `ensure_login_all` is a plain loop, so nothing catches LoginWontHelp on its behalf
+    — which is the design. A caller that wrapped each server instead would be back to
+    one impossible prompt per item.
+    """
+    creds = _refreshable_creds(tmp_path)
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.httpx.AsyncClient", _token_endpoint_replying(503, "unavailable")),
+            patch("mcpgen._bridge.login", AsyncMock()) as fake_login,
+        ):
+            with pytest.raises(_bridge.LoginWontHelp):
+                await _bridge.ensure_login_all(["acme", "beta", "gamma"], creds)
+        fake_login.assert_not_called()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("error_code", ["invalid_grant", "invalid_client", "unauthorized_client"])
+def test_ensure_login_re_registers_when_the_registration_is_what_failed(tmp_path, error_code):
+    """A condition re-registration can repair must not need a human to notice it.
+
+    `unauthorized_client` is the one that argues for itself. Filing it as
+    TokenRefreshUnavailable reads well interactively — the message explains the likely
+    misconfiguration — but automation and headless callers never see a prompt, so a
+    condition `login()` fixes on its own becomes a permanent failure until a person
+    runs the printed command. A server whose policy genuinely forbids refresh for this
+    client answers the same way to the new registration, costing one prompt per expiry;
+    that is the cheaper of the two errors.
+    """
+    creds = _refreshable_creds(tmp_path)
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.httpx.AsyncClient", _token_endpoint_replying(400, json_body={"error": error_code})),
+            patch("mcpgen._bridge.login", AsyncMock()) as fake_login,
+        ):
+            await _bridge.ensure_login("acme", creds)
+        assert fake_login.call_count == 1
+
+    asyncio.run(run())
+
+
+def test_pre_flight_refresh_passes_retry_after_through(tmp_path):
+    """ "Retry later" is not actionable without a when, and the server often sends one.
+
+    The header name is checked case-insensitively, as httpx does: servers send
+    `Retry-After`, and reading a plain dict for `retry-after` would drop it silently.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(429, "slow down", headers={"Retry-After": "120"})
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert "Retry-After: 120" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_says_nothing_about_retry_after_when_none_is_sent(tmp_path):
+    """No header must not render an empty or `None` value into the operator's line."""
+    creds = _refreshable_creds(tmp_path)
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(503, "unavailable"))())
+
+    assert "Retry-After" not in str(excinfo.value)
+    assert "None" not in str(excinfo.value)
+
+
+def test_pre_flight_refresh_takes_a_200_that_carries_a_token(tmp_path):
+    """A good token response is not disqualified by a stray `error` member.
+
+    Some servers pad every response with `"error": ""`. Reading the error code before
+    the token would fail a refresh that plainly succeeded, and `ensure_login` would
+    then open a browser for a credential that had just been renewed.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(200, json_body={"access_token": "renewed_tok", "token_type": "bearer", "error": ""})
+
+    asyncio.run(_run_pre_flight(creds, fake)())
+
     assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "renewed_tok"
+
+
+def test_pre_flight_refresh_demands_a_new_login_for_a_dead_grant_reported_with_200(tmp_path):
+    """Failure reported in-band on a 200 still reaches the browser when the grant died.
+
+    Slack's token-rotation endpoint answers `{"ok": false, "error": ...}` with a 200.
+    Deciding on the status alone would file a revoked refresh token as an unparseable
+    body — retryable forever, and `ensure_login` never offers the fix.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(200, json_body={"ok": False, "error": "invalid_grant"})
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert "mcpgen login acme" in str(excinfo.value)
+
+
+def test_ensure_login_does_not_open_the_browser_for_a_faulted_request(tmp_path):
+    """The end-to-end half of the case above: no browser, through the real entry point."""
+    creds = _refreshable_creds(tmp_path)
+
+    async def run():
+        with (
+            patch(
+                "mcpgen._bridge.httpx.AsyncClient",
+                _token_endpoint_replying(400, json_body={"error": "invalid_request"}),
+            ),
+            patch("mcpgen._bridge.login", AsyncMock()) as fake_login,
+        ):
+            with pytest.raises(_bridge.TokenRefreshUnavailable):
+                await _bridge.ensure_login("acme", creds)
+        fake_login.assert_not_called()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status_code", [400, 401])
+def test_pre_flight_refresh_does_not_demand_a_new_login_for_a_bare_rejection(tmp_path, status_code):
+    """A 400/401 with no OAuth error body did not come from the authorization server.
+
+    §5.2 requires the JSON `error` body on exactly these two statuses, so a bare or
+    HTML one is an auth proxy, a WAF, or a gateway — none of which a browser round
+    reaches. This used to take the status at face value on the theory that a terse
+    non-compliant server might mean a dead grant; that theory cost a guaranteed
+    useless browser prompt on every proxy 400 to buy an auto-prompt for a server that
+    violates the spec. The message carries `mcpgen login` instead, so the terse-server
+    case still has a way out — a printed command rather than a browser nobody asked for.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, "<html>Forbidden</html>"))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+    assert "mcpgen login acme" in str(excinfo.value), "the manual fallback is the only way out here"
+
+
+def test_pre_flight_refresh_classifies_a_200_that_is_not_a_token(tmp_path):
+    """An interstitial served with 200 must not escape as a raw parse error.
+
+    It used to reach `OAuthToken(**resp.json())` and raise JSONDecodeError or a
+    pydantic ValidationError, which no caller catches: `mcpgen login` printed a
+    traceback and batch callers could not branch on it at all.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(200, "<html>sign in to continue</html>"))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable):
+        asyncio.run(run())
+
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "stale_tok"
+
+
+@pytest.mark.parametrize(
+    "status_code,body",
+    [
+        (400, '{"error":"invalid_grant"}'),
+        (401, '{"error":"invalid_client"}'),
+        (400, '{"error":"unauthorized_client"}'),
+        # The description is free text and irrelevant to the decision.
+        (400, '{"error":"invalid_grant","error_description":"Token is not active"}'),
+    ],
+)
+def test_pre_flight_refresh_demands_a_new_login_when_the_grant_is_dead(tmp_path, status_code, body):
+    """The OAuth error codes a browser round *does* fix.
+
+    `invalid_grant` is the refresh token itself. `invalid_client` and
+    `unauthorized_client` are the registration, which `login()` replaces by dropping
+    the cached `client_info` and re-running dynamic client registration. Narrowing the
+    dead-grant test to the error code must not swallow these — `ensure_login` opens
+    the browser for this type and no other, so misfiling them leaves an expired
+    credential with no automatic way back.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, body))
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(run())
+
+    assert "mcpgen login acme" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_classifies_a_transport_error(tmp_path):
+    """A connect error used to escape unclassified, so callers could not branch on it."""
+    creds = _refreshable_creds(tmp_path)
+    original = httpx.ConnectError("[Errno 8] nodename nor servname provided")
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, data, headers=None):
+            raise original
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _FakeClient)())
+
+    assert excinfo.value.__cause__ is original
+    assert "ConnectError" in str(excinfo.value), "the operator has to see what went wrong"
+
+
+def test_pre_flight_refresh_classifies_an_unusable_token_endpoint(tmp_path):
+    """Not every httpx failure is an httpx.HTTPError, and the Raises contract is total.
+
+    `InvalidURL` and `CookieConflict` derive from Exception directly, so `except
+    httpx.HTTPError` let them escape as neither of the two documented types —
+    unclassified, which is the exact failure this classification exists to remove.
+    `credentials.json` is hand-editable, so a token_endpoint that is not a usable URL
+    is a reachable state and not a hypothetical.
+    """
+    creds = _refreshable_creds(tmp_path, token_endpoint="not a url")
+    original = httpx.InvalidURL("Invalid URL component 'scheme'")
+    assert not isinstance(original, httpx.HTTPError), "the premise of this test"
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, data, headers=None):
+            raise original
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _FakeClient)())
+
+    assert excinfo.value.__cause__ is original
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+
+
+@pytest.mark.parametrize("status_code", [503, 429])
+def test_pre_flight_refresh_reads_the_grant_before_the_retryable_status(tmp_path, status_code):
+    """When the status says "retry" and the body says "dead grant", the body wins.
+
+    The two conditions overlap — a server can shed load with a 503 and still name
+    `invalid_grant`, and a rate limiter can sit in front of a real rejection. The
+    branch order resolves it deliberately, and it must resolve it this way: a proxy
+    does not invent an RFC error code, so the server did speak. Getting it wrong in
+    this direction costs one unnecessary browser prompt; getting it wrong the other
+    way files a genuine revocation as "retry later", and ensure_login then never
+    offers the browser at all — no route back without a human reading the message.
+
+    Pinned because the ordering is otherwise invisible to the suite: reversing the
+    two blocks reads like a harmless cleanup, and every other test still passes.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, json_body={"error": "invalid_grant"}))
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(run())
+
+    assert "mcpgen login acme" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_does_not_print_the_token_it_could_not_parse(tmp_path):
+    """A 200 that fails validation is still a token response — it must not reach a log.
+
+    This is the dangerous shape precisely because it looks harmless: a `token_type`
+    outside the `Bearer` literal, or a non-integer `expires_in`, fails OAuthToken and
+    lands on the error path with a live access_token and refresh_token in the body.
+    Both cli.py and the generated runner print that message to stderr, so an echoed
+    body is a credential in CI logs. pydantic v2 also embeds the rejected input_value
+    in its own message, which is why the exception type is named instead of described.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        200,
+        json_body={
+            "access_token": "SECRET_ACCESS",
+            "refresh_token": "SECRET_REFRESH",
+            "id_token": "SECRET_ID",
+            "token_type": "not-a-bearer",
+            "error_description": "issued but malformed",
+        },
+    )
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    message = str(excinfo.value)
+    for secret in ("SECRET_ACCESS", "SECRET_REFRESH", "SECRET_ID"):
+        assert secret not in message, f"{secret} leaked into an error printed to stderr"
+    assert "<redacted>" in message
+    # Redaction is not censorship: what makes the message worth printing has to survive.
+    assert "issued but malformed" in message
+    assert "mcpgen login acme" in message
+
+
+def test_pre_flight_refresh_does_not_let_the_validation_error_carry_the_body(tmp_path):
+    """Redacting the body is not enough while pydantic quotes the body back at us.
+
+    Verified against pydantic 2.13: a *field-level* failure quotes only that field, but
+    a `missing` error quotes the whole input — `input_value={'refresh_token': '...'}`.
+    A response that rotates the refresh token but omits `access_token` produces exactly
+    that, so describing the exception re-prints the credential the excerpt just scrubbed.
+    Naming the exception type instead is what closes it; this pins that choice.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(200, json_body={"refresh_token": "SECRET_REFRESH"})
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert "SECRET_REFRESH" not in str(excinfo.value)
+    assert "ValidationError" in str(excinfo.value), "the operator still has to see what failed"
+
+
+def test_pre_flight_refresh_redacts_a_form_encoded_token_body(tmp_path):
+    """The JSON path is not the only one that can carry a credential.
+
+    GitHub's token endpoint answers form-encoded unless asked otherwise, and a body
+    that does not parse as JSON skips the member-wise redaction entirely. Without the
+    regex fallback the same secret leaks through a differently-encoded door.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = "access_token=SECRET_ACCESS&refresh_token=SECRET_REFRESH&scope=repo&token_type=bearer"
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    message = str(excinfo.value)
+    assert "SECRET_ACCESS" not in message
+    assert "SECRET_REFRESH" not in message
+    assert "scope=repo" in message, "the non-secret members are the diagnostic"
+
+
+def test_pre_flight_refresh_asks_the_token_endpoint_for_json(tmp_path):
+    """Without Accept: application/json some servers never send an OAuth error body.
+
+    The whole classification reads that body to tell the authorization server apart
+    from whatever stands in front of it. A server defaulting to form-encoded — GitHub
+    again — would present every rejection, `invalid_grant` included, as a body with no
+    error code, i.e. as a block page, and a genuinely dead grant would never prompt.
+    """
+    creds = _refreshable_creds(tmp_path)
+    record = {}
+    fake = _token_endpoint_replying(200, json_body={"access_token": "tok", "token_type": "bearer"}, record=record)
+
+    asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert record["headers"]["Accept"] == "application/json"
+
+
+def test_pre_flight_refresh_marks_a_truncated_body_as_truncated(tmp_path):
+    """An operator must be able to tell a short body from the front of a huge one.
+
+    `_describe` appends an ellipsis when it truncates; the response-body excerpt used
+    not to, so a 20KB block page and a 200-character one read identically.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(503, "<html>" + "x" * 5000 + "</html>"))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    assert "…" in str(excinfo.value)
+
+
+def test_ensure_login_does_not_open_the_browser_when_the_token_endpoint_is_down(tmp_path):
+    """The regression this classification exists for: no browser prompt on an outage.
+
+    ensure_login() catches ReauthenticationRequired and only that, so the fix is
+    load-bearing here — misclassify the 503 and login() runs, opening a browser the
+    outage guarantees cannot help.
+    """
+    creds = _refreshable_creds(tmp_path)
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.httpx.AsyncClient", _token_endpoint_replying(503, "unavailable")),
+            patch("mcpgen._bridge.login", AsyncMock()) as fake_login,
+        ):
+            with pytest.raises(_bridge.TokenRefreshUnavailable):
+                await _bridge.ensure_login("acme", creds)
+        fake_login.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_pre_flight_refresh_still_renews_on_200(tmp_path):
+    """The happy path stays untouched by the classification above."""
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(200, json_body={"access_token": "renewed_tok", "token_type": "bearer"})
+
+    asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "renewed_tok"
+
+
+def test_the_failures_a_browser_cannot_fix_share_one_catchable_type(tmp_path):
+    """Batch callers catch LoginWontHelp once instead of tracking a growing list.
+
+    ReauthenticationRequired must stay outside it: there the browser *is* the fix,
+    and folding it in would make one except clause swallow both answers.
+    """
+    assert issubclass(_bridge.PostLoginCheckFailed, _bridge.LoginWontHelp)
+    assert issubclass(_bridge.TokenRefreshUnavailable, _bridge.LoginWontHelp)
+    assert not issubclass(_bridge.ReauthenticationRequired, _bridge.LoginWontHelp)
 
 
 def test_login_says_so_when_the_kept_token_cannot_be_refreshed(tmp_path):
@@ -1372,6 +2070,113 @@ def test_describe_caps_a_runaway_exception_message():
     assert len(described) < 400
     assert described.startswith("RuntimeError: xxx")
     assert described.endswith("…")
+
+
+def test_describe_caps_a_runaway_exception_group():
+    """Leaves are bounded but their number is not — the join has to be capped too.
+
+    Without this, a group of N fat leaves produces an N × ~215-character "one-line"
+    message, which is the same unreadable CLI line the per-leaf cap exists to stop.
+    """
+    group = ExceptionGroup("unhandled errors in a TaskGroup", [RuntimeError("x" * 5000) for _ in range(20)])
+
+    described = _bridge._describe(group)
+
+    assert len(described) < 800
+    assert described.endswith("…")
+    assert described.startswith("RuntimeError: xxx")
+
+
+def test_login_survives_an_unreadable_credential_store(tmp_path):
+    """A corrupt store must not replace the failure the operator actually needs to see.
+
+    The re-read lives inside `except BaseException`, so a JSONDecodeError from it
+    used to propagate in place of the transport error that got us there — and the
+    restore would have written the stash on top of an unreadable file.
+
+    The store is readable at the start (that read stashes the previous entry) and
+    breaks during the flow: a keyring backend that starts failing, or a file another
+    process truncated. A store that is already unreadable never reaches the handler.
+
+    A previous credential exists, so the restore branch is live — writing the stash
+    back on top of a store that could not be read is the one move that could turn a
+    server outage into a lost credential.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "old_tok"}}}))
+    os.chmod(creds, 0o600)
+    original = RuntimeError("502 Bad Gateway")
+    run = _run_login_failing_after_exchange(creds, original, {"access_token": "fresh_tok"})
+
+    real_load = _bridge.FileTokenStorage._load
+
+    def breaks_once_the_new_token_is_written(self):
+        # Keyed on state, not call count: everything up to the token exchange must
+        # read normally, and only the handler's re-read sees the broken store.
+        data = real_load(self)
+        if data.get("acme", {}).get("tokens", {}).get("access_token") == "fresh_tok":
+            raise json.JSONDecodeError("Expecting value", "", 0)
+        return data
+
+    with (
+        patch.object(_bridge.FileTokenStorage, "_load", breaks_once_the_new_token_is_written),
+        pytest.raises(RuntimeError) as excinfo,
+    ):
+        asyncio.run(run())
+
+    on_disk = json.loads(creds.read_text())
+    assert on_disk["acme"]["tokens"]["access_token"] == "fresh_tok", (
+        "the stash must not be restored over a store that could not be read"
+    )
+
+    assert excinfo.value is original
+    assert not isinstance(excinfo.value, json.JSONDecodeError)
+
+
+def test_file_storage_stages_writes_under_a_pid_unique_name(tmp_path):
+    """A fixed ".tmp" lets two mcpgen processes clobber each other's partial write."""
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("acme", creds)
+    staged = []
+
+    real_replace = os.replace
+
+    def record(src, dst):
+        staged.append(str(src))
+        real_replace(src, dst)
+
+    with patch("mcpgen._bridge.os.replace", record):
+        storage._save({"acme": {"tokens": {"access_token": "tok"}}})
+
+    assert len(staged) == 1
+    assert str(os.getpid()) in staged[0], "concurrent processes must not share a staging path"
+    assert not list(tmp_path.glob("*.tmp*")), "the staging file is renamed away, not left behind"
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "tok"
+
+
+def test_client_config_stages_writes_under_a_pid_unique_name(tmp_path):
+    """The client config writer got the same fix and needs the same pin.
+
+    Two files, one convention: leaving either on a fixed ".tmp" reinstates the
+    collision for that file alone, which is exactly the kind of asymmetry a later
+    refactor restores by accident.
+    """
+    target = tmp_path / "config.json"
+    staged = []
+
+    real_replace = os.replace
+
+    def record(src, dst):
+        staged.append(str(src))
+        real_replace(src, dst)
+
+    with patch("mcpgen._bridge.os.replace", record):
+        _bridge._save_client_config({"cred_backend": "keyring"}, target)
+
+    assert len(staged) == 1
+    assert str(os.getpid()) in staged[0], "concurrent processes must not share a staging path"
+    assert not list(tmp_path.glob("*.tmp*"))
+    assert json.loads(target.read_text())["cred_backend"] == "keyring"
 
 
 def test_sdk_saves_tokens_before_initialize_returns(tmp_path):

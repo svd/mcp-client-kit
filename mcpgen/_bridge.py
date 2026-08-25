@@ -46,6 +46,7 @@ import asyncio
 import errno as _errno
 import json
 import os
+import re
 import shlex
 import stat
 import sys
@@ -105,7 +106,7 @@ def _save_client_config(updates: dict, path: Path | None = None) -> None:
     data = _load_client_config(target)
     data.update(updates)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(".tmp")
+    tmp = target.with_name(f"{target.name}.tmp.{os.getpid()}")  # see FileTokenStorage._file_save
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, json.dumps(data, indent=2).encode())
@@ -394,6 +395,39 @@ def _explain_registration_error(exc: OAuthRegistrationError) -> OAuthRegistratio
 # Treat a cached token as expired this many seconds before its real expiry.
 _MARGIN = 120
 
+# Sub-500 statuses from the token endpoint that mean "ask again later", not "the
+# grant is dead":
+#   408 — the request was never processed. It comes from the proxy layer, not the
+#         authorization server, and RFC 9110 §15.5.9 says to repeat it.
+#   429 — rate limited. The next attempt is expected to succeed.
+_RETRYABLE_REFRESH_STATUS = frozenset({408, 429})
+
+# The RFC 6749 §5.2 error codes that mean the cached credential itself is gone, so
+# a browser round is the fix:
+#   invalid_grant       — the refresh token is expired, revoked, or was never ours.
+#   invalid_client      — the client registration was rejected.
+#   unauthorized_client — this client may not use the refresh_token grant.
+# The last two are about the registration rather than the token, and `login()` drops
+# the cached `client_info` before it runs, so the SDK registers a new client: it does
+# replace what failed. A server whose *policy* forbids refresh for this client class
+# will answer the same way to the new registration, so that case is not fixed — but it
+# still logs in, and the alternative is worse. Automation and headless callers get no
+# browser prompt at all, so leaving a condition that re-registration can repair out of
+# this set turns it into a permanent hard failure recoverable only by a human running
+# a command. One avoidable prompt per expiry beats no route back.
+#
+# The remaining §5.2 codes (invalid_request, unsupported_grant_type, invalid_scope)
+# fault the *request*: the grant is untouched, and logging in again resends it.
+_DEAD_GRANT_ERRORS = frozenset({"invalid_grant", "invalid_client", "unauthorized_client"})
+
+# Error codes that name a temporary condition rather than a permanent one. §5.2 does
+# not define these — they belong to the authorization *endpoint* in §4.1.2.1 — but
+# servers reuse them at the token endpoint, and both mean "the same request may work
+# later". RFC 8628's `slow_down` is deliberately absent: it is a device-flow polling
+# code with no meaning for a refresh_token grant, so accepting it here would only
+# widen the set with a case that cannot legitimately arrive.
+_RETRYABLE_REFRESH_ERRORS = frozenset({"temporarily_unavailable", "server_error"})
+
 # How long the interactive login waits for the browser to hit the local callback
 # server. Some authorization servers drop the user on cancel without an error
 # redirect, so the callback simply never arrives — bound the wait rather than
@@ -404,19 +438,41 @@ _CALLBACK_TIMEOUT = 300
 
 
 class ReauthenticationRequired(Exception):
-    """Tokens absent or refresh failed. Run: mcpgen login <server>"""
+    """Tokens absent or the grant is dead. Run: mcpgen login <server>"""
 
 
-class PostLoginCheckFailed(Exception):
-    """The OAuth flow finished and the token is cached, but the check after it failed.
+class LoginWontHelp(Exception):
+    """Base for auth failures another browser round cannot fix.
 
     The counterpart to ``ReauthenticationRequired``, and deliberately not named for
-    a cause: the token was issued, which says nothing about whether the resource
-    server accepted it. A 502 from the origin, a post-login 401 over scope or
-    audience, and an MCP-level error from ``list_tools()`` all raise this. What
-    they have in common — and the only thing a caller can act on — is that another
-    browser round will not fix them. Batch callers should abort here rather than
-    re-prompting once per item; that distinction is why this type exists.
+    a cause: what these failures have in common — and the only thing a caller can
+    act on — is that sending the user through the browser again changes nothing.
+    Batch callers should catch this and abort rather than re-prompting once per
+    item; that distinction is why the type exists. Catch a subclass only when the
+    difference between them matters.
+    """
+
+
+class PostLoginCheckFailed(LoginWontHelp):
+    """The OAuth flow finished and the token is cached, but the check after it failed.
+
+    The token was issued, which says nothing about whether the resource server
+    accepted it. A 502 from the origin, a post-login 401 over scope or audience,
+    and an MCP-level error from ``list_tools()`` all raise this.
+    """
+
+
+class TokenRefreshUnavailable(LoginWontHelp):
+    """The cached grant was not renewed, and no browser round would have changed that.
+
+    Everything the token endpoint can answer that is *not* the authorization server
+    naming a dead credential lands here: a transport error, a 5xx, a retryable
+    status or error code, a block page from whatever stands in front of the server,
+    and an error code that faults the request rather than the grant. What they share
+    is that the refresh token is untouched — so the browser has nothing to replace,
+    and re-running the flow only repeats the same failure.
+
+    The message says which one it was, and whether retrying is the move.
     """
 
 
@@ -466,7 +522,16 @@ class FileTokenStorage(TokenStorage):
         parent = self._path.parent
         parent.mkdir(parents=True, exist_ok=True)
         os.chmod(parent, 0o700)
-        tmp = self._path.with_suffix(".tmp")
+        # Pid-unique staging name, same convention as cli._atomic_write_text: a fixed
+        # ".tmp" lets two mcpgen processes clobber each other's partial write. It does
+        # not make concurrent writes safe — the last os.replace still wins, so one
+        # process's credential update can be lost. That wants a lock or a
+        # compare-and-set; this only stops the two from corrupting each other's file.
+        # The trade it does make: the fixed name left at most one stale file behind, while
+        # this leaves one per SIGKILL. Both write sites clean up on a raised exception, so
+        # only an unhandled signal strands one, and a 0600 partial JSON next to the store
+        # is inert — worth less than the corruption it prevents.
+        tmp = self._path.with_name(f"{self._path.name}.tmp.{os.getpid()}")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             os.write(fd, json.dumps(data, indent=2).encode())
@@ -786,6 +851,67 @@ def delete_cred(
     return True
 
 
+_SECRET_MEMBERS = frozenset({"access_token", "refresh_token", "id_token"})
+"""Token-response members that must never reach a log line. RFC 6749 §5.1 and §4.1.4."""
+
+_SECRET_FORM_RE = re.compile(rf"\b({'|'.join(sorted(_SECRET_MEMBERS))})=[^&\s\"']*")
+"""The same members in a form-encoded body. GitHub's token endpoint answers that way by
+default, so the JSON path below is not the only one that can carry a live credential."""
+
+
+def _body_excerpt(resp: httpx.Response) -> str:
+    """*resp*'s body, with any credential in it removed, capped at ``_DESCRIBE_LIMIT``.
+
+    A token endpoint's body is the one place a live credential is *expected*, so echoing
+    it verbatim into an error is a credential leak, not a diagnostic. It matters most on
+    the path that looks least dangerous: a 200 that fails to validate as an ``OAuthToken``
+    (a `token_type` outside the `Bearer` literal, a non-integer `expires_in`) is still a
+    full token response, and the message naming that failure is printed to stderr by
+    `cli.py` and by the generated runner — into CI logs, in both cases.
+
+    Redaction runs before truncation, so a secret cannot survive by sitting past the cap.
+    The escape hatch is deliberate: everything *except* the credential is kept, because
+    the surrounding members (`error`, `error_description`, an HTML block page) are what
+    make the message worth printing at all.
+    """
+    text = resp.text
+    try:
+        parsed = resp.json()
+    except Exception:  # noqa: BLE001 — a body that is not JSON is handled by the regex below
+        parsed = None
+    if isinstance(parsed, dict) and _SECRET_MEMBERS & parsed.keys():
+        text = json.dumps({k: ("<redacted>" if k in _SECRET_MEMBERS else v) for k, v in parsed.items()})
+    else:
+        text = _SECRET_FORM_RE.sub(r"\1=<redacted>", text)
+    if len(text) > _DESCRIBE_LIMIT:
+        return text[:_DESCRIBE_LIMIT] + "…"
+    return text
+
+
+def _oauth_error_code(resp: httpx.Response) -> str | None:
+    """The RFC 6749 §5.2 ``error`` code in *resp*, or None if it does not carry one.
+
+    The spec-defined shape is a JSON object with a string ``error`` member, and it
+    identifies both the *speaker* and *what it objected to* — the only thing that
+    separates a dead credential from a rejected request. A proxy or WAF standing in
+    front of an authorization server usually answers with HTML, so a body naming one
+    of the RFC codes is strong evidence the server itself replied. Not proof: a
+    JSON-speaking API gateway can return an ``error`` member of its own. The cost of
+    that collision is bounded — a gateway string will not match one of the three
+    ``_DEAD_GRANT_ERRORS``, so it lands in the request-faulted branch and produces a
+    slightly misleading message, never a wrong decision about the browser.
+
+    The status cannot stand in for any of this. §5.2 requires the body on every 400
+    and 401, so a 400 without one did not come from the authorization server, and a
+    non-compliant server that reports a revoked grant with 403 still names it here.
+    """
+    try:
+        code = resp.json().get("error")
+    except Exception:  # noqa: BLE001 — any unparseable body simply is not one of these
+        return None
+    return code if isinstance(code, str) else None
+
+
 async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> None:
     """Refresh access token if near/past expiry via plain httpx (no MCP SDK).
 
@@ -795,6 +921,19 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     without this the SDK sends the stale token blind → 401 → browser re-auth.
     Mirrors the mcpgen pre-flight. See the module docstring
     for the verified mechanism and version caveat.
+
+    Raises
+    ------
+    ReauthenticationRequired
+        The credential is gone: nothing cached to refresh with (no refresh_token, no
+        client_id, no token_endpoint), or the authorization server named it dead
+        (`invalid_grant`, `invalid_client`, `unauthorized_client`) on any status
+        including 200. Browser login fixes it.
+    TokenRefreshUnavailable
+        Everything else. The authorization server was unreachable, something in front
+        of it answered, it faulted the request rather than the credential, or a 200
+        carried something that is not a token. The refresh token is untouched — a
+        browser round has nothing to replace.
     """
     data = storage._load()
     entry = data.get(server_name, {})
@@ -828,15 +967,127 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     if client_secret:
         payload["client_secret"] = client_secret
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(token_endpoint, data=payload)
+    # Classify what comes back. Treating every failure as "log in again" sends the
+    # user to the browser for an outage the browser cannot fix — and, in a batch,
+    # once per item. The grant and the server that renews it fail independently.
+    #
+    # `Accept: application/json` is not optional here. The classification below reads the
+    # RFC 6749 §5.2 error body to tell the authorization server apart from whatever stands
+    # in front of it, and a server that answers form-encoded by default — GitHub's token
+    # endpoint does — would otherwise present every rejection, `invalid_grant` included, as
+    # a body with no error code in it.
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(token_endpoint, data=payload, headers={"Accept": "application/json"})
+    except Exception as exc:  # noqa: BLE001 — the Raises contract above admits exactly two types
+        # Not `httpx.HTTPError`: `InvalidURL` and `CookieConflict` derive from `Exception`
+        # directly, and a `token_endpoint` read from a hand-editable credentials file can
+        # produce the first. Letting those escape unclassified is the exact failure this
+        # function exists to remove, so the catch is as wide as the promise.
+        raise TokenRefreshUnavailable(
+            f"Could not reach the token endpoint for '{server_name}': {_describe(exc)}. "
+            f"The refresh token is untouched; retry when the authorization server is back."
+        ) from exc
 
-    if resp.status_code != 200:
+    # A 200 is decided by whether it *is* a token, and the error code is not even read
+    # unless that fails. Some servers pad a good token response with a blank `error`
+    # member; consulting the code first would fail a refresh that plainly succeeded.
+    if resp.status_code == 200:
+        try:
+            token = OAuthToken(**resp.json())
+        except Exception as exc:  # noqa: BLE001 — JSON, pydantic, and TypeError all mean the same here
+            # A 200 that is not a token is either an interstitial served with the
+            # wrong status or a server reporting failure in-band — Slack's rotation
+            # endpoint answers `{"ok": false, "error": ...}` this way. Both can be a
+            # dead grant, and neither is worth guessing about, so name the command
+            # that settles it rather than leaving no way forward.
+            if _oauth_error_code(resp) in _DEAD_GRANT_ERRORS:
+                raise ReauthenticationRequired(
+                    f"The token endpoint for '{server_name}' reported a dead credential with a 200: "
+                    f"{_body_excerpt(resp)}. Run: mcpgen login {server_name}"
+                ) from exc
+            # `type(exc).__name__`, not `_describe(exc)`: pydantic v2 puts the rejected
+            # `input_value` in its message, which on this path is the whole token response.
+            # The redacted body below says everything that text would have, minus the
+            # credential. (`from exc` still chains it — a printed traceback can show it,
+            # which is why the CLI prints the message and not the traceback.)
+            raise TokenRefreshUnavailable(
+                f"The token endpoint for '{server_name}' returned 200 but not a token "
+                f"({type(exc).__name__}). Body: {_body_excerpt(resp)}. The refresh token is "
+                f"untouched; retry later, and if it persists run: mcpgen login {server_name}"
+            ) from exc
+        await storage.set_tokens(token)
+        return
+
+    # Past here the response is a failure, and what it *says* decides which kind. The
+    # credential is dead only when the authorization server names which of its own
+    # credentials died, in its own error format. Status is not a substitute: a 400
+    # from a WAF and a 400 from the server carrying `invalid_grant` are different
+    # events, and only the second one is fixed by opening a browser.
+    error_code = _oauth_error_code(resp)
+
+    # Ordering below is deliberate: the dead-grant codes are checked before the
+    # retryable statuses, so a 503 carrying `invalid_grant` is read as the grant.
+    # A proxy does not invent that code, so the server did speak; the cost of being
+    # wrong is one browser prompt, while the reverse error — filing a genuine
+    # revocation as retryable — never prompts at all.
+    if error_code in _DEAD_GRANT_ERRORS:
         raise ReauthenticationRequired(
-            f"Token refresh failed ({resp.status_code}): {resp.text[:200]}. Run: mcpgen login {server_name}"
+            f"Token refresh failed ({resp.status_code}, {error_code}): "
+            f"{_body_excerpt(resp)}. Run: mcpgen login {server_name}"
         )
 
-    await storage.set_tokens(OAuthToken(**resp.json()))
+    # 5xx, the retryable statuses, and the codes that name a passing condition can
+    # only be the authorization server or something in front of it, never the grant.
+    if (
+        resp.status_code >= 500
+        or resp.status_code in _RETRYABLE_REFRESH_STATUS
+        or error_code in _RETRYABLE_REFRESH_ERRORS
+    ):
+        # "Retry later" is not actionable on its own. A 429 or 503 that says when is
+        # the difference between a scripted backoff and a guess, so pass it through.
+        retry_after = resp.headers.get("retry-after")
+        when = f" Retry-After: {retry_after}." if retry_after else ""
+        raise TokenRefreshUnavailable(
+            f"Token refresh failed ({resp.status_code}) for '{server_name}': "
+            f"{_body_excerpt(resp)}. The refresh token is untouched; retry later.{when}"
+        )
+
+    # An error code in neither set: the server faulting the *request* rather than the
+    # credential — invalid_request, unsupported_grant_type, invalid_scope — where
+    # logging in again sends the identical refresh request back. A code from outside
+    # the RFC lands here too and could be either, which is why this still names the
+    # command. Lead with the diagnosis, since that is what it usually is; keep the way
+    # out, since a code nobody here has seen might not be.
+    if error_code is not None:
+        raise TokenRefreshUnavailable(
+            f"The authorization server for '{server_name}' rejected the refresh request itself "
+            f"({resp.status_code}, {error_code}): {_body_excerpt(resp)}. The refresh token "
+            f"is untouched, so this is most likely a client or server configuration problem rather "
+            f"than a dead credential. If the configuration checks out, run: mcpgen login {server_name}"
+        )
+
+    # No error code at all — a 403 from a WAF, a 3xx to a captive portal, a 404 from
+    # a moved endpoint, a bare 401 from an auth proxy, or a 2xx that is not 200. §5.2
+    # requires the body above on a real rejection, so nothing here reached the
+    # authorization server as a token request. Name the manual fallback: if it is a
+    # server too terse to comply, this message is the only thing pointing at the
+    # command that recovers.
+    #
+    # This resolves the same "headless callers get no browser prompt" question as
+    # `_DEAD_GRANT_ERRORS` above, and resolves it the other way. There, a code the server
+    # itself emitted names the credential, so the prompt is warranted and withholding it
+    # would strand automation on a repairable condition. Here there is no such statement —
+    # a bare status is far more often a proxy than a spec-violating authorization server —
+    # so prompting every batch item on every block page costs more than it saves. The
+    # printed command is a worse remedy than an automatic prompt, and is the right one only
+    # because the evidence for a dead credential is absent rather than present.
+    raise TokenRefreshUnavailable(
+        f"Token refresh for '{server_name}' was answered with {resp.status_code} and no OAuth error "
+        f"body, which is not how an authorization server reports a bad grant: "
+        f"{_body_excerpt(resp)}. The refresh token is untouched; retry later, and if it "
+        f"persists run: mcpgen login {server_name}"
+    )
 
 
 @asynccontextmanager
@@ -1407,8 +1658,12 @@ def _persist_token_endpoint(
 
 
 _DESCRIBE_LIMIT = 200
-"""Per-leaf cap on the exception text in a one-line error. Matches the response-body
+"""Per-leaf cap on the exception text in a one-line error. Shared with the response-body
 bound in ``_pre_flight_refresh``: enough to identify the failure, short enough to read."""
+
+_DESCRIBE_TOTAL_LIMIT = 600
+"""Cap on a whole flattened exception group. The per-leaf bound alone lets an N-leaf
+group produce an N × ~215-character "one-line" message; this is what keeps it one line."""
 
 
 def _carries_interrupt(exc: BaseException) -> bool:
@@ -1441,10 +1696,15 @@ def _describe(exc: BaseException) -> str:
 
     Each leaf is capped: an ``HTTPStatusError`` can carry a whole HTML error page
     in its message, and this ends up on one CLI line. Same reasoning — and same
-    bound — as the response-body truncation in ``_pre_flight_refresh``.
+    bound — as the response-body truncation in ``_pre_flight_refresh``. The joined
+    result is capped too: leaves are bounded but their *number* is not, so the
+    per-leaf bound alone does not keep a wide group to one readable line.
     """
     if isinstance(exc, BaseExceptionGroup):
-        return "; ".join(_describe(inner) for inner in exc.exceptions)
+        joined = "; ".join(_describe(inner) for inner in exc.exceptions)
+        if len(joined) > _DESCRIBE_TOTAL_LIMIT:
+            joined = joined[:_DESCRIBE_TOTAL_LIMIT] + "…"
+        return joined
     text = str(exc)
     if len(text) > _DESCRIBE_LIMIT:
         text = text[:_DESCRIBE_LIMIT] + "…"
@@ -1595,12 +1855,33 @@ async def login(
         # the keyring backend a second _load() is another keychain round-trip — one
         # that can even come from a different backend, if the first read tripped the
         # fallback to file.
-        data = storage._load()
+        # The read itself can fail — a corrupt credentials.json, a keyring backend
+        # that errors on read — and raising from inside this handler would replace
+        # the transport error the operator actually needs to see.
+        try:
+            data = storage._load()
+        except Exception:  # noqa: BLE001 — never mask the original failure
+            # Unreadable store: nothing can be said about what the flow produced, and
+            # restoring the stash on top of it is the one move that could make this
+            # worse. Fall through to re-raising the original — unclassified, and
+            # deliberately so. PostLoginCheckFailed would assert a token is cached,
+            # which is exactly what could not be established. `mcpgen login` shows a
+            # traceback for this; a store that cannot be read is not a routine
+            # outcome, and the read error belongs on screen with it.
+            data, restorable = {}, False
+        else:
+            restorable = True
         produced = data.get(server_name) or {}
         if not produced.get("tokens"):
-            if stashed is not None:
-                data[server_name] = stashed
-                storage._save(data)
+            if stashed is not None and restorable:
+                # The write fails for the same reasons the read does — a keyring backend
+                # that has started refusing, a full disk, a permission change — and a
+                # restore that could not happen must not become the exception the operator
+                # sees. Best effort: the stash is a nicety, the original failure is the
+                # answer. Same rule as the read above, and as the endpoint save below.
+                with suppress(Exception):
+                    data[server_name] = stashed
+                    storage._save(data)
             raise
 
         # A token is only as good as the endpoint that can renew it: without one,
@@ -1671,7 +1952,17 @@ async def ensure_login(
     Cases:
     - Fresh token: no-op.
     - Near/past expiry, refresh_token present: silent out-of-band renewal.
-    - Near/past expiry, no refresh_token (or renewal fails): browser login.
+    - Near/past expiry with nothing cached to refresh with (no refresh_token, no
+      client_id, no token_endpoint): browser login.
+    - Near/past expiry and the authorization server answers `invalid_grant`,
+      `invalid_client`, or `unauthorized_client`: browser login. The last two fault
+      the registration rather than the token, and login() drops the cached
+      `client_info`, so the SDK registers anew — it does replace what failed.
+    - Near/past expiry and the renewal failed any other way — unreachable server, a
+      block page, a request the server faulted: no browser login.
+      `TokenRefreshUnavailable` propagates. The refresh token is intact in every one
+      of those, so a browser round has nothing to replace and would repeat the same
+      failure once per item across a batch.
     - No token at all: browser login.
     """
     storage = FileTokenStorage(server_name, creds_path, backend=resolve_cred_backend(cred_backend))

@@ -2,9 +2,11 @@
 
 from mcpgen._bridge import (
     DEFAULT_CREDS_PATH,
+    LoginWontHelp,
     McpBridgeCaller,
     PostLoginCheckFailed,
     ReauthenticationRequired,
+    TokenRefreshUnavailable,
     delete_cred,
     ensure_login,
     ensure_login_all,
@@ -19,7 +21,9 @@ __all__ = [
     "McpBridgeCaller",
     "McpCaller",
     "ReauthenticationRequired",
+    "LoginWontHelp",
     "PostLoginCheckFailed",
+    "TokenRefreshUnavailable",
     "delete_cred",
     "ensure_login",
     "ensure_login_all",
