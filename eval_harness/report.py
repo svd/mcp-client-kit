@@ -57,11 +57,13 @@ def mode_cell(modes_hit: list[str], mode: str) -> str:
 
 
 def verdict_cell(verdict: str) -> str:
-    """Return '✅ pass', '⚠️ partial', '❌ fail', or '❓ unknown'."""
+    """Return '✅ pass', '⚠️ partial', '❌ fail', '⚠️ error', or '❓ unknown'."""
     mapping = {
         "pass": "✅ pass",
         "partial": "⚠️ partial",
         "fail": "❌ fail",
+        # verify_server persists this when no generated module exists at all.
+        "error": "⚠️ error",
     }
     return mapping.get(verdict.lower(), "❓ unknown")
 
@@ -117,6 +119,15 @@ def _humanize_skip(detail: str) -> tuple[str, str, str] | None:
     """
     # Fixed exact-match codes
     _EXACT: dict[str, tuple[str, str]] = {
+        "no_shaped_tool_by_design": (
+            "N/A",
+            "every tool returns unstructured text — nothing to replay, by design",
+        ),
+        "only_mutating_shaped_tools": (
+            "N/A",
+            "the only typed returns belong to mutating tools, which are never called live",
+        ),
+        # Pre-split reason code, kept so older result.json files still render.
         "no_shaped_non_mutating_tool": (
             "N/A",
             "no read-only tool with a typed return to probe",
@@ -133,16 +144,27 @@ def _humanize_skip(detail: str) -> tuple[str, str, str] | None:
             "N/A",
             "no shapes to probe",
         ),
+        # NOTE: "⊘" is reserved for genuine N/A below; gaps keep the skip icon.
+        "shapes_json_empty": (
+            "gap",
+            "shapes.json is empty — nothing was established about this server",
+        ),
     }
-    # Inline check for "probed_args is not a dict" (dynamic message)
-    if detail.startswith("probed_args is not a dict"):
-        return ("⊘", "N/A", "multi-probe args not supported for live call")
+    # Inline check for the dynamic "unexpected probed_args type" message.
+    # "probed_args is not a dict" is the pre-rename wording, kept for old results.
+    if detail.startswith(("probed_args has unexpected type", "probed_args is not a dict")):
+        return ("⊘", "N/A", "probed_args is not a usable argument mapping")
 
     if detail in _EXACT:
         label, prose = _EXACT[detail]
-        return ("⊘", label, prose)
+        # A gap is not "nothing to do" — only true N/A gets the ⊘ glyph.
+        return ("⏭" if label == "gap" else "⊘", label, prose)
 
     # Prefix-matched codes (dynamic f-string messages)
+    if detail.startswith("probe_inconclusive"):
+        # Emitted by both `signatures` and `roundtrip`: probes came back as quota
+        # or auth errors, so no claim about the server's shapes is supported.
+        return ("⏭", "gap", "probes blocked by quota/auth errors — shapes unknown")
     if detail.startswith("missing_cred_"):
         var = detail[len("missing_cred_") :]
         return ("⊘", "N/A", f"credential {var} not set")
@@ -220,9 +242,16 @@ def render_detail(result: dict[str, Any]) -> str:
         "",
         f"**Transport / auth:** {transport} / {auth}",
         "",
-        "| Check | Result |",
-        "|---|---|",
     ]
+
+    # An error result carries no checks at all; a table of "unknown" rows would
+    # hide the one thing worth reporting, which is why it never ran.
+    error = result.get("error")
+    if error and not checks:
+        lines.append(f"⚠️ **Not verified —** {error}")
+        return "\n".join(lines)
+
+    lines += ["| Check | Result |", "|---|---|"]
     for key, label in check_names:
         status = checks.get(key, "unknown")
         detail = details.get(key, "")

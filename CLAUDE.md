@@ -68,18 +68,20 @@ eval_harness/
   versions.py                 # engine + skill version detection
   gen_config.py               # .mcp.eval.json generator
   cli.py                      # eval-kit CLI entry point
-.claude/workflows/run-eval.js # /run-eval workflow (per-server pipeline: generate → analyze → verify → synthesize)
+.claude/workflows/run-eval.js # /run-eval workflow (per-server pipeline: generate → verify → analyze → synthesize)
 .claude/skills/               # /triaging-eval-outputs, /rerun-eval-at-version skills
 agents/server-eval-agent.md   # prompt template used by the per-server agent inside run-eval.js
 ```
 
-**Per-server pipeline** (run-eval.js): generate wrapper → session-analyzer → eval-kit verify → narrative synthesis → eval-kit report.
+**Per-server pipeline** (run-eval.js): generate wrapper → eval-kit verify + runner → session-analyzer → narrative synthesis → eval-kit report. Verify runs before analyze so the analyzer reads `result.json` and `run.py` as ground truth instead of predicting them.
 
-**verify.py checks** (in order): `ast` (syntax), `signatures` (return types vs shapes.json), `idempotency` (render_module() deterministic), `pii` (no PII in shapes.json probed_args), `roundtrip` (live call returns typed dict — skipped when creds absent or tool is mutating).
+**verify.py checks** (in order): `ast` (syntax), `signatures` (return types vs shapes.json), `idempotency` (render_module() deterministic; renders from the real `<server>.mcpgen.json` schemas when present, stubs otherwise — `result.json` records which), `pii` (no PII in shapes.json probed_args), `roundtrip` (live call returns typed dict). Roundtrip skip reasons are self-describing, and `report.py` renders a true N/A differently from a coverage gap. N/A: `no_shaped_tool_by_design` (every tool returns prose — expected), `only_mutating_shaped_tools`, `oauth_not_supported_in_verifier`, `missing_cred_<VAR>`, `probed_args_contain_placeholders`. Gaps: `shapes_json_empty`, `probe_inconclusive` (probes came back as quota/auth errors, so nothing was established).
 
 ## Server manifest
 
-`servers/servers.toml` defines which servers to eval. Fields: `name`, `transport` (`stdio`/`http`/`sse`), `launch` (command or URL), `auth` (`none`/`oauth`/`bearer:ENV_VAR`), `expected_modes`, `notes`, `env`. See `servers/servers.example.toml` for all 15 documented examples.
+`servers/servers.toml` defines which servers to eval. Fields: `name`, `transport` (`stdio`/`http`/`sse`), `launch` (command or URL), `auth` (`none`/`oauth`/`bearer:ENV_VAR`), `expected_modes`, `notes`, `env`, `seed`.
+`seed` is a list of shell commands run before probing, for servers whose read tools
+return nothing until the store is written to (the eval subagent skips all mutating tools). See `servers/servers.example.toml` for all 15 documented examples.
 
 ## Output layout
 

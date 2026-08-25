@@ -1,5 +1,18 @@
 # servers.example.toml — Reference server configurations for mcp-client-kit-eval
 # Copy entries you want to evaluate into servers.toml
+#
+# Fields: name, transport (stdio/http/sse), launch (command or URL),
+# auth (none/oauth/bearer:ENV_VAR), expected_modes, notes, env, and the optional
+# `seed` — a list of shell commands run once, in order, before probing. Eval
+# subagents skip every mutating tool, so a server whose read tools return empty
+# containers until something writes to it must be seeded. Example:
+#
+#   seed = [
+#     "MCPGEN_SERVERS=.mcp.eval.json uv run mcpgen call memory create_entities --args '{...}' --out eval/memory/seed.probe-raw.json",
+#   ]
+#
+# `notes` states why the server was chosen; it must not predict a shape. Update any
+# shape claim from eval/<server>/result.json after the first run.
 # Each [[server]] block configures one MCP server for eval.
 
 # --- everything ---

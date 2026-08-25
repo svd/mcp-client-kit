@@ -20,6 +20,8 @@ class ServerSpec:
     expected_modes: list[str] = field(default_factory=list)
     notes: str = ""
     env: dict[str, str] = field(default_factory=dict)
+    # Mutating calls run before probing, so read-only probes see real data.
+    seed: list[str] = field(default_factory=list)
 
     # Convenience properties:
     @property
@@ -61,6 +63,7 @@ def load_manifest(path: Path | str = Path("servers/servers.toml")) -> list[Serve
                 expected_modes=entry.get("expected_modes", []),
                 notes=entry.get("notes", ""),
                 env=entry.get("env", {}),
+                seed=entry.get("seed", []),
             )
         )
     return specs

@@ -1,6 +1,20 @@
-# servers.example.toml — Reference server configurations for mcp-client-kit-eval
-# Copy entries you want to evaluate into servers.toml
+# servers.toml — live server manifest for mcp-client-kit-eval
 # Each [[server]] block configures one MCP server for eval.
+#
+# Conventions for `notes`:
+#   * A note states *why the server was chosen* — what makes it interesting to eval.
+#   * A note must not predict a shape. If it makes any claim about what the server
+#     returns, that claim is updated from `eval/<server>/result.json` after the first
+#     run. A note that contradicts the artifacts is worse than no note at all.
+#
+# Convention for `launch`:
+#   * Pin `uvx`/`npx` dependencies that resolve transitively. `mcp-server-sqlite`
+#     declares `mcp[cli]>=1.6.0` with no upper bound; an unpinned `uvx` resolved
+#     `mcp` 2.1.0 and the server died on startup. Audit new entries before adding.
+#
+# Optional `seed` (list of shell commands): mutating calls run once, in order,
+# before probing. Eval subagents skip every mutating tool, so servers whose
+# interesting shapes only exist once their store holds data must be seeded here.
 
 # --- everything ---
 # Reference server with a wide variety of tool types. No auth.
@@ -82,7 +96,13 @@ name = "memory"
 transport = "stdio"
 launch = "npx -y @modelcontextprotocol/server-memory"
 auth = "none"
-notes = "In-memory persistent knowledge graph. Requires npx."
+notes = "In-memory persistent knowledge graph. Requires npx. Chosen because its read tools return empty containers until the store is written to — see `seed`."
+# Without this the store is empty for the whole run and the `entities` / `relations`
+# inner shapes stay unobservable, since the eval subagent skips all mutating tools.
+seed = [
+  "MCPGEN_SERVERS=.mcp.eval.json uv run mcpgen call memory create_entities --args '{\"entities\":[{\"name\":\"Ada Lovelace\",\"entityType\":\"person\",\"observations\":[\"wrote the first algorithm\"]},{\"name\":\"Analytical Engine\",\"entityType\":\"machine\",\"observations\":[\"never completed\"]}]}' --out eval/memory/seed-entities.probe-raw.json",
+  "MCPGEN_SERVERS=.mcp.eval.json uv run mcpgen call memory create_relations --args '{\"relations\":[{\"from\":\"Ada Lovelace\",\"to\":\"Analytical Engine\",\"relationType\":\"programmed\"}]}' --out eval/memory/seed-relations.probe-raw.json",
+]
 
 # --- huggingface ---
 # HuggingFace public MCP endpoint. No auth or install required.
@@ -146,7 +166,7 @@ name = "exa"
 transport = "http"
 launch = "https://mcp.exa.ai/mcp"
 auth = "none"
-notes = "Exa Search public HTTP MCP endpoint. Deeply nested, schema-lied search results — shape-spec material."
+notes = "Exa Search public HTTP MCP endpoint. Chosen as a public search API with no auth; returns markdown search results, so it lands Mode A with no shaped tools (confirmed by eval/exa/result.json)."
 
 # --- aws-knowledge ---
 # AWS Knowledge MCP endpoint. No auth.
@@ -180,6 +200,13 @@ notes = "Semgrep MCP endpoint. Security-scan findings: arrays of heterogeneous r
 # vendor-documented path instead: the `mcp-remote` npx bridge, which runs the browser OAuth
 # flow itself and exposes the server over stdio. auth = "none" because the bridge owns the
 # token (cached in ~/.mcp-auth), not mcpgen.
+#
+# Root cause of the 403: the mcp SDK builds every OAuth-flow request by hand and sends no
+# User-Agent header, so Cloudflare bot protection blocks the well-known discovery GETs and
+# the /register POST. Confirmed present in mcp 1.27.2 and 2.1.1. Upstream:
+#   https://github.com/modelcontextprotocol/python-sdk/issues/1664
+# Once mcp-client-kit ships the UA request hook, revert this entry to native HTTP OAuth:
+#   transport = "http", auth = "oauth", launch = "https://mcp.stackoverflow.com"
 [[server]]
 name = "stackoverflow"
 transport = "stdio"

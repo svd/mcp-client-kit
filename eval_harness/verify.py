@@ -163,8 +163,64 @@ def check_signatures(server_py: Path, shapes_json: Path) -> CheckResult:
 # ── Check 3: Idempotency ──────────────────────────────────────────────────────
 
 
+def _idempotency_tools(
+    server: str, shapes_json: Path, shapes_data: dict[str, Any]
+) -> tuple[list[dict[str, Any]], str]:
+    """Tool list to render for the idempotency check, plus a label for the source.
+
+    Prefers the real ``tools/list`` payload saved next to the shapes as
+    ``<server>.mcpgen.json`` — parameter rendering, ``Literal[...]`` enum emission
+    and default ordering only get exercised when the schemas carry actual
+    properties. Falls back to property-less stubs when that file is missing, and
+    reports which input was used so a degraded run is visible in result.json.
+    """
+    mcpgen_json = shapes_json.parent / f"{server}.mcpgen.json"
+    degraded: str
+    if not mcpgen_json.exists():
+        degraded = f"no {mcpgen_json.name} on disk"
+    else:
+        try:
+            payload = json.loads(mcpgen_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            degraded = f"{mcpgen_json.name} present but unusable ({type(e).__name__})"
+            payload = None
+
+        raw_tools = payload.get("tools") if isinstance(payload, dict) else None
+        if isinstance(raw_tools, dict) and raw_tools:
+            # "name" is set last so a payload that carries its own conflicting
+            # "name" key cannot rename the tool out from under the shapes.
+            tools = [
+                {**spec, "name": name}
+                for name, spec in raw_tools.items()
+                if isinstance(spec, dict)
+            ]
+            if tools:
+                label = f"real tool schemas from {mcpgen_json.name}"
+                dropped = len(raw_tools) - len(tools)
+                if dropped:
+                    # Silently skipping these would overstate what the check covered.
+                    label += f" ({dropped} malformed tool spec(s) skipped)"
+                return tools, label
+            degraded = f"{mcpgen_json.name} present but unusable (no dict-valued tool specs)"
+        else:
+            # payload is None only when the read/parse above already set `degraded`.
+            if payload is not None:
+                what = "empty 'tools' mapping" if raw_tools == {} else "no 'tools' mapping"
+                degraded = f"{mcpgen_json.name} present but unusable ({what})"
+
+    stub_tools = [
+        {"name": k, "inputSchema": {"type": "object", "properties": {}}}
+        for k in shapes_data.keys()
+    ]
+    return stub_tools, f"stub schemas only — {degraded}"
+
+
 def check_idempotency(server: str, shapes_json: Path) -> CheckResult:
-    """Call render_module() twice with stub schemas and assert identical output."""
+    """Call render_module() twice on the same input and assert identical output.
+
+    Renders from the server's real tool schemas when they are on disk, falling
+    back to property-less stubs otherwise; the pass detail names which was used.
+    """
     try:
         import mcpgen.codegen as codegen  # type: ignore[import-not-found]  # noqa: PLC0415
     except ImportError:
@@ -177,19 +233,16 @@ def check_idempotency(server: str, shapes_json: Path) -> CheckResult:
     except (OSError, json.JSONDecodeError) as e:
         return skip_("idempotency", f"Could not load shapes.json: {e}")
 
-    stub_tools = [
-        {"name": k, "inputSchema": {"type": "object", "properties": {}}}
-        for k in shapes_data.keys()
-    ]
+    tools, source = _idempotency_tools(server, shapes_json, shapes_data)
 
     try:
-        result1 = codegen.render_module(server, stub_tools, shapes=shapes_data)
-        result2 = codegen.render_module(server, stub_tools, shapes=shapes_data)
+        result1 = codegen.render_module(server, tools, shapes=shapes_data)
+        result2 = codegen.render_module(server, tools, shapes=shapes_data)
     except Exception as e:  # noqa: BLE001
         return fail_("idempotency", f"render_module raised: {e}")
 
     if result1 == result2:
-        return pass_("idempotency", "offline determinism check (stub schemas only)")
+        return pass_("idempotency", f"offline determinism check ({source})")
     return fail_(
         "idempotency",
         "render_module() produced different output on two calls (non-determinism bug)",
@@ -273,13 +326,43 @@ def check_roundtrip(
     candidate_name: str | None = None
     candidate_shape: dict[str, Any] | None = None
     for tool_name, shape in shapes.items():
+        # An inconclusive probe invalidates every reading of that shape, including
+        # a return_model inferred from a quota/auth error body, so it must never be
+        # replayed live. Note this check is deliberately narrower than the one in
+        # check_signatures: that check validates EVERY shape against the module, so
+        # a single unknown shape sinks it; roundtrip only needs ONE trustworthy tool,
+        # so a blocked sibling must not forfeit otherwise-real coverage. The gap is
+        # reported below, but only when no healthy candidate survives.
+        if shape.get("_probe_status") == "inconclusive":
+            continue
         if shape.get("return_model") is not None and not _is_mutating(tool_name):
             candidate_name = tool_name
             candidate_shape = shape
             break
 
     if candidate_name is None or candidate_shape is None:
-        return skip_("roundtrip", "no_shaped_non_mutating_tool")
+        # Distinguish "nothing to replay by design" from a real coverage gap:
+        # a server whose every tool returns prose has no typed return to check,
+        # which is the expected terminal state — not a near-miss. Both of the
+        # guards below must come first: "by design" is a positive claim about the
+        # server, and neither an empty shapes file nor a probe blocked by quota or
+        # auth establishes it.
+        if not shapes:
+            return skip_("roundtrip", "shapes_json_empty")
+        inconclusive = [
+            t for t, sh in shapes.items() if sh.get("_probe_status") == "inconclusive"
+        ]
+        if inconclusive:
+            n = len(inconclusive)
+            names = ", ".join(inconclusive)
+            return skip_(
+                "roundtrip",
+                f"probe_inconclusive: {n} tool(s) returned quota/auth errors — "
+                f"shapes unknown: {names}",
+            )
+        if any(shape.get("return_model") is not None for shape in shapes.values()):
+            return skip_("roundtrip", "only_mutating_shaped_tools")
+        return skip_("roundtrip", "no_shaped_tool_by_design")
 
     # Check credentials
     if spec.auth_kind == "oauth":
@@ -483,6 +566,32 @@ def _compute_modes_hit(shapes: dict[str, Any] | None) -> list[str]:
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 
+# Skip reasons that mean "nothing was established", as opposed to a genuine N/A.
+# Absent and unreadable shapes belong here for the same reason an empty one does:
+# all three leave the server's return types unknown, and the worse outcome must not
+# report the better verdict.
+_GAP_SKIP_PREFIXES = (
+    "shapes_json_empty",
+    "probe_inconclusive",
+    "no shapes.json found",
+    "Could not load shapes.json",
+)
+
+
+def _is_gap_skip(check: CheckResult) -> bool:
+    """True when a skip records a coverage gap rather than an expected N/A."""
+    return check.status == "skip" and check.detail.startswith(_GAP_SKIP_PREFIXES)
+
+
+def _write_result(server_dir: Path, result: dict[str, Any]) -> None:
+    """Atomically write result.json into a server's eval directory."""
+    server_dir.mkdir(parents=True, exist_ok=True)
+    result_path = server_dir / "result.json"
+    tmp = result_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    tmp.rename(result_path)
+
+
 def verify_server(spec: ServerSpec, base_dir: Path = Path("eval")) -> dict[str, Any]:
     """Run all 5 checks for a server and write result.json.
 
@@ -505,6 +614,9 @@ def verify_server(spec: ServerSpec, base_dir: Path = Path("eval")) -> dict[str, 
             "error": "no generated file found",
             "versions": runtime_versions(),
         }
+        # The analyze stage is told result.json is authoritative, so the error
+        # path must leave one on disk too — not just return it to the caller.
+        _write_result(server_dir, result)
         return result
 
     shapes_present = shapes_json.exists()
@@ -540,12 +652,15 @@ def verify_server(spec: ServerSpec, base_dir: Path = Path("eval")) -> dict[str, 
         verdict = "fail"
     else:
         non_skip = [c for c in all_checks if c.status != "skip"]
-        if all(c.status == "pass" for c in non_skip):
-            verdict = "pass"
-        elif any(c.status == "fail" for c in non_skip):
+        if any(c.status == "fail" for c in non_skip):
+            verdict = "partial"
+        elif any(_is_gap_skip(c) for c in all_checks):
+            # Skips are otherwise excluded from the verdict, which is right for a
+            # genuine N/A but wrong for a gap: a server whose probes were blocked
+            # or whose shapes are empty established nothing, and must not read as
+            # a clean pass just because the offline checks had nothing to reject.
             verdict = "partial"
         else:
-            # All are skip (edge case: no checks ran as non-skip)
             verdict = "pass"
 
     result = {
@@ -559,11 +674,6 @@ def verify_server(spec: ServerSpec, base_dir: Path = Path("eval")) -> dict[str, 
         "versions": runtime_versions(),
     }
 
-    # Write result.json
-    server_dir.mkdir(parents=True, exist_ok=True)
-    result_path = server_dir / "result.json"
-    tmp = result_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    tmp.rename(result_path)
+    _write_result(server_dir, result)
 
     return result

@@ -298,3 +298,74 @@ def test_generate_report_includes_version_line(tmp_path: Path) -> None:
     assert "Engine: mcp-client-kit 0.7.0 · skill ref: v0.7.0" in out_file.read_text(
         encoding="utf-8"
     )
+
+
+def test_humanize_skip_no_shaped_tool_by_design() -> None:
+    """A prose-only server reads as an expected terminal state, not a gap."""
+    icon, label, prose = _humanize_skip("no_shaped_tool_by_design")  # type: ignore[misc]
+    assert icon == "⊘"
+    assert label == "N/A"
+    assert "by design" in prose
+
+
+def test_humanize_skip_only_mutating_shaped_tools() -> None:
+    """Shaped-but-mutating-only reads as N/A: the verifier never calls mutating tools.
+
+    It is a deliberate safety policy rather than a closable coverage gap, so it
+    keeps the N/A label — but its prose must still differ from the by-design case,
+    which claims something stronger (that no typed return exists at all).
+    """
+    icon, label, prose = _humanize_skip("only_mutating_shaped_tools")  # type: ignore[misc]
+    assert label == "N/A"
+    assert "mutating" in prose
+    assert "by design" not in prose
+
+
+def test_humanize_skip_probed_args_unexpected_type() -> None:
+    """verify.py emits 'probed_args has unexpected type X' — it must map."""
+    humanized = _humanize_skip("probed_args has unexpected type str")
+    assert humanized is not None, "unmapped skip reason falls back to raw detail"
+
+
+def test_humanize_skip_probe_inconclusive() -> None:
+    """A quota/auth-blocked probe is a coverage gap, not a neutral N/A."""
+    humanized = _humanize_skip(
+        "probe_inconclusive: 2 tool(s) returned quota/auth errors — shapes unknown: a, b"
+    )
+    assert humanized is not None
+    icon, label, prose = humanized
+    assert label != "N/A", "an unestablished shape must not read as 'not applicable'"
+    assert "quota" in prose or "auth" in prose
+
+
+def test_humanize_skip_shapes_json_empty() -> None:
+    """An empty shapes file is a gap and must not render as N/A."""
+    humanized = _humanize_skip("shapes_json_empty")
+    assert humanized is not None
+    _icon, label, prose = humanized
+    assert label != "N/A"
+    assert "empty" in prose
+
+
+def test_verdict_cell_renders_error() -> None:
+    """verify_server now persists verdict=error, so the report must render it."""
+    cell = verdict_cell("error")
+    assert "unknown" not in cell, f"error verdict rendered as unknown: {cell!r}"
+    assert "error" in cell
+
+
+def test_detail_section_reports_error_instead_of_unknown_rows() -> None:
+    """An error result must state its reason, not five '❓ unknown' check rows."""
+    section = render_detail(
+        {
+            "server": "ghost",
+            "transport": "http",
+            "auth": "oauth",
+            "checks": {},
+            "check_details": {},
+            "verdict": "error",
+            "error": "no generated file found",
+        }
+    )
+    assert "no generated file found" in section
+    assert "❓ unknown" not in section

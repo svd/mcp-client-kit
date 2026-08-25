@@ -12,6 +12,7 @@ from eval_harness.verify import (
     check_signatures,
     check_pii,
     check_roundtrip,
+    check_idempotency,
     verify_server,
     CheckResult,
 )
@@ -297,3 +298,361 @@ def test_verify_server_stamps_versions_when_module_missing(
 
     assert result["verdict"] == "error"
     assert result["versions"] == stamp
+
+
+# ---------------------------------------------------------------------------
+# Check 3: Idempotency — real tool schemas vs stub fallback
+# ---------------------------------------------------------------------------
+
+_SHAPES_FOR_IDEM = {
+    "get_current_time": {
+        "return_model": "CurrentTime",
+        "fields": {"timezone": "str", "datetime": "str"},
+        "probed_args": {"timezone": "UTC"},
+    }
+}
+
+_MCPGEN_JSON = {
+    "format_version": 1,
+    "server": "testserver",
+    "tools": {
+        "get_current_time": {
+            "description": "Get the current time in a timezone",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "timezone": {"type": "string", "enum": ["UTC", "Europe/Minsk"]},
+                },
+                "required": ["timezone"],
+            },
+        }
+    },
+}
+
+
+def test_check_idempotency_uses_real_schemas_when_mcpgen_json_present(
+    tmp_path: Path,
+) -> None:
+    """With <server>.mcpgen.json on disk, the check renders from real tool schemas."""
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(json.dumps(_SHAPES_FOR_IDEM), encoding="utf-8")
+    (tmp_path / "testserver.mcpgen.json").write_text(
+        json.dumps(_MCPGEN_JSON), encoding="utf-8"
+    )
+
+    result = check_idempotency("testserver", shapes)
+    assert result.status == "pass", f"Expected pass, got {result.status!r}: {result.detail}"
+    assert "real tool schemas" in result.detail, result.detail
+
+
+def test_check_idempotency_falls_back_to_stubs_without_mcpgen_json(
+    tmp_path: Path,
+) -> None:
+    """Without the mcpgen sidecar the check degrades to stub schemas and says so."""
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(json.dumps(_SHAPES_FOR_IDEM), encoding="utf-8")
+
+    result = check_idempotency("testserver", shapes)
+    assert result.status == "pass", f"Expected pass, got {result.status!r}: {result.detail}"
+    assert "stub schemas" in result.detail, result.detail
+
+
+# ---------------------------------------------------------------------------
+# Check 5: Roundtrip — skip reasons distinguish design from coverage gap
+# ---------------------------------------------------------------------------
+
+
+def test_check_roundtrip_all_prose_tools_skip_by_design(tmp_path: Path) -> None:
+    """Every tool returns unstructured text → skip reason says it's by design."""
+    (tmp_path / "testserver.py").write_text(_MODULE_ROUNDTRIP, encoding="utf-8")
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(
+        json.dumps(
+            {
+                "search": {"return_model": None, "_observed_shape": "str"},
+                "fetch": {"return_model": None, "_observed_shape": "str"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = check_roundtrip(_SPEC_FAKE, tmp_path, shapes)
+    assert result.status == "skip", f"Expected skip, got {result.status!r}: {result.detail}"
+    assert result.detail == "no_shaped_tool_by_design", result.detail
+
+
+def test_check_roundtrip_only_mutating_shaped_tools_is_a_coverage_gap(
+    tmp_path: Path,
+) -> None:
+    """Shaped tools exist but all are mutating → distinct, non-'by design' reason."""
+    (tmp_path / "testserver.py").write_text(_MODULE_ROUNDTRIP, encoding="utf-8")
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(
+        json.dumps(
+            {
+                "create_entity": {
+                    "return_model": "Entity",
+                    "fields": {"id": "str"},
+                    "probed_args": {"name": "x"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = check_roundtrip(_SPEC_FAKE, tmp_path, shapes)
+    assert result.status == "skip", f"Expected skip, got {result.status!r}: {result.detail}"
+    assert result.detail == "only_mutating_shaped_tools", result.detail
+
+
+def test_check_roundtrip_inconclusive_probes_are_not_by_design(tmp_path: Path) -> None:
+    """Quota/auth-blocked probes must not be reported as prose-only by design."""
+    (tmp_path / "testserver.py").write_text(_MODULE_ROUNDTRIP, encoding="utf-8")
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(
+        json.dumps(
+            {
+                "search": {
+                    "return_model": None,
+                    "_observed_shape": "str",
+                    "_probe_status": "inconclusive",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = check_roundtrip(_SPEC_FAKE, tmp_path, shapes)
+    assert result.status == "skip", f"Expected skip, got {result.status!r}: {result.detail}"
+    assert result.detail.startswith("probe_inconclusive"), result.detail
+
+
+def test_check_roundtrip_partial_inconclusive_still_flagged(tmp_path: Path) -> None:
+    """One blocked probe is enough — the prose-only claim is no longer establishable."""
+    (tmp_path / "testserver.py").write_text(_MODULE_ROUNDTRIP, encoding="utf-8")
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(
+        json.dumps(
+            {
+                "search": {"return_model": None, "_observed_shape": "str"},
+                "fetch": {"return_model": None, "_probe_status": "inconclusive"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = check_roundtrip(_SPEC_FAKE, tmp_path, shapes)
+    assert result.detail.startswith("probe_inconclusive"), result.detail
+
+
+def test_check_roundtrip_empty_shapes_is_not_by_design(tmp_path: Path) -> None:
+    """An empty shapes.json proves nothing about the server's return types."""
+    (tmp_path / "testserver.py").write_text(_MODULE_ROUNDTRIP, encoding="utf-8")
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text("{}", encoding="utf-8")
+
+    result = check_roundtrip(_SPEC_FAKE, tmp_path, shapes)
+    assert result.status == "skip", f"Expected skip, got {result.status!r}: {result.detail}"
+    assert result.detail == "shapes_json_empty", result.detail
+
+
+def test_check_idempotency_reports_unusable_mcpgen_json_distinctly(
+    tmp_path: Path,
+) -> None:
+    """A corrupt sidecar must not be reported as an absent one — result.json is ground truth."""
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(json.dumps(_SHAPES_FOR_IDEM), encoding="utf-8")
+    (tmp_path / "testserver.mcpgen.json").write_text("{not json", encoding="utf-8")
+
+    result = check_idempotency("testserver", shapes)
+    assert result.status == "pass", f"Expected pass, got {result.status!r}: {result.detail}"
+    assert "unusable" in result.detail, result.detail
+    assert "no <server>.mcpgen.json on disk" not in result.detail, result.detail
+
+
+def test_check_idempotency_reports_unusable_when_tools_is_not_a_dict(
+    tmp_path: Path,
+) -> None:
+    """A structurally wrong `tools` key is present-but-unusable, not missing."""
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(json.dumps(_SHAPES_FOR_IDEM), encoding="utf-8")
+    (tmp_path / "testserver.mcpgen.json").write_text(
+        json.dumps({"format_version": 1, "tools": ["get_current_time"]}), encoding="utf-8"
+    )
+
+    result = check_idempotency("testserver", shapes)
+    assert "unusable" in result.detail, result.detail
+
+
+def test_check_roundtrip_inconclusive_shaped_tool_is_flagged(tmp_path: Path) -> None:
+    """A shaped-but-inconclusive tool must not be treated as a valid live candidate.
+
+    `check_signatures` already refuses to trust such an entry (verify.py); roundtrip
+    must agree, or result.json carries two contradictory readings of one shape.
+    """
+    (tmp_path / "testserver.py").write_text(_MODULE_ROUNDTRIP, encoding="utf-8")
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(
+        json.dumps(
+            {
+                "get_me": {
+                    "return_model": "User",
+                    "fields": {"login": "str"},
+                    "probed_args": {"owner": "octocat"},
+                    "_probe_status": "inconclusive",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = check_roundtrip(_SPEC_FAKE, tmp_path, shapes)
+    assert result.status == "skip", f"Expected skip, got {result.status!r}: {result.detail}"
+    assert result.detail.startswith("probe_inconclusive"), result.detail
+
+
+def test_check_idempotency_flags_partially_malformed_tool_specs(tmp_path: Path) -> None:
+    """Dropping malformed tool entries silently would overstate the check's coverage."""
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(json.dumps(_SHAPES_FOR_IDEM), encoding="utf-8")
+    payload = {
+        "format_version": 1,
+        "tools": {
+            "get_current_time": _MCPGEN_JSON["tools"]["get_current_time"],
+            "broken_tool": "not-a-dict",
+        },
+    }
+    (tmp_path / "testserver.mcpgen.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = check_idempotency("testserver", shapes)
+    assert result.status == "pass", f"Expected pass, got {result.status!r}: {result.detail}"
+    assert "real tool schemas" in result.detail, result.detail
+    assert "1 malformed" in result.detail, result.detail
+
+
+def test_verify_server_writes_result_json_when_module_missing(tmp_path: Path) -> None:
+    """The error path must still persist result.json — the analyze stage quotes it."""
+    spec = ServerSpec(name="ghost", transport="stdio", launch="echo hi", auth="none")
+    (tmp_path / "ghost").mkdir()
+
+    result = verify_server(spec, base_dir=tmp_path)
+
+    written = tmp_path / "ghost" / "result.json"
+    assert written.exists(), "verify_server returned verdict=error without writing result.json"
+    assert json.loads(written.read_text(encoding="utf-8")) == result
+    assert result["verdict"] == "error"
+
+
+def test_verify_server_gap_skip_downgrades_verdict(tmp_path: Path) -> None:
+    """A server that established nothing must not report a clean pass.
+
+    An empty shapes.json makes every shape-dependent check skip; excluding skips
+    from the verdict would otherwise render that as ✅ pass.
+    """
+    spec = ServerSpec(name="hollow", transport="stdio", launch="echo hi", auth="none")
+    d = tmp_path / "hollow"
+    d.mkdir()
+    (d / "hollow.py").write_text(
+        "from typing import Any\n\nasync def noop(caller: Any) -> Any:\n    return None\n",
+        encoding="utf-8",
+    )
+    (d / "hollow.shapes.json").write_text("{}", encoding="utf-8")
+
+    result = verify_server(spec, base_dir=tmp_path)
+    assert result["checks"]["roundtrip"] == "skip"
+    assert result["check_details"]["roundtrip"] == "shapes_json_empty"
+    assert result["verdict"] == "partial", (
+        f"a declared coverage gap must not read as pass, got {result['verdict']!r}"
+    )
+
+
+def test_verify_server_inconclusive_probe_downgrades_verdict(tmp_path: Path) -> None:
+    """Quota/auth-blocked probes are a gap, so the verdict must not be pass."""
+    spec = ServerSpec(name="blocked", transport="stdio", launch="echo hi", auth="none")
+    d = tmp_path / "blocked"
+    d.mkdir()
+    (d / "blocked.py").write_text(
+        "from typing import Any\n\nasync def search(caller: Any) -> Any:\n    return None\n",
+        encoding="utf-8",
+    )
+    (d / "blocked.shapes.json").write_text(
+        json.dumps({"search": {"return_model": None, "_probe_status": "inconclusive"}}),
+        encoding="utf-8",
+    )
+
+    result = verify_server(spec, base_dir=tmp_path)
+    assert result["verdict"] == "partial", result["verdict"]
+
+
+def test_verify_server_by_design_skip_still_passes(tmp_path: Path) -> None:
+    """A genuine N/A must NOT be downgraded — only gaps are."""
+    spec = ServerSpec(name="prose", transport="stdio", launch="echo hi", auth="none")
+    d = tmp_path / "prose"
+    d.mkdir()
+    (d / "prose.py").write_text(
+        "from typing import Any\n\nasync def search(caller: Any) -> Any:\n    return None\n",
+        encoding="utf-8",
+    )
+    (d / "prose.shapes.json").write_text(
+        json.dumps({"search": {"return_model": None, "_observed_shape": "str"}}),
+        encoding="utf-8",
+    )
+
+    result = verify_server(spec, base_dir=tmp_path)
+    assert result["check_details"]["roundtrip"] == "no_shaped_tool_by_design"
+    assert result["verdict"] == "pass", result["verdict"]
+
+
+def test_check_roundtrip_uses_healthy_candidate_despite_other_inconclusive_tools(
+    tmp_path: Path,
+) -> None:
+    """One blocked probe must not forfeit roundtrip coverage from a healthy tool.
+
+    Inconclusive entries are excluded from candidate selection; the gap is only
+    reported when no usable candidate survives.
+    """
+    (tmp_path / "testserver.py").write_text(_MODULE_ROUNDTRIP, encoding="utf-8")
+    shapes = tmp_path / "testserver.shapes.json"
+    shapes.write_text(
+        json.dumps(
+            {
+                "blocked_tool": {
+                    "return_model": "Thing",
+                    "fields": {"id": "str"},
+                    "probed_args": {},
+                    "_probe_status": "inconclusive",
+                },
+                "get_me": {
+                    "return_model": "User",
+                    "fields": {"login": "str"},
+                    "probed_args": {"owner": "octocat"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = check_roundtrip(_SPEC_FAKE, tmp_path, shapes)
+    assert not result.detail.startswith("probe_inconclusive"), (
+        f"a healthy candidate existed but roundtrip was abandoned: {result.detail}"
+    )
+    assert result.status == "pass", f"{result.status}: {result.detail}"
+
+
+def test_verify_server_missing_shapes_is_a_gap_not_a_pass(tmp_path: Path) -> None:
+    """Absent shapes.json established nothing, same as an empty one.
+
+    Treating absence as a neutral N/A while `{}` downgrades would let the worse
+    of the two outcomes report the better verdict.
+    """
+    spec = ServerSpec(name="noshapes", transport="stdio", launch="echo hi", auth="none")
+    d = tmp_path / "noshapes"
+    d.mkdir()
+    (d / "noshapes.py").write_text(
+        "from typing import Any\n\nasync def noop(caller: Any) -> Any:\n    return None\n",
+        encoding="utf-8",
+    )
+
+    result = verify_server(spec, base_dir=tmp_path)
+    assert result["checks"]["roundtrip"] == "skip"
+    assert result["verdict"] == "partial", result["verdict"]

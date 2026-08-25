@@ -7,6 +7,12 @@ This file is a **template** for per-server eval runs. The Workflow script fills 
 
 ## Your task
 
+<!-- The sentence below is the transcript-location marker the analyze stage greps for
+     (see the transcript-lookup step in .claude/workflows/run-eval.js). Do not reword the
+     substring "skill for the **{{SERVER_NAME}}** MCP server" without updating both.
+     Nothing in THIS file may contain the analyze prompt's self-exclusion phrase, or the
+     generate transcript excludes itself and the analyze stage finds nothing —
+     tests/test_workflow_contract.py enforces that. -->
 You are evaluating the `generate-mcp-wrappers` skill for the **{{SERVER_NAME}}** MCP server.
 
 **Server details:**
@@ -15,6 +21,9 @@ You are evaluating the `generate-mcp-wrappers` skill for the **{{SERVER_NAME}}**
 - Launch / URL: `{{LAUNCH}}`
 - Auth: `{{AUTH}}`
 - Auth notes: {{AUTH_NOTES}}
+- Seed commands: {{SEED}}
+- Run id: `{{RUN_NONCE}}` (identifies this eval run; the harness greps transcripts for it — you
+  never need to use it, just leave this line in place)
 
 Your goal is to run the skill end-to-end and produce these artifacts in `eval/{{SERVER_NAME}}/`:
 
@@ -28,13 +37,19 @@ At the end, return a structured JSON summary so the Workflow can record the resu
 
 ## Run the skill
 
-**Before invoking the skill, capture the start time** — run these two Bash commands and remember both results:
+**As your very first action in this run — before seeding, before the skill, before anything
+else** — capture the start time. Run these two Bash commands and remember both results:
 - `date -u "+%Y-%m-%dT%H:%M:%SZ"` → `STARTED_AT` (ISO-8601 UTC, for display)
 - `date +%s` → `T0` (epoch seconds, for arithmetic)
 
+`T0`/`T1` must bracket your **whole** run, not just the skill call: this is the one authoritative
+duration for the eval, and the session analyzer quotes it rather than deriving a second number.
+
 Invoke the **`mcp-client-kit:generate-mcp-wrappers`** skill via the Skill tool to generate the wrappers for `{{SERVER_NAME}}`. Let the skill drive the whole procedure (codegen → list → probe → merge → edit shapes → regenerate → verify).
 
-**After the skill finishes and all artifacts are written, capture the end time** — run `date +%s` → `T1`. Compute `ELAPSED = T1 - T0` seconds; format as `Xm Ys` (e.g. 142 s → `2m 22s`).
+**Capture the end time once the skill and all of its artifacts are done, immediately before you
+write `session-overview.md`** — run `date +%s` → `T1`. Write `session-overview.md` last, so `T1`
+covers everything except that final write. Compute `ELAPSED = T1 - T0` seconds; format as `Xm Ys` (e.g. 142 s → `2m 22s`).
 
 Use these path conventions so artifacts land where the harness expects:
 - module out: `eval/{{SERVER_NAME}}/{{SERVER_NAME}}.py`
@@ -53,8 +68,17 @@ Manifest: `servers/servers.toml`
 
 You run as a workflow subagent — **`AskUserQuestion` is unavailable.** Apply every subagent fallback defined in the skill.
 
-One eval-harness–specific rule the skill fallback does not cover:
+Three eval-harness–specific rules the skill fallback does not cover:
 
+- **Seeding before probing.** If `Seed commands` above is not `none`, run each listed command (in
+  order) *before* invoking the skill. Seeds exist because the subagent fallback skips every
+  mutating tool, so a server whose interesting shapes only appear once its store holds data —
+  `memory`, for example — would otherwise be probed empty and yield unobservable inner shapes.
+  Seeding is the only place you may call a mutating tool; do not call any other. Record in
+  `session-overview.md` which seeds ran and whether each succeeded.
+- **Runner generation is not your job.** `eval/{{SERVER_NAME}}/run.py` is written by the harness's
+  own verify stage after you finish, via `mcp-client-kit:generate-mcp-runner`. Do not generate it,
+  and do not report its absence as a skipped step or a finding.
 - **Quota/auth error responses:** if every non-empty tool response is a quota/auth error string (e.g. "Monthly quota exceeded", "Unauthorized"), add `"_probe_status": "inconclusive"` to each affected shape entry in the shapes JSON. `verify.py` reads this field — do NOT leave it as plain `"_observed_shape": "str"`, which is indistinguishable from a genuine text-returning tool.
 
 ### Write session-overview.md
@@ -67,7 +91,7 @@ Open the file with this section immediately after the H1 title:
 ## Run Metadata
 
 - **Executed:** <STARTED_AT>
-- **Duration:** <Xm Ys> (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Duration:** <Xm Ys> (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 ```
 
 Then continue with:
@@ -92,7 +116,6 @@ When done, output this exact JSON block (the Workflow parser looks for it):
 ```json
 {
   "server": "{{SERVER_NAME}}",
-  "session_id": "<your Claude session ID>",
   "tool_count": 0,
   "shaped_tools": ["tool1", "tool2"],
   "verdict_hint": "pass",
