@@ -18,44 +18,34 @@ async def ask_question(caller: McpCaller, *, repoName: Any, question: str) -> An
     """Ask any question about a GitHub repository and get an AI-powered, context-grounded response.
 
     Args:
-        repoName: GitHub repository or list of repositories (max 10) in owner/repo format
-        question: The question to ask about the repository
-
-    Args:
-        repoName:
-        question:
+        repoName: GitHub repository or list of repositories (max 10) in owner/repo format.
+        question: The question to ask about the repository.
     """
     args: dict[str, Any] = {"repoName": repoName, "question": question}
     return await caller.call(SERVER, "ask_question", args)
 
-ask_question.__schema__ = {'properties': {'repoName': {'anyOf': [{'type': 'string'}, {'items': {'type': 'string'}, 'type': 'array'}]}, 'question': {'type': 'string'}}, 'required': ['repoName', 'question'], 'type': 'object'}
+ask_question.__schema__ = {'properties': {'repoName': {'anyOf': [{'type': 'string'}, {'items': {'type': 'string'}, 'type': 'array'}], 'description': 'GitHub repository or list of repositories (max 10) in owner/repo format.'}, 'question': {'description': 'The question to ask about the repository.', 'type': 'string'}}, 'required': ['repoName', 'question'], 'type': 'object'}
 
 
 async def read_wiki_contents(caller: McpCaller, *, repoName: str) -> Any:
     """View documentation about a GitHub repository.
 
     Args:
-        repoName: GitHub repository in owner/repo format (e.g. "facebook/react")
-
-    Args:
-        repoName:
+        repoName: GitHub repository in owner/repo format (e.g. "facebook/react").
     """
     args: dict[str, Any] = {"repoName": repoName}
     return await caller.call(SERVER, "read_wiki_contents", args)
 
-read_wiki_contents.__schema__ = {'properties': {'repoName': {'type': 'string'}}, 'required': ['repoName'], 'type': 'object'}
+read_wiki_contents.__schema__ = {'properties': {'repoName': {'description': 'GitHub repository in owner/repo format (e.g. "facebook/react").', 'type': 'string'}}, 'required': ['repoName'], 'type': 'object'}
 
 
 async def read_wiki_structure(caller: McpCaller, *, repoName: str) -> Any:
     """Get a list of documentation topics for a GitHub repository.
 
     Args:
-        repoName: GitHub repository in owner/repo format (e.g. "facebook/react")
-
-    Args:
-        repoName:
+        repoName: GitHub repository in owner/repo format (e.g. "facebook/react").
     """
     args: dict[str, Any] = {"repoName": repoName}
     return await caller.call(SERVER, "read_wiki_structure", args)
 
-read_wiki_structure.__schema__ = {'properties': {'repoName': {'type': 'string'}}, 'required': ['repoName'], 'type': 'object'}
+read_wiki_structure.__schema__ = {'properties': {'repoName': {'description': 'GitHub repository in owner/repo format (e.g. "facebook/react").', 'type': 'string'}}, 'required': ['repoName'], 'type': 'object'}

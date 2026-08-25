@@ -1,6 +1,6 @@
 """
 Smoke-test runner for generated deepwiki/ wrappers.
-Transport: HTTP/SSE  (https://mcp.deepwiki.com/mcp)
+Transport: Streamable HTTP  (https://mcp.deepwiki.com/mcp)
 Auth: none (public endpoint)
 
 Usage:
@@ -21,26 +21,33 @@ SERVER_URL = "https://mcp.deepwiki.com/mcp"
 async def main() -> None:
     caller = McpBridgeCaller(url=SERVER_URL)
 
-    # Skipped mutating tools: (none — all tools are read-only)
+    # One connection for the whole run: a single initialize() instead of
+    # reconnecting for every tool call.
+    async with caller.connected():
+        # Skipped mutating tools: (none — all tools are read-only)
 
-    # read_wiki_structure -> Any
-    # Get a list of documentation topics for a GitHub repository.
-    structure = await deepwiki.read_wiki_structure(caller, repoName="facebook/react")
-    print(f"read_wiki_structure: {type(structure).__name__}")
+        # read_wiki_structure -> Any
+        # Get a list of documentation topics for a GitHub repository.
+        structure = await deepwiki.read_wiki_structure(
+            caller, repoName="modelcontextprotocol/servers"
+        )
+        print(f"read_wiki_structure: {type(structure).__name__}")
 
-    # read_wiki_contents -> Any
-    # View documentation about a GitHub repository.
-    contents = await deepwiki.read_wiki_contents(caller, repoName="facebook/react")
-    print(f"read_wiki_contents: {type(contents).__name__}")
+        # read_wiki_contents -> Any
+        # View documentation about a GitHub repository.
+        contents = await deepwiki.read_wiki_contents(
+            caller, repoName="modelcontextprotocol/servers"
+        )
+        print(f"read_wiki_contents: {type(contents).__name__}")
 
-    # ask_question -> Any
-    # Ask any question about a GitHub repository and get an AI-powered response.
-    answer = await deepwiki.ask_question(
-        caller,
-        repoName="facebook/react",
-        question="What is the high-level architecture of this repository?",
-    )
-    print(f"ask_question: {type(answer).__name__}")
+        # ask_question -> Any
+        # Ask any question about a GitHub repository and get an AI-powered response.
+        answer = await deepwiki.ask_question(
+            caller,
+            repoName="modelcontextprotocol/servers",
+            question="What is the purpose of this repository?",
+        )
+        print(f"ask_question: {type(answer).__name__}")
 
 
 if __name__ == "__main__":

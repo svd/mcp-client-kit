@@ -1,43 +1,43 @@
 {
   "directory_tree": {
-    "path": "/private/tmp/mcpgen-eval-subdir"
+    "path": "/private/tmp/claude-501"
   },
   "get_file_info": {
-    "path": "/private/tmp/mcpgen-eval-test.txt"
+    "path": "/private/tmp/rem.py"
   },
   "list_directory": {
-    "path": "/private/tmp/mcpgen-eval-subdir"
+    "path": "/private/tmp"
   },
   "list_directory_with_sizes": {
-    "path": "/private/tmp/mcpgen-eval-subdir",
-    "sortBy": "name"
+    "path": "/private/tmp"
   },
-  "read_file": [
-    {
-      "path": "/private/tmp/mcpgen-eval-test.txt"
-    },
-    {
-      "path": "/private/tmp/mcpgen-eval-test.txt",
-      "head": 1
-    }
-  ],
+  "read_file": {
+    "path": "/private/tmp/rem.py"
+  },
+  "read_media_file": {
+    "path": "/private/tmp/claude-501/-Users-Sviataslau-Svirydau-Library-CloudStorage-OneDrive-EPAM-Projects-PPG-KB/d7e60a78-fbb4-480d-8a80-89042e713385/scratchpad/img004.png"
+  },
   "read_multiple_files": {
     "paths": [
-      "/private/tmp/mcpgen-eval-test.txt",
-      "/private/tmp/mcpgen-eval-subdir/sample.json"
+      "/private/tmp/rem.py",
+      "/private/tmp/serve.out"
     ]
   },
   "read_text_file": [
     {
-      "path": "/private/tmp/mcpgen-eval-test.txt"
+      "path": "/private/tmp/rem.py"
     },
     {
-      "path": "/private/tmp/mcpgen-eval-test.txt",
-      "tail": 1
+      "path": "/private/tmp/rem.py",
+      "head": 3
+    },
+    {
+      "path": "/private/tmp/rem.py",
+      "tail": 3
     }
   ],
   "search_files": {
-    "path": "/private/tmp/mcpgen-eval-subdir",
-    "pattern": "*.json"
+    "path": "/private/tmp",
+    "pattern": "*.py"
   }
 }

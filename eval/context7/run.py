@@ -19,26 +19,23 @@ from mcpgen import McpBridgeCaller
 async def main() -> None:
     caller = McpBridgeCaller(cmd="npx -y @upstash/context7-mcp")
 
-    # Skipped mutating tools: (none — both tools are read-only)
+    # One connection for the whole run: a single initialize() and a single
+    # subprocess, instead of reconnecting for every tool call.
+    async with caller.connected():
+        # resolve_library_id -> Any
+        # Must be called before query_docs to obtain a valid library ID.
+        library = await context7.resolve_library_id(
+            caller, query="how to use hooks", libraryName="React"
+        )
+        print(f"resolve_library_id: {type(library).__name__}")
 
-    # resolve_library_id -> Any
-    # Must be called first to obtain a valid Context7-compatible library ID
-    # before query_docs can be used (per tool description).
-    lib_result = await context7.resolve_library_id(
-        caller,
-        query="how to use hooks",
-        libraryName="React",
-    )
-    print(f"resolve_library_id: {type(lib_result).__name__}")
-
-    # query_docs -> Any
-    docs_result = await context7.query_docs(
-        caller,
-        libraryId="/reactjs/react.dev",
-        query="React useEffect cleanup function examples",
-    )
-    print(f"query_docs: {type(docs_result).__name__}")
-
+        # query_docs -> Any
+        docs = await context7.query_docs(
+            caller,
+            libraryId="/reactjs/react.dev",
+            query="React useEffect cleanup function examples",
+        )
+        print(f"query_docs: {type(docs).__name__}")
 
 if __name__ == "__main__":
     asyncio.run(main())

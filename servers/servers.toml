@@ -55,12 +55,15 @@ notes = "Local codegraph code-intelligence server. Binary: codegraph serve --mcp
 # --- sqlite ---
 # SQLite database server. No auth. Requires uvx (uv tool runner).
 # The --db-path argument points to the database file; adjust as needed.
+# Pinned to `mcp<2`: mcp-server-sqlite 2025.4.25 declares mcp[cli]>=1.6.0 (unbounded),
+# and an unpinned `uvx` resolves mcp 2.x, whose Server API dropped list_resources() —
+# the server crashes on startup (AttributeError) without this pin.
 [[server]]
 name = "sqlite"
 transport = "stdio"
-launch = "uvx mcp-server-sqlite --db-path /tmp/eval.db"
+launch = "uvx --with mcp<2 mcp-server-sqlite --db-path /tmp/eval.db"
 auth = "none"
-notes = "SQLite server backed by /tmp/eval.db. Requires uvx."
+notes = "SQLite server backed by /tmp/eval.db. Requires uvx. Pinned to mcp<2 (see comment above) to avoid a startup crash against mcp-server-sqlite 2025.4.25."
 
 # --- time ---
 # Simple time/timezone query server. No auth. Requires uvx.

@@ -1,12 +1,12 @@
 {
   "ask_question": {
-    "repoName": "facebook/react",
-    "question": "What is the high-level architecture of this repository?"
+    "repoName": "modelcontextprotocol/servers",
+    "question": "What is the purpose of this repository?"
   },
   "read_wiki_contents": {
-    "repoName": "facebook/react"
+    "repoName": "modelcontextprotocol/servers"
   },
   "read_wiki_structure": {
-    "repoName": "facebook/react"
+    "repoName": "modelcontextprotocol/servers"
   }
 }

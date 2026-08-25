@@ -32,18 +32,22 @@ async def main() -> None:
 
     # Skipped mutating tools: (none — all tools are read-only)
 
-    # get_current_time -> CurrentTime
-    current = await time_wrappers.get_current_time(caller, timezone="America/New_York")
-    print(f"get_current_time: datetime={current.get('datetime')!r}  day_of_week={current.get('day_of_week')!r}")
+    async with caller.connected():
+        # get_current_time -> CurrentTime  (probed with 2 timezone variants)
+        current_ny = await time_wrappers.get_current_time(caller, timezone="America/New_York")
+        print(f"get_current_time(America/New_York): datetime={current_ny.get('datetime')!r}  day_of_week={current_ny.get('day_of_week')!r}")
 
-    # convert_time -> TimeConversion
-    converted = await time_wrappers.convert_time(
-        caller,
-        source_timezone="America/New_York",
-        time="14:30",
-        target_timezone="Europe/London",
-    )
-    print(f"convert_time: time_difference={converted.get('time_difference')!r}  target={converted.get('target')!r}")
+        current_tokyo = await time_wrappers.get_current_time(caller, timezone="Asia/Tokyo")
+        print(f"get_current_time(Asia/Tokyo): datetime={current_tokyo.get('datetime')!r}  day_of_week={current_tokyo.get('day_of_week')!r}")
+
+        # convert_time -> TimeConversion
+        converted = await time_wrappers.convert_time(
+            caller,
+            source_timezone="America/New_York",
+            time="14:30",
+            target_timezone="Asia/Tokyo",
+        )
+        print(f"convert_time: time_difference={converted.get('time_difference')!r}")
 
 
 if __name__ == "__main__":

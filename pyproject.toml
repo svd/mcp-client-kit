@@ -5,7 +5,7 @@ description = "Eval framework for the mcp-client-kit generate-mcp-wrappers skill
 authors = [{name = "Sviatoslav Sviridov", email = "sviridov@gmail.com"}]
 requires-python = ">=3.11"
 dependencies = [
-    "mcp-client-kit>=0.2.0",
+    "mcp-client-kit==0.7.0",
 ]   # mcp-client-kit must be installed separately; see README
 
 [dependency-groups]

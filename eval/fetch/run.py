@@ -19,12 +19,14 @@ from mcpgen import McpBridgeCaller
 async def main() -> None:
     caller = McpBridgeCaller(cmd="uvx mcp-server-fetch")
 
-    # Skipped mutating tools: (none — fetch is the only tool and is read-only)
+    # One connection for the whole run: a single initialize() and a single
+    # subprocess, instead of reconnecting for every tool call.
+    async with caller.connected():
+        # Skipped mutating tools: (none — fetch is the only tool and is read-only)
 
-    # fetch -> Any
-    page = await fetch.fetch(caller, url="https://example.com")
-    print(f"fetch: {type(page).__name__}")
-
+        # fetch -> Any
+        page = await fetch.fetch(caller, url="https://example.com")
+        print(f"fetch: {type(page).__name__}")
 
 if __name__ == "__main__":
     asyncio.run(main())

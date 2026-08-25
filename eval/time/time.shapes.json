@@ -4,15 +4,13 @@
     "return_model": "TimeConversion",
     "input_overrides": {},
     "fields": {
-      "source": "dict",
-      "target": "dict",
       "time_difference": "str"
     },
     "source": "live",
     "probed_args": {
       "source_timezone": "America/New_York",
       "time": "14:30",
-      "target_timezone": "Europe/London"
+      "target_timezone": "Asia/Tokyo"
     }
   },
   "get_current_time": {
@@ -26,8 +24,13 @@
       "is_dst": "bool"
     },
     "source": "live",
-    "probed_args": {
-      "timezone": "America/New_York"
-    }
+    "probed_args": [
+      {
+        "timezone": "America/New_York"
+      },
+      {
+        "timezone": "Asia/Tokyo"
+      }
+    ]
   }
 }

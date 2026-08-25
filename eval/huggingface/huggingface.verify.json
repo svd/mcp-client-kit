@@ -10,6 +10,7 @@
       "repo_ids": [
         "bert-base-uncased"
       ],
+      "repo_type": "model",
       "operations": [
         "overview"
       ]
@@ -25,22 +26,49 @@
       ]
     }
   ],
-  "hub_repo_search": {
-    "query": "llama",
-    "limit": 5
-  },
-  "paper_search": {
-    "query": "attention is all you need",
-    "results_limit": 3
-  },
+  "hub_repo_search": [
+    {
+      "query": "bert-base-uncased",
+      "repo_types": [
+        "model"
+      ],
+      "limit": 5
+    },
+    {
+      "query": "squad",
+      "repo_types": [
+        "dataset"
+      ],
+      "limit": 5
+    }
+  ],
   "space_search": {
     "query": "text to image generation",
     "limit": 5
   },
-  "hf_fs": {
-    "cmd": "ls",
-    "args": [
-      "hf://models/trending"
-    ]
-  }
+  "hf_fs": [
+    {
+      "operations": [
+        {
+          "cmd": "ls",
+          "args": [
+            "hf://models/trending",
+            "--limit",
+            "5"
+          ]
+        }
+      ]
+    },
+    {
+      "operations": [
+        {
+          "cmd": "search",
+          "args": [
+            "hf://papers",
+            "transformers"
+          ]
+        }
+      ]
+    }
+  ]
 }

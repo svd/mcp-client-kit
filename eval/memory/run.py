@@ -19,20 +19,23 @@ from mcpgen import McpBridgeCaller
 async def main() -> None:
     caller = McpBridgeCaller(cmd="npx -y @modelcontextprotocol/server-memory")
 
-    # Skipped mutating tools: add_observations, create_entities, create_relations,
-    #                         delete_entities, delete_observations, delete_relations
+    # One connection for the whole run: a single initialize() and a single
+    # subprocess, instead of reconnecting for every tool call.
+    async with caller.connected():
+        # Skipped mutating tools: add_observations, create_entities, create_relations,
+        #                         delete_entities, delete_observations, delete_relations
 
-    # read_graph -> KnowledgeGraph
-    graph = await memory.read_graph(caller)
-    print(f"read_graph: entities={len(graph.get('entities') or [])}  relations={len(graph.get('relations') or [])}")
+        # read_graph -> KnowledgeGraph
+        graph = await memory.read_graph(caller)
+        print(f"read_graph: entities={len(graph.get('entities') or [])}  relations={len(graph.get('relations') or [])}")
 
-    # search_nodes -> KnowledgeGraph  (args from verify.json)
-    search_result = await memory.search_nodes(caller, query="test")
-    print(f"search_nodes: entities={len(search_result.get('entities') or [])}  relations={len(search_result.get('relations') or [])}")
+        # search_nodes -> KnowledgeGraph  (args from verify.json)
+        search_result = await memory.search_nodes(caller, query="test")
+        print(f"search_nodes: entities={len(search_result.get('entities') or [])}  relations={len(search_result.get('relations') or [])}")
 
-    # open_nodes -> KnowledgeGraph  (args from verify.json)
-    nodes = await memory.open_nodes(caller, names=["test"])
-    print(f"open_nodes: entities={len(nodes.get('entities') or [])}  relations={len(nodes.get('relations') or [])}")
+        # open_nodes -> KnowledgeGraph  (args from verify.json)
+        nodes = await memory.open_nodes(caller, names=["test"])
+        print(f"open_nodes: entities={len(nodes.get('entities') or [])}  relations={len(nodes.get('relations') or [])}")
 
 
 if __name__ == "__main__":

@@ -1,26 +1,4 @@
 {
-  "hf_doc_fetch": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "doc_url": "https://huggingface.co/docs/accelerate/quicktour"
-    }
-  },
-  "hf_doc_search": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "query": ""
-    },
-    "_probe_status": "partial",
-    "_probe_note": "query=\"\" (discovery mode) returned a clean markdown listing; a semantic query (\"transformers pipeline\") triggered a transient 500 Internal Server Error from the upstream doc-search backend, while a different semantic query (\"quicktour\") succeeded on retry. Non-mutating text response either way -- shape stays str."
-  },
   "hf_whoami": {
     "unwrap": [],
     "return_model": null,
@@ -40,6 +18,7 @@
         "repo_ids": [
           "bert-base-uncased"
         ],
+        "repo_type": "model",
         "operations": [
           "overview"
         ]
@@ -62,21 +41,22 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "query": "llama",
-      "limit": 5
-    }
-  },
-  "space_search": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "query": "text to image generation",
-      "limit": 5
-    }
+    "probed_args": [
+      {
+        "query": "bert-base-uncased",
+        "repo_types": [
+          "model"
+        ],
+        "limit": 5
+      },
+      {
+        "query": "squad",
+        "repo_types": [
+          "dataset"
+        ],
+        "limit": 5
+      }
+    ]
   },
   "hf_fs": {
     "unwrap": [],
@@ -84,11 +64,30 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "cmd": "ls",
-      "args": [
-        "hf://models/trending"
-      ]
-    }
+    "probed_args": [
+      {
+        "operations": [
+          {
+            "cmd": "ls",
+            "args": [
+              "hf://models/trending",
+              "--limit",
+              "5"
+            ]
+          }
+        ]
+      },
+      {
+        "operations": [
+          {
+            "cmd": "search",
+            "args": [
+              "hf://papers",
+              "transformers"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

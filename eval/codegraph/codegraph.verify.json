@@ -1,18 +1,18 @@
 {
   "codegraph_context": {
-    "task": "how does the verify.py roundtrip check work"
+    "task": "How does the roundtrip verifier work?"
   },
   "codegraph_explore": {
-    "query": "verify.py ServerSpec"
+    "query": "verify.py roundtrip check"
   },
   "codegraph_node": {
     "symbol": "check_roundtrip"
   },
   "codegraph_search": {
-    "query": "verify"
+    "query": "check_roundtrip"
   },
   "codegraph_trace": {
-    "from": "check_roundtrip",
-    "to": "CheckResult"
+    "from": "main",
+    "to": "check_roundtrip"
   }
 }

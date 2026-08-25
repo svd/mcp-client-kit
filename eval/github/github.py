@@ -34,6 +34,7 @@ class Release(TypedDict, total=False):
     body: str
     draft: bool
     prerelease: bool
+    immutable: bool
     id: int
     created_at: str
     published_at: str
@@ -44,7 +45,6 @@ class Release(TypedDict, total=False):
     zipball_url: str
     tarball_url: str
     node_id: str
-    immutable: bool
 
 
 class GitHubUser(TypedDict, total=False):
@@ -135,6 +135,7 @@ class SearchIssuesResult(TypedDict, total=False):
 class SearchPRsResult(TypedDict, total=False):
     total_count: int
     incomplete_results: bool
+    search_type: str
 
 
 class SearchReposResult(TypedDict, total=False):
@@ -209,7 +210,7 @@ async def add_comment_to_pending_review(caller: McpCaller, *, body: str, owner: 
 add_comment_to_pending_review.__schema__ = {'type': 'object', 'properties': {'body': {'type': 'string', 'description': 'The text of the review comment'}, 'line': {'type': 'number', 'description': 'The line of the blob in the pull request diff that the comment applies to. For multi-line comments, the last line of the range'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'path': {'type': 'string', 'description': 'The relative path to the file that necessitates a comment'}, 'pullNumber': {'type': 'number', 'description': 'Pull request number'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'side': {'type': 'string', 'description': 'The side of the diff to comment on. LEFT indicates the previous state, RIGHT indicates the new state', 'enum': ['LEFT', 'RIGHT']}, 'startLine': {'type': 'number', 'description': 'For multi-line comments, the first line of the range that the comment applies to'}, 'startSide': {'type': 'string', 'description': 'For multi-line comments, the starting side of the diff that the comment applies to. LEFT indicates the previous state, RIGHT indicates the new state', 'enum': ['LEFT', 'RIGHT']}, 'subjectType': {'type': 'string', 'description': 'The level at which the comment is targeted', 'enum': ['FILE', 'LINE']}}, 'required': ['owner', 'repo', 'pullNumber', 'path', 'body', 'subjectType']}
 
 
-async def add_issue_comment(caller: McpCaller, *, issue_number: float, owner: str, repo: str, body: str | None = None, comment_id: float | None = None, reaction: Literal['+1', '-1', 'laugh', 'confused', 'heart', 'hooray', 'rocket', 'eyes'] | None = None) -> Any:
+async def add_issue_comment(caller: McpCaller, *, issue_number: float, owner: str, repo: str, body: str | None = None, comment_id: int | None = None, reaction: Literal['+1', '-1', 'laugh', 'confused', 'heart', 'hooray', 'rocket', 'eyes'] | None = None) -> Any:
     """Add a comment and/or reaction to a specific issue or issue comment in a GitHub repository. Use this tool with pull requests as well (in this case pass pull request number as issue_number), but only if user is not asking specifically to add or react to review comments. At least one of body or reaction is required.
 
     Args:
@@ -229,7 +230,7 @@ async def add_issue_comment(caller: McpCaller, *, issue_number: float, owner: st
         args["reaction"] = reaction
     return await caller.call(SERVER, "add_issue_comment", args)
 
-add_issue_comment.__schema__ = {'type': 'object', 'properties': {'body': {'type': 'string', 'description': 'Comment content. Required unless reaction is provided.'}, 'comment_id': {'type': 'number', 'description': 'The numeric ID of the issue or pull request comment to react to. Use this for reactions to comments; omit it to react to the issue or pull request itself. Cannot be combined with body.', 'minimum': 1}, 'issue_number': {'type': 'number', 'description': 'Issue or pull request number to comment on or react to.'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'reaction': {'type': 'string', 'description': 'Emoji reaction to add. Required unless body is provided.', 'enum': ['+1', '-1', 'laugh', 'confused', 'heart', 'hooray', 'rocket', 'eyes']}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['owner', 'repo', 'issue_number']}
+add_issue_comment.__schema__ = {'type': 'object', 'properties': {'body': {'type': 'string', 'description': 'Comment content. Required unless reaction is provided.', 'minLength': 1}, 'comment_id': {'type': 'integer', 'description': 'The numeric ID of the issue or pull request comment to react to. Use this for reactions to comments; omit it to react to the issue or pull request itself. Cannot be combined with body.', 'minimum': 1}, 'issue_number': {'type': 'number', 'description': 'Issue or pull request number to comment on or react to.'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'reaction': {'type': 'string', 'description': 'Emoji reaction to add. Required unless body is provided.', 'enum': ['+1', '-1', 'laugh', 'confused', 'heart', 'hooray', 'rocket', 'eyes']}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['owner', 'repo', 'issue_number']}
 
 
 async def add_reply_to_pull_request_comment(caller: McpCaller, *, commentId: float, owner: str, repo: str, body: str | None = None, pullNumber: float | None = None, reaction: Literal['+1', '-1', 'laugh', 'confused', 'heart', 'hooray', 'rocket', 'eyes'] | None = None) -> Any:
@@ -272,7 +273,7 @@ async def create_branch(caller: McpCaller, *, branch: str, owner: str, repo: str
 create_branch.__schema__ = {'type': 'object', 'properties': {'branch': {'type': 'string', 'description': 'Name for new branch'}, 'from_branch': {'type': 'string', 'description': 'Source branch (defaults to repo default)'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['owner', 'repo', 'branch']}
 
 
-async def create_or_update_file(caller: McpCaller, *, branch: str, content: str, message: str, owner: str, path: str, repo: str, sha: str | None = None) -> Any:
+async def create_or_update_file(caller: McpCaller, *, branch: str, content: str, message: str, owner: str, path: str, repo: str, allow_symlink_write: bool | None = None, sha: str | None = None) -> Any:
     """Create or update a single file in a GitHub repository. 
     If updating, you should provide the SHA of the file you want to update. Use this tool to create or update a file in a GitHub repository remotely; do not use it for local file operations.
 
@@ -283,19 +284,22 @@ async def create_or_update_file(caller: McpCaller, *, branch: str, content: str,
 
     Args:
         branch: Branch to create/update the file in
-        content: Content of the file
+        content: Content of the file, exactly as it should appear once written. Do not base64-encode it; this server does that before calling the REST API.
         message: Commit message
         owner: Repository owner (username or organization)
         path: Path where to create/update the file
         repo: Repository name
+        allow_symlink_write: Set true to update a symbolic link itself; content must be its new target path.. Default: False
         sha: The blob SHA of the file being replaced. Required if the file already exists.
     """
     args: dict[str, Any] = {"branch": branch, "content": content, "message": message, "owner": owner, "path": path, "repo": repo}
+    if allow_symlink_write is not None:
+        args["allow_symlink_write"] = allow_symlink_write
     if sha is not None:
         args["sha"] = sha
     return await caller.call(SERVER, "create_or_update_file", args)
 
-create_or_update_file.__schema__ = {'type': 'object', 'properties': {'branch': {'type': 'string', 'description': 'Branch to create/update the file in'}, 'content': {'type': 'string', 'description': 'Content of the file'}, 'message': {'type': 'string', 'description': 'Commit message'}, 'owner': {'type': 'string', 'description': 'Repository owner (username or organization)', 'x-mcp-header': 'owner'}, 'path': {'type': 'string', 'description': 'Path where to create/update the file'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sha': {'type': 'string', 'description': 'The blob SHA of the file being replaced. Required if the file already exists.'}}, 'required': ['owner', 'repo', 'path', 'content', 'message', 'branch']}
+create_or_update_file.__schema__ = {'type': 'object', 'properties': {'allow_symlink_write': {'type': 'boolean', 'description': 'Set true to update a symbolic link itself; content must be its new target path.', 'default': False}, 'branch': {'type': 'string', 'description': 'Branch to create/update the file in'}, 'content': {'type': 'string', 'description': 'Content of the file, exactly as it should appear once written. Do not base64-encode it; this server does that before calling the REST API.'}, 'message': {'type': 'string', 'description': 'Commit message'}, 'owner': {'type': 'string', 'description': 'Repository owner (username or organization)', 'x-mcp-header': 'owner'}, 'path': {'type': 'string', 'description': 'Path where to create/update the file'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sha': {'type': 'string', 'description': 'The blob SHA of the file being replaced. Required if the file already exists.'}}, 'required': ['owner', 'repo', 'path', 'content', 'message', 'branch']}
 
 
 async def create_pull_request(caller: McpCaller, *, base: str, head: str, owner: str, repo: str, title: str, body: str | None = None, draft: bool | None = None, maintainer_can_modify: bool | None = None, reviewers: list[str] | None = None) -> Any:
@@ -405,17 +409,20 @@ async def get_commit(caller: McpCaller, *, owner: str, repo: str, sha: str, deta
 get_commit.__schema__ = {'type': 'object', 'properties': {'detail': {'type': 'string', 'description': 'Level of detail to include for changed files. "none" omits stats and files entirely. "stats" (default) includes per-file metadata: filename, status, and lines-of-code counts (additions, deletions, changes), with no patch content. "full_patch" additionally includes the unified diff content for each file and can be very large.', 'default': 'stats', 'enum': ['none', 'stats', 'full_patch']}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sha': {'type': 'string', 'description': 'Commit SHA, branch name, or tag name'}}, 'required': ['owner', 'repo', 'sha']}
 
 
-async def get_file_contents(caller: McpCaller, *, owner: str, repo: str, path: str | None = None, ref: str | None = None, sha: str | None = None) -> Any:
+async def get_file_contents(caller: McpCaller, *, owner: str, repo: str, fields: list[Literal['type', 'name', 'path', 'size', 'sha', 'url', 'git_url', 'html_url', 'download_url']] | None = None, path: str | None = None, ref: str | None = None, sha: str | None = None) -> Any:
     """Get the contents of a file or directory from a GitHub repository
 
     Args:
         owner: Repository owner (username or organization)
         repo: Repository name
+        fields: Subset of fields to return for each entry when the path is a directory. If omitted, all fields are returned. Ignored when the path is a single file. Use this to reduce response size when listing directories and you only need specific fields, e.g. just 'name' and 'type'.
         path: Path to file/directory. Default: '/'
         ref: Accepts optional git refs such as `refs/tags/{tag}`, `refs/heads/{branch}` or `refs/pull/{pr_number}/head`
         sha: Accepts optional commit SHA. If specified, it will be used instead of ref
     """
     args: dict[str, Any] = {"owner": owner, "repo": repo}
+    if fields is not None:
+        args["fields"] = fields
     if path is not None:
         args["path"] = path
     if ref is not None:
@@ -424,7 +431,7 @@ async def get_file_contents(caller: McpCaller, *, owner: str, repo: str, path: s
         args["sha"] = sha
     return await caller.call(SERVER, "get_file_contents", args)
 
-get_file_contents.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'Repository owner (username or organization)', 'x-mcp-header': 'owner'}, 'path': {'type': 'string', 'description': 'Path to file/directory', 'default': '/'}, 'ref': {'type': 'string', 'description': 'Accepts optional git refs such as `refs/tags/{tag}`, `refs/heads/{branch}` or `refs/pull/{pr_number}/head`'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sha': {'type': 'string', 'description': 'Accepts optional commit SHA. If specified, it will be used instead of ref'}}, 'required': ['owner', 'repo']}
+get_file_contents.__schema__ = {'type': 'object', 'properties': {'fields': {'type': 'array', 'items': {'type': 'string', 'enum': ['type', 'name', 'path', 'size', 'sha', 'url', 'git_url', 'html_url', 'download_url']}, 'description': "Subset of fields to return for each entry when the path is a directory. If omitted, all fields are returned. Ignored when the path is a single file. Use this to reduce response size when listing directories and you only need specific fields, e.g. just 'name' and 'type'."}, 'owner': {'type': 'string', 'description': 'Repository owner (username or organization)', 'x-mcp-header': 'owner'}, 'path': {'type': 'string', 'description': 'Path to file/directory', 'default': '/'}, 'ref': {'type': 'string', 'description': 'Accepts optional git refs such as `refs/tags/{tag}`, `refs/heads/{branch}` or `refs/pull/{pr_number}/head`'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sha': {'type': 'string', 'description': 'Accepts optional commit SHA. If specified, it will be used instead of ref'}}, 'required': ['owner', 'repo']}
 
 
 async def get_label(caller: McpCaller, *, name: str, owner: str, repo: str) -> Label:
@@ -523,7 +530,7 @@ async def issue_read(caller: McpCaller, *, issue_number: float, method: Literal[
         issue_number: The number of the issue
         method: The read operation to perform on a single issue.
     Options are:
-    1. get - Get details of a specific issue.
+    1. get - Get issue details. Also returns best-effort hierarchy flags (`has_parent`, `has_children`); `parent` and `sub_issues_summary` are optional relationship summaries, and `closed_by_pull_requests` summarizes the pull requests configured to close the issue as `total_count` plus up to 5 `references`.
     2. get_comments - Get issue comments.
     3. get_sub_issues - Get sub-issues (children) of the issue.
     4. get_parent - Get the parent issue, if this issue is a sub-issue of another.
@@ -540,10 +547,10 @@ async def issue_read(caller: McpCaller, *, issue_number: float, method: Literal[
         args["perPage"] = perPage
     return await caller.call(SERVER, "issue_read", args)
 
-issue_read.__schema__ = {'type': 'object', 'properties': {'issue_number': {'type': 'number', 'description': 'The number of the issue'}, 'method': {'type': 'string', 'description': 'The read operation to perform on a single issue.\nOptions are:\n1. get - Get details of a specific issue.\n2. get_comments - Get issue comments.\n3. get_sub_issues - Get sub-issues (children) of the issue.\n4. get_parent - Get the parent issue, if this issue is a sub-issue of another.\n5. get_labels - Get labels assigned to the issue.\n', 'enum': ['get', 'get_comments', 'get_sub_issues', 'get_parent', 'get_labels']}, 'owner': {'type': 'string', 'description': 'The owner of the repository', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'The name of the repository', 'x-mcp-header': 'repo'}}, 'required': ['method', 'owner', 'repo', 'issue_number']}
+issue_read.__schema__ = {'type': 'object', 'properties': {'issue_number': {'type': 'number', 'description': 'The number of the issue'}, 'method': {'type': 'string', 'description': 'The read operation to perform on a single issue.\nOptions are:\n1. get - Get issue details. Also returns best-effort hierarchy flags (`has_parent`, `has_children`); `parent` and `sub_issues_summary` are optional relationship summaries, and `closed_by_pull_requests` summarizes the pull requests configured to close the issue as `total_count` plus up to 5 `references`.\n2. get_comments - Get issue comments.\n3. get_sub_issues - Get sub-issues (children) of the issue.\n4. get_parent - Get the parent issue, if this issue is a sub-issue of another.\n5. get_labels - Get labels assigned to the issue.\n', 'enum': ['get', 'get_comments', 'get_sub_issues', 'get_parent', 'get_labels']}, 'owner': {'type': 'string', 'description': 'The owner of the repository', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'The name of the repository', 'x-mcp-header': 'repo'}}, 'required': ['method', 'owner', 'repo', 'issue_number']}
 
 
-async def issue_write(caller: McpCaller, *, method: Literal['create', 'update'], owner: str, repo: str, assignees: list[str] | None = None, body: str | None = None, duplicate_of: float | None = None, issue_fields: list[dict] | None = None, issue_number: float | None = None, labels: list[str] | None = None, milestone: float | None = None, state: Literal['open', 'closed'] | None = None, state_reason: Literal['completed', 'not_planned', 'duplicate'] | None = None, title: str | None = None, type: str | None = None) -> Any:
+async def issue_write(caller: McpCaller, *, method: Literal['create', 'update'], owner: str, repo: str, assignees: list[str] | None = None, body: str | None = None, duplicate_of: float | None = None, issue_fields: list[dict] | None = None, issue_number: float | None = None, labels: list[str] | None = None, milestone: float | None = None, state: Literal['open', 'closed'] | None = None, state_reason: Literal['completed', 'not_planned', 'duplicate'] | None = None, title: str | None = None, type: Any | None = None) -> Any:
     """Create a new or update an existing issue in a GitHub repository.
 
     Args:
@@ -555,7 +562,7 @@ async def issue_write(caller: McpCaller, *, method: Literal['create', 'update'],
         repo: Repository name
         assignees: Usernames to assign to this issue
         body: Issue body content
-        duplicate_of: Issue number that this issue is a duplicate of. Only used when state_reason is 'duplicate'.
+        duplicate_of: Issue number that this issue is a duplicate of. Required when state_reason is 'duplicate'.
         issue_fields: Issue field values to set or clear. Each item requires 'field_name' and exactly one of 'value', 'field_option_name', or 'delete: true'.
         issue_number: Issue number to update
         labels: Labels to apply to this issue
@@ -563,7 +570,7 @@ async def issue_write(caller: McpCaller, *, method: Literal['create', 'update'],
         state: New state. One of: 'open', 'closed'
         state_reason: Reason for the state change. Ignored unless state is changed.. One of: 'completed', 'not_planned', 'duplicate'
         title: Issue title
-        type: Type of this issue. Only use if issue types are enabled for this repository. Use list_issue_types tool to get valid type values for this repository or its owner organization. If the repository doesn't support issue types, omit this parameter.
+        type: Type of this issue. For updates, pass null to remove the current type. Only use if issue types are enabled for this repository. Use list_issue_types to get valid type values for this repository or its owner organization. If the repository doesn't support issue types, omit this parameter.
     """
     args: dict[str, Any] = {"method": method, "owner": owner, "repo": repo}
     if assignees is not None:
@@ -590,7 +597,7 @@ async def issue_write(caller: McpCaller, *, method: Literal['create', 'update'],
         args["type"] = type
     return await caller.call(SERVER, "issue_write", args)
 
-issue_write.__schema__ = {'type': 'object', 'properties': {'assignees': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Usernames to assign to this issue'}, 'body': {'type': 'string', 'description': 'Issue body content'}, 'duplicate_of': {'type': 'number', 'description': "Issue number that this issue is a duplicate of. Only used when state_reason is 'duplicate'."}, 'issue_fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'delete': {'type': 'boolean', 'description': "Set to true to clear this field's current value on the issue. Cannot be combined with 'value' or 'field_option_name'.", 'enum': [True]}, 'field_name': {'type': 'string', 'description': 'Issue field name (case-insensitive). Must match a field returned by list_issue_fields for this repository or its organization.'}, 'field_option_name': {'type': 'string', 'description': "Option name for single-select fields. Validated against the field's options before the API call. Cannot be combined with 'value' or 'delete'."}, 'value': {'type': ['string', 'number', 'boolean'], 'description': "Value to set. Use for text, number, and date fields (date as YYYY-MM-DD). For single-select fields, prefer 'field_option_name' so the option is validated before the API call. Cannot be combined with 'field_option_name' or 'delete'."}}, 'required': ['field_name'], 'additionalProperties': False}, 'description': "Issue field values to set or clear. Each item requires 'field_name' and exactly one of 'value', 'field_option_name', or 'delete: true'."}, 'issue_number': {'type': 'number', 'description': 'Issue number to update'}, 'labels': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Labels to apply to this issue'}, 'method': {'type': 'string', 'description': "Write operation to perform on a single issue.\nOptions are:\n- 'create' - creates a new issue.\n- 'update' - updates an existing issue.\n", 'enum': ['create', 'update']}, 'milestone': {'type': 'number', 'description': 'Milestone number'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'state': {'type': 'string', 'description': 'New state', 'enum': ['open', 'closed']}, 'state_reason': {'type': 'string', 'description': 'Reason for the state change. Ignored unless state is changed.', 'enum': ['completed', 'not_planned', 'duplicate']}, 'title': {'type': 'string', 'description': 'Issue title'}, 'type': {'type': 'string', 'description': "Type of this issue. Only use if issue types are enabled for this repository. Use list_issue_types tool to get valid type values for this repository or its owner organization. If the repository doesn't support issue types, omit this parameter."}}, 'required': ['method', 'owner', 'repo']}
+issue_write.__schema__ = {'type': 'object', 'properties': {'assignees': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Usernames to assign to this issue'}, 'body': {'type': 'string', 'description': 'Issue body content'}, 'duplicate_of': {'type': 'number', 'description': "Issue number that this issue is a duplicate of. Required when state_reason is 'duplicate'."}, 'issue_fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'delete': {'type': 'boolean', 'description': "Set to true to clear this field's current value on the issue. When false or omitted, this property is ignored. Cannot be true when 'value' or 'field_option_name' is provided."}, 'field_name': {'type': 'string', 'description': 'Issue field name (case-insensitive). Must match a field returned by list_issue_fields for this repository or its organization.'}, 'field_option_name': {'type': 'string', 'description': "Option name for single-select fields. Validated against the field's options before the API call. Cannot be combined with 'value' or 'delete: true'."}, 'value': {'type': ['string', 'number', 'boolean'], 'description': "Value to set. Use for text, number, and date fields (date as YYYY-MM-DD). For single-select fields, prefer 'field_option_name' so the option is validated before the API call. Cannot be combined with 'field_option_name' or 'delete: true'."}}, 'required': ['field_name'], 'additionalProperties': False}, 'description': "Issue field values to set or clear. Each item requires 'field_name' and exactly one of 'value', 'field_option_name', or 'delete: true'."}, 'issue_number': {'type': 'number', 'description': 'Issue number to update'}, 'labels': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Labels to apply to this issue'}, 'method': {'type': 'string', 'description': "Write operation to perform on a single issue.\nOptions are:\n- 'create' - creates a new issue.\n- 'update' - updates an existing issue.\n", 'enum': ['create', 'update']}, 'milestone': {'type': 'number', 'description': 'Milestone number'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'state': {'type': 'string', 'description': 'New state', 'enum': ['open', 'closed']}, 'state_reason': {'type': 'string', 'description': 'Reason for the state change. Ignored unless state is changed.', 'enum': ['completed', 'not_planned', 'duplicate']}, 'title': {'type': 'string', 'description': 'Issue title'}, 'type': {'description': "Type of this issue. For updates, pass null to remove the current type. Only use if issue types are enabled for this repository. Use list_issue_types to get valid type values for this repository or its owner organization. If the repository doesn't support issue types, omit this parameter.", 'anyOf': [{'type': 'string', 'minLength': 1}, {'type': 'null'}]}}, 'required': ['method', 'owner', 'repo']}
 
 
 async def list_branches(caller: McpCaller, *, owner: str, repo: str, page: float | None = None, perPage: float | None = None) -> list[Branch]:
@@ -612,13 +619,14 @@ async def list_branches(caller: McpCaller, *, owner: str, repo: str, page: float
 list_branches.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['owner', 'repo']}
 
 
-async def list_commits(caller: McpCaller, *, owner: str, repo: str, author: str | None = None, page: float | None = None, path: str | None = None, perPage: float | None = None, sha: str | None = None, since: str | None = None, until: str | None = None) -> list[CommitSummary]:
+async def list_commits(caller: McpCaller, *, owner: str, repo: str, author: str | None = None, fields: list[Literal['sha', 'html_url', 'commit', 'author', 'committer']] | None = None, page: float | None = None, path: str | None = None, perPage: float | None = None, sha: str | None = None, since: str | None = None, until: str | None = None) -> list[CommitSummary]:
     """Get list of commits of a branch in a GitHub repository. Returns at least 30 results per page by default, but can return more if specified using the perPage parameter (up to 100).
 
     Args:
         owner: Repository owner
         repo: Repository name
         author: Author username or email address to filter commits by
+        fields: Subset of fields to return for each commit. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields, e.g. just 'sha' and 'html_url'.
         page: Page number for pagination (min 1)
         path: Only commits containing this file path will be returned
         perPage: Results per page for pagination (min 1, max 100)
@@ -629,6 +637,8 @@ async def list_commits(caller: McpCaller, *, owner: str, repo: str, author: str 
     args: dict[str, Any] = {"owner": owner, "repo": repo}
     if author is not None:
         args["author"] = author
+    if fields is not None:
+        args["fields"] = fields
     if page is not None:
         args["page"] = page
     if path is not None:
@@ -643,7 +653,7 @@ async def list_commits(caller: McpCaller, *, owner: str, repo: str, author: str 
         args["until"] = until
     return cast("list[CommitSummary]", await caller.call(SERVER, "list_commits", args))
 
-list_commits.__schema__ = {'type': 'object', 'properties': {'author': {'type': 'string', 'description': 'Author username or email address to filter commits by'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'path': {'type': 'string', 'description': 'Only commits containing this file path will be returned'}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sha': {'type': 'string', 'description': 'Commit SHA, branch or tag name to list commits of. If not provided, uses the default branch of the repository. If a commit SHA is provided, will list commits up to that SHA.'}, 'since': {'type': 'string', 'description': 'Only commits after this date will be returned (ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DD)'}, 'until': {'type': 'string', 'description': 'Only commits before this date will be returned (ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DD)'}}, 'required': ['owner', 'repo']}
+list_commits.__schema__ = {'type': 'object', 'properties': {'author': {'type': 'string', 'description': 'Author username or email address to filter commits by'}, 'fields': {'type': 'array', 'items': {'type': 'string', 'enum': ['sha', 'html_url', 'commit', 'author', 'committer']}, 'description': "Subset of fields to return for each commit. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields, e.g. just 'sha' and 'html_url'."}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'path': {'type': 'string', 'description': 'Only commits containing this file path will be returned'}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sha': {'type': 'string', 'description': 'Commit SHA, branch or tag name to list commits of. If not provided, uses the default branch of the repository. If a commit SHA is provided, will list commits up to that SHA.'}, 'since': {'type': 'string', 'description': 'Only commits after this date will be returned (ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DD)'}, 'until': {'type': 'string', 'description': 'Only commits before this date will be returned (ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DD)'}}, 'required': ['owner', 'repo']}
 
 
 async def list_issue_fields(caller: McpCaller, *, owner: str, repo: str | None = None) -> Any:
@@ -676,7 +686,7 @@ async def list_issue_types(caller: McpCaller, *, owner: str, repo: str | None = 
 list_issue_types.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'The account owner of the repository or organization.', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'The name of the repository. When provided, returns issue types for this specific repository. When omitted, returns org-level issue types directly.', 'x-mcp-header': 'repo'}}, 'required': ['owner']}
 
 
-async def list_issues(caller: McpCaller, *, owner: str, repo: str, after: str | None = None, direction: Literal['ASC', 'DESC'] | None = None, field_filters: list[dict] | None = None, labels: list[str] | None = None, orderBy: Literal['CREATED_AT', 'UPDATED_AT', 'COMMENTS'] | None = None, perPage: float | None = None, since: str | None = None, state: Literal['OPEN', 'CLOSED'] | None = None) -> list[IssueSummary]:
+async def list_issues(caller: McpCaller, *, owner: str, repo: str, after: str | None = None, direction: Literal['ASC', 'DESC'] | None = None, field_filters: list[dict] | None = None, fields: list[Literal['number', 'title', 'body', 'state', 'user', 'labels', 'assignees', 'comments', 'created_at', 'updated_at', 'field_values']] | None = None, labels: list[str] | None = None, orderBy: Literal['CREATED_AT', 'UPDATED_AT', 'COMMENTS'] | None = None, perPage: float | None = None, since: str | None = None, state: Literal['OPEN', 'CLOSED'] | None = None) -> list[IssueSummary]:
     """List issues in a GitHub repository. For pagination, use the 'endCursor' from the previous response's 'pageInfo' in the 'after' parameter.
 
     Args:
@@ -685,6 +695,7 @@ async def list_issues(caller: McpCaller, *, owner: str, repo: str, after: str | 
         after: Cursor for pagination. Use the cursor from the previous response.
         direction: Order direction. If provided, the 'orderBy' also needs to be provided.. One of: 'ASC', 'DESC'
         field_filters: Filter by custom issue field values. Each entry takes a field_name and a value; the server looks up the field and coerces the value to its type (single-select option name, text, number, or YYYY-MM-DD date).
+        fields: Subset of fields to return for each issue. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body' and 'field_values' in particular drops the largest per-result data.
         labels: Filter by labels
         orderBy: Order issues by field. If provided, the 'direction' also needs to be provided.. One of: 'CREATED_AT', 'UPDATED_AT', 'COMMENTS'
         perPage: Results per page for pagination (min 1, max 100)
@@ -698,6 +709,8 @@ async def list_issues(caller: McpCaller, *, owner: str, repo: str, after: str | 
         args["direction"] = direction
     if field_filters is not None:
         args["field_filters"] = field_filters
+    if fields is not None:
+        args["fields"] = fields
     if labels is not None:
         args["labels"] = labels
     if orderBy is not None:
@@ -711,10 +724,10 @@ async def list_issues(caller: McpCaller, *, owner: str, repo: str, after: str | 
     result = await caller.call(SERVER, "list_issues", args)
     return cast("list[IssueSummary]", _dig_list(result, ('issues', )))
 
-list_issues.__schema__ = {'type': 'object', 'properties': {'after': {'type': 'string', 'description': 'Cursor for pagination. Use the cursor from the previous response.'}, 'direction': {'type': 'string', 'description': "Order direction. If provided, the 'orderBy' also needs to be provided.", 'enum': ['ASC', 'DESC']}, 'field_filters': {'type': 'array', 'items': {'type': 'object', 'properties': {'field_name': {'type': 'string', 'description': 'Name of the custom field (e.g. "Priority"). Case-insensitive.'}, 'value': {'type': 'string', 'description': 'Value to filter on. For single-select fields, the option name (e.g. "P1"). For dates, YYYY-MM-DD. For numbers, the numeric value as a string. For text, the text value.'}}, 'required': ['field_name', 'value']}, 'description': 'Filter by custom issue field values. Each entry takes a field_name and a value; the server looks up the field and coerces the value to its type (single-select option name, text, number, or YYYY-MM-DD date).'}, 'labels': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Filter by labels'}, 'orderBy': {'type': 'string', 'description': "Order issues by field. If provided, the 'direction' also needs to be provided.", 'enum': ['CREATED_AT', 'UPDATED_AT', 'COMMENTS']}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'since': {'type': 'string', 'description': 'Filter by date (ISO 8601 timestamp)'}, 'state': {'type': 'string', 'description': 'Filter by state, by default both open and closed issues are returned when not provided', 'enum': ['OPEN', 'CLOSED']}}, 'required': ['owner', 'repo']}
+list_issues.__schema__ = {'type': 'object', 'properties': {'after': {'type': 'string', 'description': 'Cursor for pagination. Use the cursor from the previous response.'}, 'direction': {'type': 'string', 'description': "Order direction. If provided, the 'orderBy' also needs to be provided.", 'enum': ['ASC', 'DESC']}, 'field_filters': {'type': 'array', 'items': {'type': 'object', 'properties': {'field_name': {'type': 'string', 'description': 'Name of the custom field (e.g. "Priority"). Case-insensitive.'}, 'value': {'type': 'string', 'description': 'Value to filter on. For single-select fields, the option name (e.g. "P1"). For dates, YYYY-MM-DD. For numbers, the numeric value as a string. For text, the text value.'}}, 'required': ['field_name', 'value']}, 'description': 'Filter by custom issue field values. Each entry takes a field_name and a value; the server looks up the field and coerces the value to its type (single-select option name, text, number, or YYYY-MM-DD date).'}, 'fields': {'type': 'array', 'items': {'type': 'string', 'enum': ['number', 'title', 'body', 'state', 'user', 'labels', 'assignees', 'comments', 'created_at', 'updated_at', 'field_values']}, 'description': "Subset of fields to return for each issue. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body' and 'field_values' in particular drops the largest per-result data."}, 'labels': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Filter by labels'}, 'orderBy': {'type': 'string', 'description': "Order issues by field. If provided, the 'direction' also needs to be provided.", 'enum': ['CREATED_AT', 'UPDATED_AT', 'COMMENTS']}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'since': {'type': 'string', 'description': 'Filter by date (ISO 8601 timestamp)'}, 'state': {'type': 'string', 'description': 'Filter by state, by default both open and closed issues are returned when not provided', 'enum': ['OPEN', 'CLOSED']}}, 'required': ['owner', 'repo']}
 
 
-async def list_pull_requests(caller: McpCaller, *, owner: str, repo: str, base: str | None = None, direction: Literal['asc', 'desc'] | None = None, head: str | None = None, page: float | None = None, perPage: float | None = None, sort: Literal['created', 'updated', 'popularity', 'long-running'] | None = None, state: Literal['open', 'closed', 'all'] | None = None) -> list[PullRequestSummary]:
+async def list_pull_requests(caller: McpCaller, *, owner: str, repo: str, base: str | None = None, direction: Literal['asc', 'desc'] | None = None, fields: list[Literal['number', 'title', 'body', 'state', 'draft', 'merged', 'mergeable_state', 'html_url', 'user', 'labels', 'assignees', 'requested_reviewers', 'merged_by', 'head', 'base', 'additions', 'deletions', 'changed_files', 'commits', 'comments', 'created_at', 'updated_at', 'closed_at', 'merged_at', 'milestone']] | None = None, head: str | None = None, page: float | None = None, perPage: float | None = None, sort: Literal['created', 'updated', 'popularity', 'long-running'] | None = None, state: Literal['open', 'closed', 'all'] | None = None) -> list[PullRequestSummary]:
     """List pull requests in a GitHub repository. If the user specifies an author, then DO NOT use this tool and use the search_pull_requests tool instead.
 
     Args:
@@ -722,6 +735,7 @@ async def list_pull_requests(caller: McpCaller, *, owner: str, repo: str, base: 
         repo: Repository name
         base: Filter by base branch
         direction: Sort direction. One of: 'asc', 'desc'
+        fields: Subset of fields to return for each pull request. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body' in particular drops the largest per-result data.
         head: Filter by head user/org and branch
         page: Page number for pagination (min 1)
         perPage: Results per page for pagination (min 1, max 100)
@@ -733,6 +747,8 @@ async def list_pull_requests(caller: McpCaller, *, owner: str, repo: str, base: 
         args["base"] = base
     if direction is not None:
         args["direction"] = direction
+    if fields is not None:
+        args["fields"] = fields
     if head is not None:
         args["head"] = head
     if page is not None:
@@ -745,26 +761,29 @@ async def list_pull_requests(caller: McpCaller, *, owner: str, repo: str, base: 
         args["state"] = state
     return cast("list[PullRequestSummary]", await caller.call(SERVER, "list_pull_requests", args))
 
-list_pull_requests.__schema__ = {'type': 'object', 'properties': {'base': {'type': 'string', 'description': 'Filter by base branch'}, 'direction': {'type': 'string', 'description': 'Sort direction', 'enum': ['asc', 'desc']}, 'head': {'type': 'string', 'description': 'Filter by head user/org and branch'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sort': {'type': 'string', 'description': 'Sort by', 'enum': ['created', 'updated', 'popularity', 'long-running']}, 'state': {'type': 'string', 'description': 'Filter by state', 'enum': ['open', 'closed', 'all']}}, 'required': ['owner', 'repo']}
+list_pull_requests.__schema__ = {'type': 'object', 'properties': {'base': {'type': 'string', 'description': 'Filter by base branch'}, 'direction': {'type': 'string', 'description': 'Sort direction', 'enum': ['asc', 'desc']}, 'fields': {'type': 'array', 'items': {'type': 'string', 'enum': ['number', 'title', 'body', 'state', 'draft', 'merged', 'mergeable_state', 'html_url', 'user', 'labels', 'assignees', 'requested_reviewers', 'merged_by', 'head', 'base', 'additions', 'deletions', 'changed_files', 'commits', 'comments', 'created_at', 'updated_at', 'closed_at', 'merged_at', 'milestone']}, 'description': "Subset of fields to return for each pull request. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body' in particular drops the largest per-result data."}, 'head': {'type': 'string', 'description': 'Filter by head user/org and branch'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sort': {'type': 'string', 'description': 'Sort by', 'enum': ['created', 'updated', 'popularity', 'long-running']}, 'state': {'type': 'string', 'description': 'Filter by state', 'enum': ['open', 'closed', 'all']}}, 'required': ['owner', 'repo']}
 
 
-async def list_releases(caller: McpCaller, *, owner: str, repo: str, page: float | None = None, perPage: float | None = None) -> list[ReleaseSummary]:
+async def list_releases(caller: McpCaller, *, owner: str, repo: str, fields: list[Literal['id', 'tag_name', 'name', 'body', 'html_url', 'published_at', 'prerelease', 'draft', 'author']] | None = None, page: float | None = None, perPage: float | None = None) -> list[ReleaseSummary]:
     """List releases in a GitHub repository
 
     Args:
         owner: Repository owner
         repo: Repository name
+        fields: Subset of fields to return for each release. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body' in particular drops the largest per-release data.
         page: Page number for pagination (min 1)
         perPage: Results per page for pagination (min 1, max 100)
     """
     args: dict[str, Any] = {"owner": owner, "repo": repo}
+    if fields is not None:
+        args["fields"] = fields
     if page is not None:
         args["page"] = page
     if perPage is not None:
         args["perPage"] = perPage
     return cast("list[ReleaseSummary]", await caller.call(SERVER, "list_releases", args))
 
-list_releases.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['owner', 'repo']}
+list_releases.__schema__ = {'type': 'object', 'properties': {'fields': {'type': 'array', 'items': {'type': 'string', 'enum': ['id', 'tag_name', 'name', 'body', 'html_url', 'published_at', 'prerelease', 'draft', 'author']}, 'description': "Subset of fields to return for each release. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body' in particular drops the largest per-release data."}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['owner', 'repo']}
 
 
 async def list_repository_collaborators(caller: McpCaller, *, owner: str, repo: str, affiliation: Literal['outside', 'direct', 'all'] | None = None, page: float | None = None, perPage: float | None = None) -> Any:
@@ -950,17 +969,20 @@ async def run_secret_scanning(caller: McpCaller, *, files: Any, owner: str, repo
 run_secret_scanning.__schema__ = {'type': 'object', 'properties': {'files': {'description': 'A single string or an array of strings containing file contents, snippets, or diff hunks to scan for secrets. These must be raw contents, not repository file paths.', 'anyOf': [{'type': 'string', 'minLength': 1}, {'type': 'array', 'items': {'type': 'string'}, 'minItems': 1, 'maxItems': 100}]}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['files', 'owner', 'repo']}
 
 
-async def search_code(caller: McpCaller, *, query: str, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: str | None = None) -> SearchCodeResult:
+async def search_code(caller: McpCaller, *, query: str, fields: list[Literal['name', 'path', 'sha', 'repository', 'text_matches']] | None = None, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: str | None = None) -> SearchCodeResult:
     """Fast and precise code search across ALL GitHub repositories using GitHub's native search engine. Best for finding exact symbols, functions, classes, or specific code patterns.
 
     Args:
         query: Search query (GitHub code search REST). Implicit AND between terms; supports `OR`, `NOT`, and `"quoted phrase"` for exact match. Qualifiers: `repo:owner/repo`, `org:`, `user:`, `language:`, `path:dir` (prefix match), `filename:exact.ext`, `extension:`, `in:file`, `in:path`, `size:`, `is:archived`, `is:fork`. Max 256 chars. Examples: `WithContext language:go org:github`; `"package main" repo:o/r`; `func extension:go path:cmd repo:o/r`; `NOT TODO language:go repo:o/r`.
+        fields: Subset of fields to return for each code search result. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'repository' and 'text_matches' in particular drops the largest per-result data.
         order: Sort order for results. One of: 'asc', 'desc'
         page: Page number for pagination (min 1)
         perPage: Results per page for pagination (min 1, max 100)
         sort: Sort field ('indexed' only)
     """
     args: dict[str, Any] = {"query": query}
+    if fields is not None:
+        args["fields"] = fields
     if order is not None:
         args["order"] = order
     if page is not None:
@@ -971,7 +993,7 @@ async def search_code(caller: McpCaller, *, query: str, order: Literal['asc', 'd
         args["sort"] = sort
     return cast("SearchCodeResult", await caller.call(SERVER, "search_code", args))
 
-search_code.__schema__ = {'type': 'object', 'properties': {'order': {'type': 'string', 'description': 'Sort order for results', 'enum': ['asc', 'desc']}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': 'Search query (GitHub code search REST). Implicit AND between terms; supports `OR`, `NOT`, and `"quoted phrase"` for exact match. Qualifiers: `repo:owner/repo`, `org:`, `user:`, `language:`, `path:dir` (prefix match), `filename:exact.ext`, `extension:`, `in:file`, `in:path`, `size:`, `is:archived`, `is:fork`. Max 256 chars. Examples: `WithContext language:go org:github`; `"package main" repo:o/r`; `func extension:go path:cmd repo:o/r`; `NOT TODO language:go repo:o/r`.'}, 'sort': {'type': 'string', 'description': "Sort field ('indexed' only)"}}, 'required': ['query']}
+search_code.__schema__ = {'type': 'object', 'properties': {'fields': {'type': 'array', 'items': {'type': 'string', 'enum': ['name', 'path', 'sha', 'repository', 'text_matches']}, 'description': "Subset of fields to return for each code search result. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'repository' and 'text_matches' in particular drops the largest per-result data."}, 'order': {'type': 'string', 'description': 'Sort order for results', 'enum': ['asc', 'desc']}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': 'Search query (GitHub code search REST). Implicit AND between terms; supports `OR`, `NOT`, and `"quoted phrase"` for exact match. Qualifiers: `repo:owner/repo`, `org:`, `user:`, `language:`, `path:dir` (prefix match), `filename:exact.ext`, `extension:`, `in:file`, `in:path`, `size:`, `is:archived`, `is:fork`. Max 256 chars. Examples: `WithContext language:go org:github`; `"package main" repo:o/r`; `func extension:go path:cmd repo:o/r`; `NOT TODO language:go repo:o/r`.'}, 'sort': {'type': 'string', 'description': "Sort field ('indexed' only)"}}, 'required': ['query']}
 
 
 async def search_commits(caller: McpCaller, *, query: str, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: Literal['author-date', 'committer-date'] | None = None) -> SearchCommitsResult:
@@ -998,11 +1020,12 @@ async def search_commits(caller: McpCaller, *, query: str, order: Literal['asc',
 search_commits.__schema__ = {'type': 'object', 'properties': {'order': {'type': 'string', 'description': 'Sort order', 'enum': ['asc', 'desc']}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': 'Commit search query (GitHub commit search REST). Searches commit messages on the default branch only. Scope the search with `repo:owner/repo`, `org:`, or `user:` (queries without a scope qualifier match across all of GitHub and are usually not what you want). Other qualifiers: `author:`, `committer:`, `author-name:`, `committer-name:`, `author-email:`, `committer-email:`, `author-date:`, `committer-date:` (supports `>`, `<`, `>=`, `<=`, and `YYYY-MM-DD..YYYY-MM-DD` ranges), `merge:true|false`, `hash:`, `tree:`, `parent:`, `is:public`. Examples: `repo:owner/repo fix panic`; `org:github author:defunkt committer-date:>=2024-01-01`; `"refactor cache" repo:o/r`; `hash:abc1234 repo:o/r`.'}, 'sort': {'type': 'string', 'description': 'Sort by author or committer date (defaults to best match)', 'enum': ['author-date', 'committer-date']}}, 'required': ['query']}
 
 
-async def search_issues(caller: McpCaller, *, query: str, order: Literal['asc', 'desc'] | None = None, owner: str | None = None, page: float | None = None, perPage: float | None = None, repo: str | None = None, sort: Literal['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated'] | None = None) -> SearchIssuesResult:
-    """Search for issues in GitHub repositories using issues search syntax already scoped to is:issue
+async def search_issues(caller: McpCaller, *, query: str, fields: list[Literal['number', 'title', 'body', 'state', 'state_reason', 'draft', 'locked', 'html_url', 'user', 'author_association', 'labels', 'assignee', 'assignees', 'milestone', 'comments', 'reactions', 'created_at', 'updated_at', 'closed_at', 'closed_by', 'type', 'repository_url', 'pull_request', 'field_values']] | None = None, order: Literal['asc', 'desc'] | None = None, owner: str | None = None, page: float | None = None, perPage: float | None = None, repo: str | None = None, sort: Literal['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated'] | None = None) -> SearchIssuesResult:
+    """Search issues using natural-language semantic matching. Best for conceptual or paraphrased queries (e.g. "login fails after password reset"). Already scoped to is:issue.
 
     Args:
-        query: Search query using GitHub issues search syntax
+        query: The search query, as natural language. When the user gives alternative wordings, include them as plain words rather than joining them with OR.
+        fields: Subset of fields to return for each issue result. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body', 'reactions', and 'labels' in particular drops the largest per-result data.
         order: Sort order. One of: 'asc', 'desc'
         owner: Optional repository owner. If provided with repo, only issues for this repository are listed.
         page: Page number for pagination (min 1)
@@ -1011,6 +1034,8 @@ async def search_issues(caller: McpCaller, *, query: str, order: Literal['asc', 
         sort: Sort field by number of matches of categories, defaults to best match. One of: 'comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated'
     """
     args: dict[str, Any] = {"query": query}
+    if fields is not None:
+        args["fields"] = fields
     if order is not None:
         args["order"] = order
     if owner is not None:
@@ -1025,14 +1050,15 @@ async def search_issues(caller: McpCaller, *, query: str, order: Literal['asc', 
         args["sort"] = sort
     return cast("SearchIssuesResult", await caller.call(SERVER, "search_issues", args))
 
-search_issues.__schema__ = {'type': 'object', 'properties': {'order': {'type': 'string', 'description': 'Sort order', 'enum': ['asc', 'desc']}, 'owner': {'type': 'string', 'description': 'Optional repository owner. If provided with repo, only issues for this repository are listed.', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': 'Search query using GitHub issues search syntax'}, 'repo': {'type': 'string', 'description': 'Optional repository name. If provided with owner, only issues for this repository are listed.', 'x-mcp-header': 'repo'}, 'sort': {'type': 'string', 'description': 'Sort field by number of matches of categories, defaults to best match', 'enum': ['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated']}}, 'required': ['query']}
+search_issues.__schema__ = {'type': 'object', 'properties': {'fields': {'type': 'array', 'items': {'type': 'string', 'enum': ['number', 'title', 'body', 'state', 'state_reason', 'draft', 'locked', 'html_url', 'user', 'author_association', 'labels', 'assignee', 'assignees', 'milestone', 'comments', 'reactions', 'created_at', 'updated_at', 'closed_at', 'closed_by', 'type', 'repository_url', 'pull_request', 'field_values']}, 'description': "Subset of fields to return for each issue result. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body', 'reactions', and 'labels' in particular drops the largest per-result data."}, 'order': {'type': 'string', 'description': 'Sort order', 'enum': ['asc', 'desc']}, 'owner': {'type': 'string', 'description': 'Optional repository owner. If provided with repo, only issues for this repository are listed.', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': 'The search query, as natural language. When the user gives alternative wordings, include them as plain words rather than joining them with OR.'}, 'repo': {'type': 'string', 'description': 'Optional repository name. If provided with owner, only issues for this repository are listed.', 'x-mcp-header': 'repo'}, 'sort': {'type': 'string', 'description': 'Sort field by number of matches of categories, defaults to best match', 'enum': ['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated']}}, 'required': ['query']}
 
 
-async def search_pull_requests(caller: McpCaller, *, query: str, order: Literal['asc', 'desc'] | None = None, owner: str | None = None, page: float | None = None, perPage: float | None = None, repo: str | None = None, sort: Literal['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated'] | None = None) -> SearchPRsResult:
+async def search_pull_requests(caller: McpCaller, *, query: str, fields: list[Literal['number', 'title', 'body', 'state', 'state_reason', 'draft', 'locked', 'html_url', 'user', 'author_association', 'labels', 'assignee', 'assignees', 'milestone', 'comments', 'reactions', 'created_at', 'updated_at', 'closed_at', 'closed_by', 'pull_request', 'repository_url']] | None = None, order: Literal['asc', 'desc'] | None = None, owner: str | None = None, page: float | None = None, perPage: float | None = None, repo: str | None = None, sort: Literal['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated'] | None = None) -> SearchPRsResult:
     """Search for pull requests in GitHub repositories using issues search syntax already scoped to is:pr
 
     Args:
         query: Search query using GitHub pull request search syntax
+        fields: Subset of fields to return for each pull request result. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body', 'reactions', and 'labels' in particular drops the largest per-result data.
         order: Sort order. One of: 'asc', 'desc'
         owner: Optional repository owner. If provided with repo, only pull requests for this repository are listed.
         page: Page number for pagination (min 1)
@@ -1041,6 +1067,8 @@ async def search_pull_requests(caller: McpCaller, *, query: str, order: Literal[
         sort: Sort field by number of matches of categories, defaults to best match. One of: 'comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated'
     """
     args: dict[str, Any] = {"query": query}
+    if fields is not None:
+        args["fields"] = fields
     if order is not None:
         args["order"] = order
     if owner is not None:
@@ -1055,7 +1083,7 @@ async def search_pull_requests(caller: McpCaller, *, query: str, order: Literal[
         args["sort"] = sort
     return cast("SearchPRsResult", await caller.call(SERVER, "search_pull_requests", args))
 
-search_pull_requests.__schema__ = {'type': 'object', 'properties': {'order': {'type': 'string', 'description': 'Sort order', 'enum': ['asc', 'desc']}, 'owner': {'type': 'string', 'description': 'Optional repository owner. If provided with repo, only pull requests for this repository are listed.', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': 'Search query using GitHub pull request search syntax'}, 'repo': {'type': 'string', 'description': 'Optional repository name. If provided with owner, only pull requests for this repository are listed.', 'x-mcp-header': 'repo'}, 'sort': {'type': 'string', 'description': 'Sort field by number of matches of categories, defaults to best match', 'enum': ['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated']}}, 'required': ['query']}
+search_pull_requests.__schema__ = {'type': 'object', 'properties': {'fields': {'type': 'array', 'items': {'type': 'string', 'enum': ['number', 'title', 'body', 'state', 'state_reason', 'draft', 'locked', 'html_url', 'user', 'author_association', 'labels', 'assignee', 'assignees', 'milestone', 'comments', 'reactions', 'created_at', 'updated_at', 'closed_at', 'closed_by', 'pull_request', 'repository_url']}, 'description': "Subset of fields to return for each pull request result. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body', 'reactions', and 'labels' in particular drops the largest per-result data."}, 'order': {'type': 'string', 'description': 'Sort order', 'enum': ['asc', 'desc']}, 'owner': {'type': 'string', 'description': 'Optional repository owner. If provided with repo, only pull requests for this repository are listed.', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': 'Search query using GitHub pull request search syntax'}, 'repo': {'type': 'string', 'description': 'Optional repository name. If provided with owner, only pull requests for this repository are listed.', 'x-mcp-header': 'repo'}, 'sort': {'type': 'string', 'description': 'Sort field by number of matches of categories, defaults to best match', 'enum': ['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated']}}, 'required': ['query']}
 
 
 async def search_repositories(caller: McpCaller, *, query: str, minimal_output: bool | None = None, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: Literal['stars', 'forks', 'help-wanted-issues', 'updated'] | None = None) -> SearchReposResult:
@@ -1119,6 +1147,7 @@ async def sub_issue_write(caller: McpCaller, *, issue_number: float, method: str
     - 'add' - add a sub-issue to a parent issue in a GitHub repository.
     - 'remove' - remove a sub-issue from a parent issue in a GitHub repository.
     - 'reprioritize' - change the order of sub-issues within a parent issue in a GitHub repository. Use either 'after_id' or 'before_id' to specify the new position.
+    Writes issue hierarchy. To move a sub-issue to a new parent, use `add` with `replace_parent=true`; there is no writable parent field.
         owner: Repository owner
         repo: Repository name
         sub_issue_id: The ID of the sub-issue to add. ID is not the same as issue number
@@ -1135,7 +1164,7 @@ async def sub_issue_write(caller: McpCaller, *, issue_number: float, method: str
         args["replace_parent"] = replace_parent
     return await caller.call(SERVER, "sub_issue_write", args)
 
-sub_issue_write.__schema__ = {'type': 'object', 'properties': {'after_id': {'type': 'number', 'description': 'The ID of the sub-issue to be prioritized after (either after_id OR before_id should be specified)'}, 'before_id': {'type': 'number', 'description': 'The ID of the sub-issue to be prioritized before (either after_id OR before_id should be specified)'}, 'issue_number': {'type': 'number', 'description': 'The number of the parent issue'}, 'method': {'type': 'string', 'description': "The action to perform on a single sub-issue\nOptions are:\n- 'add' - add a sub-issue to a parent issue in a GitHub repository.\n- 'remove' - remove a sub-issue from a parent issue in a GitHub repository.\n- 'reprioritize' - change the order of sub-issues within a parent issue in a GitHub repository. Use either 'after_id' or 'before_id' to specify the new position.\n\t\t\t\t"}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'replace_parent': {'type': 'boolean', 'description': "When true, replaces the sub-issue's current parent issue. Use with 'add' method only."}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sub_issue_id': {'type': 'number', 'description': 'The ID of the sub-issue to add. ID is not the same as issue number'}}, 'required': ['method', 'owner', 'repo', 'issue_number', 'sub_issue_id']}
+sub_issue_write.__schema__ = {'type': 'object', 'properties': {'after_id': {'type': 'number', 'description': 'The ID of the sub-issue to be prioritized after (either after_id OR before_id should be specified)'}, 'before_id': {'type': 'number', 'description': 'The ID of the sub-issue to be prioritized before (either after_id OR before_id should be specified)'}, 'issue_number': {'type': 'number', 'description': 'The number of the parent issue'}, 'method': {'type': 'string', 'description': "The action to perform on a single sub-issue\nOptions are:\n- 'add' - add a sub-issue to a parent issue in a GitHub repository.\n- 'remove' - remove a sub-issue from a parent issue in a GitHub repository.\n- 'reprioritize' - change the order of sub-issues within a parent issue in a GitHub repository. Use either 'after_id' or 'before_id' to specify the new position.\nWrites issue hierarchy. To move a sub-issue to a new parent, use `add` with `replace_parent=true`; there is no writable parent field.\n"}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'replace_parent': {'type': 'boolean', 'description': "When true, replaces the sub-issue's current parent issue. Use with 'add' method only."}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sub_issue_id': {'type': 'number', 'description': 'The ID of the sub-issue to add. ID is not the same as issue number'}}, 'required': ['method', 'owner', 'repo', 'issue_number', 'sub_issue_id']}
 
 
 async def update_pull_request(caller: McpCaller, *, owner: str, pullNumber: float, repo: str, base: str | None = None, body: str | None = None, draft: bool | None = None, maintainer_can_modify: bool | None = None, reviewers: list[str] | None = None, state: Literal['open', 'closed'] | None = None, title: str | None = None) -> Any:

@@ -14,76 +14,53 @@ SERVER = 'huggingface'
 
 
 
-async def hf_doc_fetch(caller: McpCaller, *, doc_url: str, offset: float | None = None) -> Any:
-    """Fetch a document from the Hugging Face or Gradio documentation library. For large documents, use offset to get subsequent chunks.
+async def hf_fs(caller: McpCaller, *, operations: list[dict]) -> Any:
+    """When to use: Hugging Face Hub models, datasets, Spaces, collections, papers, daily papers, today's trending models, current paper leaderboard, docs, and repository files.
 
-    Args:
-        doc_url: Documentation URL (Hugging Face or Gradio)
-        offset: Token offset for large documents (use the offset from truncation message)
-    """
-    args: dict[str, Any] = {"doc_url": doc_url}
-    if offset is not None:
-        args["offset"] = offset
-    return await caller.call(SERVER, "hf_doc_fetch", args)
+    Examples:
+      {"operations":[{"cmd":"ls","args":["hf://models/trending","--limit","10"]}]}
+      {"operations":[{"cmd":"ls","args":["hf://papers/trending"]}]}
+      {"operations":[{"cmd":"ls","args":["hf://papers/daily/latest"]}]}
 
-hf_doc_fetch.__schema__ = {'type': 'object', 'properties': {'doc_url': {'type': 'string', 'maxLength': 200, 'description': 'Documentation URL (Hugging Face or Gradio)'}, 'offset': {'type': 'number', 'minimum': 0, 'description': 'Token offset for large documents (use the offset from truncation message)'}}, 'required': ['doc_url'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+    Use hf_fs for Hugging Face Hub filesystem operations. Call it with operations, an array of {cmd, args} items; multiple operations may be submitted together.
 
+    Usage:
+      {"operations":[{"cmd":"ls","args":["hf://models/org/repo"]}]}
 
-async def hf_doc_search(caller: McpCaller, *, query: str, product: str | None = None) -> Any:
-    """Search and Discover Hugging Face Product and Library documentation. Send an empty query to discover structure and navigation instructions. Knowledge up-to-date as at 13 July 2026. Combine with the Product filter to focus results.
-
-    Args:
-        query: Start with an empty query for structure, endpoint discovery and navigation tips. Use semantic queries for targetted searches.
-        product: Filter by Product. Supply when known for focused results
-    """
-    args: dict[str, Any] = {"query": query}
-    if product is not None:
-        args["product"] = product
-    return await caller.call(SERVER, "hf_doc_search", args)
-
-hf_doc_search.__schema__ = {'type': 'object', 'properties': {'query': {'type': 'string', 'maxLength': 200, 'description': 'Start with an empty query for structure, endpoint discovery and navigation tips. Use semantic queries for targetted searches.'}, 'product': {'type': 'string', 'description': 'Filter by Product. Supply when known for focused results'}}, 'required': ['query'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
-
-
-async def hf_fs(caller: McpCaller, *, cmd: Literal['ls', 'cat', 'stat', 'find', 'search'], args: list[str]) -> Any:
-    """Navigate Hugging Face resources with ls, cat, find, stat, and search over hf:// URIs. Roots: hf://models, hf://datasets, hf://spaces, hf://buckets, hf://collections, hf://papers. For papers, ls hf://papers/ARXIV_ID to discover related resources; cat hf://papers/ARXIV_ID/paper.md or metadata.json.
-
-    Grammar; each token below is one args array element:
-      ls     URI [(-R|-r|--recursive)] [--glob GLOB]
-                 [(-type|--type|--entry-type) TYPE] [--sort SORT] [--limit N]
+    Grammar; each string below is one args array item:
+      ls     URI [--recursive] [--glob GLOB] [--type TYPE] [--sort SORT] [--limit N]
       cat    URI [--offset N] [--max-bytes N]
+      attach URI [--max-bytes N]
       stat   URI
-      find   URI [(-name|--name) GLOB] [(-path|--path) GLOB]
-                 [(-type|--type|--entry-type) TYPE] [--limit N]
-      search URI QUERY [(-type|--type|--entry-type) TYPE] [--sort SORT] [--limit N]
+      find   URI [--name GLOB] [--path GLOB] [--type TYPE] [--limit N]
+      search URI [QUERY] [--type TYPE] [--sort SORT] [--tag TAG] [--kind mcp] [--limit N]
 
+    COMMAND = ls|cat|attach|stat|find|search.
     TYPE = file|dir|repo|bucket|collection|paper|link.
-    Type aliases: f=file, d=dir, l=link, model|dataset|space=repo.
     SORT = createdAt|downloads|likes|lastModified|likes30d|trendingScore|mainSize|id|trending|upvotes.
-    URI starts with hf://. QUERY and GLOB are each one string token.
-    Search URI: hf://models|datasets|spaces[/OWNER], hf://collections[/OWNER], or exactly hf://papers; not hf://.
-    Trending listings: ls hf://models/trending, hf://datasets/trending, or hf://spaces/trending. They return up to 20 entries.
-    Trending paths imply trending order; --sort trending|trendingScore is redundant but valid.
-    Trending papers: ls hf://papers/trending.
-    TYPE filters mixed results; omit it when the URI already fixes the result type.
-    Limits and path-specific behavior are documented at hf://README.md.
-    Omit --limit and --sort unless the request asks for a cap, ordering, or exhaustive results.
-    No pipes, redirects, shell expansion, or multiple commands.
+    URI is a canonical hf:// URI. QUERY and GLOB are each one string.
+
+    Use search for discovery, ls for a known directory, find for recursive matching within a known scope, stat for filesystem metadata or an uncertain target type, cat for text contents, and attach for a complete JPEG, PNG, or WebP image. When the request gives an exact text-file URI, use cat directly; do not add ls or stat first. stat does not read the contents of JSON, Markdown, or other text files.
+
+    Search scopes: hf://models|datasets|spaces[/OWNER], hf://collections[/OWNER], hf://papers, and hf://docs[/...]. Paper and documentation search require QUERY. Repeat --tag only for search hf://spaces; --kind mcp selects MCP Spaces.
+    Use ls hf://models/trending, hf://datasets/trending, hf://spaces/trending, or hf://papers/trending for trending listings.
+    For a named paper.md or metadata.json, use cat directly. Use ls on a paper only to discover an unnamed related resource.
+    Omit --limit, --sort, and --type unless the request requires them. Limits and path-specific behavior are documented at hf://README.md. Issue one hf_fs call.
 
     Args:
-        cmd: Command to execute.. One of: 'ls', 'cat', 'stat', 'find', 'search'
-        args: Command arguments; each array item is one grammar token.
+        operations:
     """
-    args: dict[str, Any] = {"cmd": cmd, "args": args}
+    args: dict[str, Any] = {"operations": operations}
     return await caller.call(SERVER, "hf_fs", args)
 
-hf_fs.__schema__ = {'type': 'object', 'properties': {'cmd': {'type': 'string', 'enum': ['ls', 'cat', 'stat', 'find', 'search'], 'description': 'Command to execute.'}, 'args': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Command arguments; each array item is one grammar token.'}}, 'required': ['cmd', 'args'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+hf_fs.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'operations': {'minItems': 1, 'maxItems': 30, 'type': 'array', 'items': {'type': 'object', 'properties': {'cmd': {'type': 'string', 'enum': ['ls', 'cat', 'attach', 'stat', 'find', 'search'], 'description': 'Command to execute.'}, 'args': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Command arguments; each array item is one grammar token.'}}, 'required': ['cmd', 'args'], 'additionalProperties': False}}}, 'required': ['operations'], 'additionalProperties': False}
 
 
 async def hf_whoami(caller: McpCaller) -> Any:
-    """Hugging Face tools are being used anonymously and may be rate limited. Call this tool for instructions on joining and authenticating."""
+    """Inspect the current Hugging Face authentication context, including the account, visible organization memberships, and credential access details. Read-only and never returns credential values."""
     return await caller.call(SERVER, "hf_whoami", {})
 
-hf_whoami.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {}}
+hf_whoami.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {}}
 
 
 async def hub_repo_details(caller: McpCaller, *, repo_ids: list[str], repo_type: Literal['model', 'dataset', 'space'] | None = None, operations: list[Literal['overview', 'dataset_structure', 'dataset_preview']] | None = None, config: str | None = None, split: str | None = None, offset: int | None = None, limit: int | None = None) -> Any:
@@ -113,11 +90,11 @@ async def hub_repo_details(caller: McpCaller, *, repo_ids: list[str], repo_type:
         args["limit"] = limit
     return await caller.call(SERVER, "hub_repo_details", args)
 
-hub_repo_details.__schema__ = {'type': 'object', 'properties': {'repo_ids': {'type': 'array', 'items': {'type': 'string', 'minLength': 1}, 'minItems': 1, 'maxItems': 10, 'description': 'Repo IDs for (models|dataset/space) - usually in author/name format (e.g. openai/gpt-oss-120b)'}, 'repo_type': {'type': 'string', 'enum': ['model', 'dataset', 'space'], 'description': 'Specify lookup type; otherwise auto-detects'}, 'operations': {'type': 'array', 'items': {'type': 'string', 'enum': ['overview', 'dataset_structure', 'dataset_preview']}, 'description': 'Details to return. Defaults to ["overview"]. For datasets, prefer ["overview", "dataset_structure"] first; then call ["dataset_preview"] with config and split.'}, 'config': {'type': 'string', 'description': 'Dataset Viewer config. Required for dataset_preview when the dataset has multiple config/split options. Discover via dataset_structure.'}, 'split': {'type': 'string', 'description': 'Dataset Viewer split. Required for dataset_preview when the dataset has multiple config/split options. Discover via dataset_structure.'}, 'offset': {'type': 'integer', 'minimum': 0, 'description': 'Row offset for dataset_preview. Defaults to 0.'}, 'limit': {'type': 'integer', 'description': 'Row count for dataset_preview. Defaults to 5 and is clamped to 1-100.'}}, 'required': ['repo_ids'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+hub_repo_details.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'repo_ids': {'minItems': 1, 'maxItems': 10, 'type': 'array', 'items': {'type': 'string', 'minLength': 1}, 'description': 'Repo IDs for (models|dataset/space) - usually in author/name format (e.g. openai/gpt-oss-120b)'}, 'repo_type': {'description': 'Specify lookup type; otherwise auto-detects', 'type': 'string', 'enum': ['model', 'dataset', 'space']}, 'operations': {'description': 'Details to return. Defaults to ["overview"]. For datasets, prefer ["overview", "dataset_structure"] first; then call ["dataset_preview"] with config and split.', 'type': 'array', 'items': {'type': 'string', 'enum': ['overview', 'dataset_structure', 'dataset_preview']}}, 'config': {'description': 'Dataset Viewer config. Required for dataset_preview when the dataset has multiple config/split options. Discover via dataset_structure.', 'type': 'string'}, 'split': {'description': 'Dataset Viewer split. Required for dataset_preview when the dataset has multiple config/split options. Discover via dataset_structure.', 'type': 'string'}, 'offset': {'description': 'Row offset for dataset_preview. Defaults to 0.', 'type': 'integer', 'minimum': 0, 'maximum': 9007199254740991}, 'limit': {'description': 'Row count for dataset_preview. Defaults to 5 and is clamped to 1-100.', 'type': 'integer', 'minimum': -9007199254740991, 'maximum': 9007199254740991}}, 'required': ['repo_ids']}
 
 
 async def hub_repo_search(caller: McpCaller, *, query: str | None = None, repo_types: list[Literal['model', 'dataset', 'space']] | None = None, author: str | None = None, filters: list[str] | None = None, sort: Literal['trendingScore', 'downloads', 'likes', 'createdAt', 'lastModified'] | None = None, limit: float | None = None) -> Any:
-    """Search Hugging Face repositories with a shared query interface. You can target models, datasets, spaces, or aggregate across multiple repo types in one call. Use space_search for semantic-first discovery of Spaces. Include links to repositories in your response.
+    """Search Hugging Face repositories with a shared query interface. You can target models, datasets, spaces, or aggregate across multiple repo types in one call. Include links to repositories in your response.
 
     Args:
         query: Search term. Leave blank and specify sort + limit to browse trending or recent repositories.
@@ -142,22 +119,4 @@ async def hub_repo_search(caller: McpCaller, *, query: str | None = None, repo_t
         args["limit"] = limit
     return await caller.call(SERVER, "hub_repo_search", args)
 
-hub_repo_search.__schema__ = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'Search term. Leave blank and specify sort + limit to browse trending or recent repositories.'}, 'repo_types': {'type': 'array', 'items': {'type': 'string', 'enum': ['model', 'dataset', 'space']}, 'minItems': 1, 'maxItems': 3, 'default': ['model', 'dataset'], 'description': 'Repository types to search. Defaults to ["model", "dataset"]. space uses keyword search via /api/spaces.'}, 'author': {'type': 'string', 'description': "Organization or user namespace to filter by (e.g. 'google', 'meta-llama', 'huggingface')."}, 'filters': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional hub filter tags. Applied to each selected repo type (e.g. ["text-generation"], ["language:en"], ["mcp-server"]).'}, 'sort': {'type': 'string', 'enum': ['trendingScore', 'downloads', 'likes', 'createdAt', 'lastModified'], 'description': 'Sort order (descending): trendingScore, downloads, likes, createdAt, lastModified'}, 'limit': {'type': 'number', 'minimum': 1, 'maximum': 100, 'default': 20, 'description': 'Maximum number of results to return per selected repo type'}}, 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
-
-
-async def space_search(caller: McpCaller, *, query: str, limit: float | None = None, mcp: bool | None = None) -> Any:
-    """Find Hugging Face Spaces using semantic search. IMPORTANT Only MCP Servers can be used with the dynamic_space toolInclude links to the Space when presenting the results.
-
-    Args:
-        query: Semantic Search Query
-        limit: Number of results to return. Default: 10
-        mcp: Only return MCP Server enabled Spaces. Default: False
-    """
-    args: dict[str, Any] = {"query": query}
-    if limit is not None:
-        args["limit"] = limit
-    if mcp is not None:
-        args["mcp"] = mcp
-    return await caller.call(SERVER, "space_search", args)
-
-space_search.__schema__ = {'type': 'object', 'properties': {'query': {'type': 'string', 'minLength': 1, 'maxLength': 100, 'description': 'Semantic Search Query'}, 'limit': {'type': 'number', 'default': 10, 'description': 'Number of results to return'}, 'mcp': {'type': 'boolean', 'default': False, 'description': 'Only return MCP Server enabled Spaces'}}, 'required': ['query'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
+hub_repo_search.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'query': {'description': 'Search term. Leave blank and specify sort + limit to browse trending or recent repositories.', 'type': 'string'}, 'repo_types': {'default': ['model', 'dataset'], 'description': 'Repository types to search. Defaults to ["model", "dataset"]. space uses keyword search via /api/spaces.', 'minItems': 1, 'maxItems': 3, 'type': 'array', 'items': {'type': 'string', 'enum': ['model', 'dataset', 'space']}}, 'author': {'description': "Organization or user namespace to filter by (e.g. 'google', 'meta-llama', 'huggingface').", 'type': 'string'}, 'filters': {'description': 'Optional hub filter tags. Applied to each selected repo type (e.g. ["text-generation"], ["language:en"], ["mcp-server"]).', 'type': 'array', 'items': {'type': 'string'}}, 'sort': {'description': 'Sort order (descending): trendingScore, downloads, likes, createdAt, lastModified', 'type': 'string', 'enum': ['trendingScore', 'downloads', 'likes', 'createdAt', 'lastModified']}, 'limit': {'default': 20, 'description': 'Maximum number of results to return per selected repo type', 'type': 'number', 'minimum': 1, 'maximum': 100}}}

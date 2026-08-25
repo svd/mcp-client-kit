@@ -15,8 +15,6 @@ SERVER = 'time'
 
 
 class TimeConversion(TypedDict, total=False):
-    source: dict
-    target: dict
     time_difference: str
 
 

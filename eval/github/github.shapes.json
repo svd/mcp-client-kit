@@ -54,6 +54,7 @@
       "body": "str",
       "draft": "bool",
       "prerelease": "bool",
+      "immutable": "bool",
       "id": "int",
       "created_at": "str",
       "published_at": "str",
@@ -63,8 +64,7 @@
       "upload_url": "str",
       "zipball_url": "str",
       "tarball_url": "str",
-      "node_id": "str",
-      "immutable": "bool"
+      "node_id": "str"
     },
     "source": "live",
     "probed_args": {
@@ -96,6 +96,7 @@
       "body": "str",
       "draft": "bool",
       "prerelease": "bool",
+      "immutable": "bool",
       "id": "int",
       "created_at": "str",
       "published_at": "str",
@@ -105,8 +106,7 @@
       "upload_url": "str",
       "zipball_url": "str",
       "tarball_url": "str",
-      "node_id": "str",
-      "immutable": "bool"
+      "node_id": "str"
     },
     "source": "live",
     "probed_args": {
@@ -232,7 +232,9 @@
     "_probe_status": "inconclusive"
   },
   "list_issues": {
-    "unwrap": ["issues"],
+    "unwrap": [
+      "issues"
+    ],
     "return_model": "IssueSummary",
     "return_container": "list",
     "input_overrides": {},
@@ -338,13 +340,13 @@
         "method": "get",
         "owner": "microsoft",
         "repo": "vscode",
-        "pullNumber": 325746
+        "pullNumber": 332572
       },
       {
         "method": "get_files",
         "owner": "microsoft",
         "repo": "vscode",
-        "pullNumber": 325746,
+        "pullNumber": 332572,
         "perPage": 3
       }
     ]
@@ -414,7 +416,8 @@
     "input_overrides": {},
     "fields": {
       "total_count": "int",
-      "incomplete_results": "bool"
+      "incomplete_results": "bool",
+      "search_type": "str"
     },
     "source": "live",
     "probed_args": {

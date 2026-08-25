@@ -95,13 +95,13 @@
       "method": "get",
       "owner": "microsoft",
       "repo": "vscode",
-      "pullNumber": 325746
+      "pullNumber": 332572
     },
     {
       "method": "get_files",
       "owner": "microsoft",
       "repo": "vscode",
-      "pullNumber": 325746,
+      "pullNumber": 332572,
       "perPage": 3
     }
   ],
@@ -135,5 +135,8 @@
     "files": [
       "const key = \"AKIAIOSFODNN7EXAMPLE\";"
     ]
+  },
+  "get_teams": {
+    "user": "torvalds"
   }
 }

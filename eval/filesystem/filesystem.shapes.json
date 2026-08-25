@@ -1,17 +1,12 @@
 {
   "directory_tree": {
     "unwrap": [],
-    "return_model": "DirectoryEntry",
-    "return_container": "list",
+    "return_model": null,
     "input_overrides": {},
-    "fields": {
-      "name": "str",
-      "type": "str",
-      "children": "list"
-    },
+    "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "<example-dir>"
+      "path": "/private/tmp/claude-501"
     }
   },
   "get_file_info": {
@@ -21,7 +16,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "<example-file>"
+      "path": "/private/tmp/rem.py"
     }
   },
   "list_allowed_directories": {
@@ -39,7 +34,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "<example-dir>"
+      "path": "/private/tmp"
     }
   },
   "list_directory_with_sizes": {
@@ -49,8 +44,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "<example-dir>",
-      "sortBy": "name"
+      "path": "/private/tmp"
     }
   },
   "read_file": {
@@ -59,15 +53,24 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "path": "<example-file>"
-      },
-      {
-        "path": "<example-file>",
-        "head": 1
-      }
-    ]
+    "probed_args": {
+      "path": "/private/tmp/rem.py"
+    }
+  },
+  "read_media_file": {
+    "unwrap": [],
+    "return_model": "MediaFile",
+    "input_overrides": {},
+    "fields": {
+      "type": "str",
+      "mimeType": "str",
+      "has_data": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "path": "<example-dir>/img.png"
+    },
+    "probe_args_scrubbed": true
   },
   "read_multiple_files": {
     "unwrap": [],
@@ -77,8 +80,8 @@
     "source": "live",
     "probed_args": {
       "paths": [
-        "<example-file>",
-        "<example-file-2>"
+        "/private/tmp/rem.py",
+        "/private/tmp/serve.out"
       ]
     }
   },
@@ -90,11 +93,15 @@
     "source": "live",
     "probed_args": [
       {
-        "path": "<example-file>"
+        "path": "/private/tmp/rem.py"
       },
       {
-        "path": "<example-file>",
-        "tail": 1
+        "path": "/private/tmp/rem.py",
+        "head": 3
+      },
+      {
+        "path": "/private/tmp/rem.py",
+        "tail": 3
       }
     ]
   },
@@ -105,8 +112,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "<example-dir>",
-      "pattern": "*.json"
+      "path": "/private/tmp",
+      "pattern": "*.py"
     }
   }
 }

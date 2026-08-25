@@ -6,9 +6,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "task": "how does the verify.py roundtrip check work"
+      "task": "How does the roundtrip verifier work?"
     },
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "_observed_bytes": 3918
   },
   "codegraph_explore": {
     "unwrap": [],
@@ -17,9 +18,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "verify.py ServerSpec"
+      "query": "verify.py roundtrip check"
     },
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "_observed_bytes": 12554
   },
   "codegraph_node": {
     "unwrap": [],
@@ -30,7 +32,8 @@
     "probed_args": {
       "symbol": "check_roundtrip"
     },
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "_observed_bytes": 515
   },
   "codegraph_search": {
     "unwrap": [],
@@ -39,9 +42,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "verify"
+      "query": "check_roundtrip"
     },
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "_observed_bytes": 614
   },
   "codegraph_trace": {
     "unwrap": [],
@@ -50,9 +54,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "from": "check_roundtrip",
-      "to": "CheckResult"
+      "from": "main",
+      "to": "check_roundtrip"
     },
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "_observed_bytes": 9995
   }
 }
