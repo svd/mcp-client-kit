@@ -13,8 +13,9 @@ uv run pytest                          # all tests
 uv run pytest tests/test_codegen.py    # single file
 uv run pytest -k "test_name"           # single test
 
-# Lint / type-check
-uv run ruff check mcpgen/
+# Lint / type-check — same three commands CI runs; all must pass before pushing
+uv run ruff check .            # `skills/` is excluded in pyproject.toml (Template placeholders)
+uv run ruff format --check .   # CI fails on formatting alone; `ruff format .` to fix
 uv run mypy
 
 # Build dist
@@ -23,6 +24,13 @@ uv build
 # Run CLI from clone (no install)
 .venv/bin/mcpgen codegen <server> --out <server>.py
 ```
+
+## Comments
+
+Comments describe the code as it stands, not the changes that produced it. Write what
+constrains the current implementation — RFC citations, ordering requirements, known gaps —
+and leave the history to git. Do not append a new paragraph per fix: revise the existing
+comment instead, so it never explains behaviour that is no longer there.
 
 ## Architecture
 

@@ -10,33 +10,21 @@ browser re-auth (authorization_code flow) instead of a silent refresh —
 `_pre_flight_refresh()` renews the access token out-of-band (plain httpx, RFC 8414
 discovery) before the session opens.
 
-VERIFIED (2026-06-14, eval_preflight.py + mcp 1.27.2 source read): pre-flight IS
-load-bearing — but the precise
-reason is subtler than "the SDK can't refresh". The SDK's `async_auth_flow` DOES
-have a silent `refresh_token`-grant branch (`if not is_token_valid() and
-can_refresh_token(): _refresh_token()`). It is simply UNREACHABLE for a
-fresh-process CLI: `_initialize()` loads tokens from storage but never calls
-`update_token_expiry`, so `token_expiry_time` stays None and `is_token_valid()`
-(`not token_expiry_time or now <= token_expiry_time`) reports ANY disk-loaded
-access token as valid regardless of real expiry. The proactive branch never fires;
-the stale token is sent blind → 401. On 401 the SDK runs `authorization_code`
-(browser), NOT a refresh grant. Net: every fresh CLI invocation that finds an
-expired access token would re-auth in a browser without pre-flight. Conclusion:
-do NOT drop pre-flight. (The server supports refresh grants — the SDK just
-never reaches the code that issues them at cold start.)
+Why pre-flight is load-bearing, not why the SDK "cannot refresh": the SDK's
+`async_auth_flow` does have a silent `refresh_token`-grant branch, but it is
+unreachable for a fresh-process CLI. `_initialize()` loads tokens from storage
+without calling `update_token_expiry`, so `token_expiry_time` stays None and
+`is_token_valid()` reports any disk-loaded access token as valid whatever its real
+expiry. The stale token goes out blind, the resource server answers 401, and on 401
+the SDK runs `authorization_code` (browser), not a refresh grant.
 
-The `get_tokens` None-gate (line 125) is redundant but harmless: without pre-flight
-both gate-ON and gate-OFF lead to browser re-auth on expired tokens. It short-
-circuits one unnecessary 401 round-trip when pre-flight fails for other reasons.
+The `get_tokens` None-gate is a cheap backstop: it short-circuits one 401 round-trip
+when pre-flight fails for other reasons.
 
-VERSION-SENSITIVE: this is mcp 1.27.2 behavior (dep is bounded `<2`). If a future
-SDK calls `update_token_expiry` inside `_initialize`, the cold-start gap closes and
-the SDK's own proactive refresh fires — re-run eval_preflight.py and re-evaluate
-whether pre-flight is still needed.
-
-Unrelated: FastMCP is not a dependency. FastMCP issue #3425 (stale expires_in on
-reload) is a FastMCP bug fixed in fastmcp 3.2.0; our FileTokenStorage stores
-absolute `expires_at` so that class of bug cannot occur regardless.
+VERSION-SENSITIVE: verified against mcp 1.27.2 (dep bounded `<2`) with
+eval_preflight.py. If a future SDK calls `update_token_expiry` inside `_initialize`,
+the cold-start gap closes and the SDK's own proactive refresh fires — re-run
+eval_preflight.py and re-evaluate whether pre-flight is still needed.
 """
 
 from __future__ import annotations
@@ -46,16 +34,19 @@ import asyncio
 import errno as _errno
 import json
 import os
+import re
 import shlex
 import stat
 import sys
+import threading
 import time
 import warnings
 import webbrowser
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from collections.abc import Callable, Iterator
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlparse
 
 import httpx
 from mcp import ClientSession
@@ -83,6 +74,14 @@ _VALID_BACKENDS: frozenset[str] = frozenset({"file", "keyring", "auto"})
 _KEYRING_SERVICE: str = "mcpgen"
 _KEYRING_USER: str = "credentials"
 
+_KEYRING_LOCK_PATH: Path = DEFAULT_CREDS_PATH.with_name("keyring")
+"""Lock rendezvous for the keyring store.
+
+The keyring holds one global item under the fixed service and user above, so its lock
+path is fixed too — `--creds` is ignored on this backend and keying the lock on it would
+put two processes on different sidecars around the same item. `_store_lock` appends
+`.lock`, so the file lands at `~/.mcpgen/keyring.lock`."""
+
 
 def _load_client_config(path: Path | None = None) -> dict:
     """Load ~/.mcpgen/config.json (or override path). Returns {} if absent/invalid."""
@@ -105,7 +104,7 @@ def _save_client_config(updates: dict, path: Path | None = None) -> None:
     data = _load_client_config(target)
     data.update(updates)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(".tmp")
+    tmp = target.with_name(f"{target.name}.tmp.{os.getpid()}")  # see FileTokenStorage._file_save
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, json.dumps(data, indent=2).encode())
@@ -161,12 +160,27 @@ def _detect_keyring() -> str:
 # ── Raw keyring helpers (raise on error — no silent fallback) ────────────────
 
 
+def _require_store(parsed: object, doc: str) -> dict:
+    """*parsed* if it is a credential store, else raise as if the bytes had not parsed.
+
+    A store is a JSON *object* keyed by server name. `[]`, `null`, `42` and a bare string
+    all parse cleanly and are none of them a store, usually from a bad hand-edit.
+
+    The raise is `json.JSONDecodeError` at offset 0 — the defect is the top-level value —
+    so every existing reader of the store, including `login()`'s quarantine, handles a
+    wrong-shaped store the same way it handles unparseable bytes.
+    """
+    if not isinstance(parsed, dict):
+        raise json.JSONDecodeError(f"credential store is not a JSON object (got {type(parsed).__name__})", doc, 0)
+    return parsed
+
+
 def _keyring_read_raw() -> dict:
     """Read all credentials from the OS keyring. Raises on any failure."""
     import keyring as _kr  # lazy — tests can monkeypatch sys.modules["keyring"]
 
     raw = _kr.get_password(_KEYRING_SERVICE, _KEYRING_USER)
-    return json.loads(raw) if raw else {}
+    return _require_store(json.loads(raw), raw) if raw else {}
 
 
 def _keyring_write_raw(data: dict) -> None:
@@ -374,16 +388,23 @@ def _client_metadata(server_name: str, callback_uri: str, client_name: str | Non
 
 
 def _explain_registration_error(exc: OAuthRegistrationError) -> OAuthRegistrationError:
-    """Annotate `invalid_client_metadata` with its most likely cause.
+    """Annotate `invalid_client_metadata` with its most likely cause, credential removed.
 
-    An AS that does not support public clients MUST reject our registration
-    (RFC 7591 §2) rather than downgrade it. No such server is known, so rather than
-    carry a speculative override flag we make the failure legible if one turns up.
+    An AS that does not support public clients must reject our registration
+    (RFC 7591 §2) rather than downgrade it. No such server is known, so there is no
+    override flag — only a legible failure if one turns up.
+
+    Every registration error passes through here, so the redaction sits here rather than
+    at the raise sites. It is needed because the SDK reports a 2xx registration body that
+    fails validation as `OAuthRegistrationError(f"Invalid registration response: {pydantic}")`,
+    and an RFC 7591 response carries `client_secret`, quoted back as a repr —
+    the spelling `_SECRET_REPR_RE` matches.
     """
-    if "invalid_client_metadata" not in str(exc):
-        return exc
+    text = _redact_secret_text(str(exc))
+    if "invalid_client_metadata" not in text:
+        return OAuthRegistrationError(text) if text != str(exc) else exc
     return OAuthRegistrationError(
-        f"{exc}\n\n"
+        f"{text}\n\n"
         "Likely cause: mcpgen registers as a public client "
         "(token_endpoint_auth_method=none), and this authorization server appears to "
         "require a client_secret. Please report this at "
@@ -394,30 +415,216 @@ def _explain_registration_error(exc: OAuthRegistrationError) -> OAuthRegistratio
 # Treat a cached token as expired this many seconds before its real expiry.
 _MARGIN = 120
 
-# How long the interactive login waits for the browser to hit the local callback
-# server. Some authorization servers drop the user on cancel without an error
-# redirect, so the callback simply never arrives — bound the wait rather than
-# hang forever. Generous: it has to cover reading a consent screen and an MFA
-# prompt. Headless login is not bounded — a human pasting a URL may take any
-# amount of time.
+# Sub-500 statuses from the token endpoint that mean "ask again later", not "the
+# grant is dead":
+#   408 — the proxy layer never processed the request; RFC 9110 §15.5.9 says to repeat it.
+#   429 — rate limited; the next attempt is expected to succeed.
+_RETRYABLE_REFRESH_STATUS = frozenset({408, 429})
+
+# RFC 6749 §5.2 error codes that mean the cached credential is gone, so a browser round
+# is the fix:
+#   invalid_grant       — the refresh token is expired, revoked, or was never ours.
+#   invalid_client      — the client registration was rejected.
+#   unauthorized_client — this client may not use the refresh_token grant.
+# The last two fault the registration rather than the token; `login()` drops the cached
+# `client_info` first, so the SDK registers anew and does replace what failed. A server
+# whose policy forbids refresh for this client class answers the same way to the new
+# registration — one avoidable browser prompt, but headless callers keep a route back.
+#
+# The remaining §5.2 codes (invalid_request, unsupported_grant_type, invalid_scope)
+# fault the *request*: the grant is untouched, and logging in again resends it.
+_DEAD_GRANT_ERRORS = frozenset({"invalid_grant", "invalid_client", "unauthorized_client"})
+
+# Error codes naming a temporary condition. §5.2 defines neither — they belong to the
+# authorization endpoint (§4.1.2.1) — but servers reuse them at the token endpoint, and
+# both mean the same request may work later. RFC 8628's `slow_down` is excluded: it is a
+# device-flow polling code that cannot arrive on a refresh_token grant.
+_RETRYABLE_REFRESH_ERRORS = frozenset({"temporarily_unavailable", "server_error"})
+
+# How long interactive login waits for the browser to hit the local callback server.
+# Some authorization servers drop the user on cancel without an error redirect, so the
+# callback never arrives. Generous enough to cover a consent screen and an MFA prompt.
+# Headless login is unbounded — a human pasting a URL may take any amount of time.
 _CALLBACK_TIMEOUT = 300
 
 
 class ReauthenticationRequired(Exception):
-    """Tokens absent or refresh failed. Run: mcpgen login <server>"""
+    """Tokens absent or the grant is dead. Run: mcpgen login <server>"""
 
 
-class PostLoginCheckFailed(Exception):
+class LoginWontHelp(Exception):
+    """Base for auth failures another browser round cannot fix.
+
+    The counterpart to ``ReauthenticationRequired``. It is named for what a caller can
+    act on rather than for a cause: sending the user through the browser again changes
+    nothing. Batch callers should catch this and abort rather than re-prompting once per
+    item. Catch a subclass only when the difference between them matters.
+    """
+
+
+class PostLoginCheckFailed(LoginWontHelp):
     """The OAuth flow finished and the token is cached, but the check after it failed.
 
-    The counterpart to ``ReauthenticationRequired``, and deliberately not named for
-    a cause: the token was issued, which says nothing about whether the resource
-    server accepted it. A 502 from the origin, a post-login 401 over scope or
-    audience, and an MCP-level error from ``list_tools()`` all raise this. What
-    they have in common — and the only thing a caller can act on — is that another
-    browser round will not fix them. Batch callers should abort here rather than
-    re-prompting once per item; that distinction is why this type exists.
+    The token was issued, which says nothing about whether the resource server
+    accepted it. A 502 from the origin, a post-login 401 over scope or audience,
+    and an MCP-level error from ``list_tools()`` all raise this.
     """
+
+
+class TokenRefreshUnavailable(LoginWontHelp):
+    """The cached grant was not renewed, and no browser round would have changed that.
+
+    Everything the token endpoint can answer that is *not* the authorization server
+    naming a dead credential lands here: a transport error, a 5xx, a retryable status or
+    error code, a block page from an intermediary, and an error code that faults the
+    request rather than the grant. In all of them the refresh token is untouched, so the
+    browser has nothing to replace.
+
+    The message says which one it was, and whether retrying is worthwhile.
+    """
+
+
+def _resolve_lock_primitive() -> Callable[[int], None] | None:
+    """Return a blocking exclusive-lock function for a file descriptor, or None.
+
+    Both primitives are released by the OS when the holder's descriptor closes,
+    which includes the process dying — so a SIGKILL mid-write leaves no stale
+    lock to time out or break, and there is no recovery path to get wrong.
+    """
+    if sys.platform == "win32":  # pragma: no cover - Windows
+        try:
+            import msvcrt
+        except ImportError:
+            return None
+        # LK_LOCK is the closest Windows gets to a blocking acquire, but it is bounded:
+        # about ten retries a second apart, then OSError, which `_store_lock` treats as
+        # having no primitive. One byte is enough — every holder asks for the same range.
+        return lambda fd: msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - no platform primitive at all
+        return None
+    return lambda fd: fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+_lock_fd: Callable[[int], None] | None = _resolve_lock_primitive()
+"""Platform lock primitive, resolved once at import. ``None`` means this
+interpreter has neither ``fcntl`` nor ``msvcrt``, and ``_store_lock`` degrades to
+a no-op — the pre-lock behaviour, which is a lost update under concurrency and
+not a failed credential write."""
+
+_held_locks = threading.local()
+"""Lock paths this thread is already inside. ``flock`` is held per *open file
+description*, so a nested acquire would ``open()`` again and block on a lock this
+same thread holds — a self-deadlock, not an error. Thread-local and not global on
+purpose: two threads must still contend, which is what makes the threaded
+concurrency tests exercise the real primitive."""
+
+
+def _report_unlocked(verb: str, lock_path: Path, exc: Exception) -> None:
+    """Say that this operation is running without the store lock.
+
+    Printed, not ``warnings.warn``: under ``-W error`` a warning would fail the
+    credential write this degrade exists to keep working, and under ``-W ignore`` it
+    would leave locking silently off.
+    """
+    print(
+        f"[mcpgen] cannot {verb} the credential store lock {lock_path} ({exc}); "
+        f"proceeding without cross-process locking.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+@contextmanager
+def _store_lock(credentials_path: Path) -> Iterator[None]:
+    """Serialise whole-store read-modify-write cycles against other mcpgen processes.
+
+    The lock is a sidecar file next to *credentials_path* and is the rendezvous for
+    **both** backends: the keyring has no lock target of its own and the same
+    read-modify-write shape, so both anchor to one path on disk. The scope is advisory
+    and mcpgen-to-mcpgen — another program writing the same keyring entry is not
+    coordinated, and cannot be.
+
+    The lock file is created and never removed. Unlinking it would race: a process
+    holding a descriptor to the unlinked inode locks a file nobody else can reach, and
+    both proceed at once. An empty 0600 file is cheaper than that.
+
+    Every way of not getting the lock degrades to running without one, with a message on
+    stderr — the same answer as a platform with no primitive at all. No lock costs a lost
+    update under concurrency; raising would cost a failed credential write. That covers a
+    directory the lock cannot create (the keyring backend otherwise never touches disk),
+    `ENOLCK` from an NFS mount, and Windows, where `LK_LOCK` gives up after about ten
+    seconds. A genuinely broken directory still raises where it matters: `_file_save`
+    does its own unguarded `mkdir`, so a file-backend write fails at the write.
+
+    The acquire is blocking and the async ``TokenStorage`` methods call it on the event
+    loop. Inside one ``login()`` no store write overlaps the callback wait —
+    ``set_client_info`` runs during registration before the browser opens,
+    ``set_tokens`` after the callback future resolves — so a lock held elsewhere delays a
+    write rather than costing a redirect. Holds are microseconds on the file backend; the
+    one long holder is ``migrate_creds``. Moving the acquire to ``asyncio.to_thread``
+    would require making ``_held_locks`` a ``ContextVar`` first.
+    """
+    held: set[str] = getattr(_held_locks, "paths", None) or set()
+    _held_locks.paths = held
+    # Resolved, so two spellings of one file are one key. A miss would open a second
+    # descriptor to a lock this thread already holds and block on itself forever.
+    key = os.path.realpath(credentials_path)
+    if _lock_fd is None or key in held:
+        yield
+        return
+    lock_path = credentials_path
+    try:
+        # Inside the guard: `with_name` raises `ValueError`, not `OSError`, on a path
+        # with no final component. `--creds /` reaches here on the keyring backend, which
+        # ignores the option, so an unused path must not take the operation down.
+        lock_path = credentials_path.with_name(credentials_path.name + ".lock")
+        # `mode` hardens only a directory this call creates; an existing one is left as
+        # it is, including a working directory reached through a relative `--creds`.
+        # Hardening belongs to `_file_save`, where the secrets land — the lock file is
+        # empty and protects nothing.
+        credentials_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    except (OSError, ValueError) as exc:
+        _report_unlocked("create", lock_path, exc)
+        yield
+        return
+    try:
+        try:
+            _lock_fd(fd)
+        except OSError as exc:
+            _report_unlocked("acquire", lock_path, exc)
+            yield
+            return
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _store_locks(backend: str, credentials_path: Path) -> Iterator[None]:
+    """Take every lock a *backend* operation can write under.
+
+    The file backend writes only at *credentials_path*, so its sidecar is enough. The
+    keyring backend takes both, because ``_keyring_save`` falls back to ``_file_save`` at
+    *credentials_path* whenever the keyring raises; holding only the keyring lock would
+    leave that fallback write racing a file-backend process at the same path.
+
+    Order is fixed — keyring lock first wherever both are taken — so two holders cannot
+    deadlock. The set follows the backend resolved at entry and is never revised, so a
+    mid-operation fallback to the file backend keeps both locks.
+    """
+    if backend != "keyring":
+        with _store_lock(credentials_path):
+            yield
+        return
+    with _store_lock(_KEYRING_LOCK_PATH), _store_lock(credentials_path):
+        yield
 
 
 class FileTokenStorage(TokenStorage):
@@ -447,6 +654,10 @@ class FileTokenStorage(TokenStorage):
         self._key = server_name
         self._path = credentials_path
         self._backend = _detect_keyring() if backend == "auto" else backend
+        # Snapshot, not kept in step with `_backend`: `_warn_keyring_fallback` flips that
+        # one to "file" on the first keyring error, and a lock set following it would
+        # drop the keyring lock part-way through an operation that read under it.
+        self._lock_backend = self._backend
 
     # ── File backend ──────────────────────────────────────────────────────────
 
@@ -460,13 +671,21 @@ class FileTokenStorage(TokenStorage):
                 f"[mcpgen] {self._path} had permissions {oct(mode)}; fixed to 0600.",
                 stacklevel=3,
             )
-        return json.loads(self._path.read_text())
+        # Explicit UTF-8: `_file_save` writes `json.dumps(...).encode()`, which is UTF-8, so
+        # a locale-dependent read would round-trip a non-ASCII server name wrong on Windows.
+        raw = self._path.read_text(encoding="utf-8")
+        return _require_store(json.loads(raw), raw)
 
     def _file_save(self, data: dict) -> None:
         parent = self._path.parent
         parent.mkdir(parents=True, exist_ok=True)
         os.chmod(parent, 0o700)
-        tmp = self._path.with_suffix(".tmp")
+        # Pid-unique staging name, same convention as cli._atomic_write_text: a fixed
+        # ".tmp" would let two mcpgen processes clobber each other's partial write.
+        # Serialising the writes themselves is `_store_lock`'s job. The cost is one
+        # stranded tmp file per SIGKILL — the write path unlinks its own on any raised
+        # exception, and a 0600 partial JSON next to the store is inert.
+        tmp = self._path.with_name(f"{self._path.name}.tmp.{os.getpid()}")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             os.write(fd, json.dumps(data, indent=2).encode())
@@ -505,7 +724,7 @@ class FileTokenStorage(TokenStorage):
         warnings within the same process lifetime.
         """
         warnings.warn(
-            f"[mcpgen] keyring unavailable ({reason}); falling back to hardened file at {self._path}.",
+            f"[mcpgen] keyring unusable ({reason}); falling back to hardened file at {self._path}.",
             stacklevel=3,
         )
         self._backend = "file"
@@ -523,6 +742,28 @@ class FileTokenStorage(TokenStorage):
         else:
             self._file_save(data)
 
+    def _mutate(self, change: Callable[[dict], Any]) -> Any:
+        """Apply *change* to the whole store under the lock, and return its result.
+
+        Every write here is a read-modify-write of one shared document: a caller touches
+        one server's entry and saves everyone's. The read happens *inside* the lock, so
+        ``change`` never sees a snapshot another process has already superseded.
+
+        ``change`` raising means no save, so a callback that fails half-way through its
+        edits cannot leave a partial one on disk.
+
+        Nothing inside the lock may ``await``. The reentrancy guard is thread-local,
+        not task-local, so a second coroutine reaching this on the same thread while
+        the first is suspended would find the key already held and skip the lock
+        outright — mutual exclusion lost silently, which is worse than the deadlock
+        the guard exists to prevent.
+        """
+        with _store_locks(self._lock_backend, self._path):
+            data = self._load()
+            result = change(data)
+            self._save(data)
+        return result
+
     # ── TokenStorage protocol ─────────────────────────────────────────────────
 
     async def get_tokens(self) -> OAuthToken | None:
@@ -536,13 +777,66 @@ class FileTokenStorage(TokenStorage):
             return None
         return OAuthToken(**raw)
 
-    async def set_tokens(self, tokens: OAuthToken) -> None:
-        data = self._load()
+    @staticmethod
+    def _serialize_tokens(tokens: OAuthToken) -> dict:
+        """The stored shape of a token. Shared so the two writers cannot drift."""
         serialized = tokens.model_dump(mode="json", exclude_none=True)
         if tokens.expires_in is not None:
             serialized["expires_at"] = int(time.time()) + int(tokens.expires_in)
-        data.setdefault(self._key, {})["tokens"] = serialized
-        self._save(data)
+        return serialized
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        serialized = self._serialize_tokens(tokens)
+
+        def apply(data: dict) -> None:
+            # RFC 6749 §6 makes `refresh_token` optional in a refresh response and says
+            # to discard the old one only when a new one is issued; Google's token
+            # endpoint omits it. Carry the stored one forward, or the next expiry has
+            # nothing to send and opens a browser. Revocation never arrives as an
+            # omission — it arrives as `invalid_grant`, already classified as dead.
+            if "refresh_token" not in serialized:
+                stored = (data.get(self._key) or {}).get("tokens") or {}
+                if "refresh_token" in stored:
+                    serialized["refresh_token"] = stored["refresh_token"]
+            data.setdefault(self._key, {})["tokens"] = serialized
+
+        self._mutate(apply)
+
+    def _set_tokens_if_from(self, tokens: OAuthToken, expected_refresh_token: str) -> bool:
+        """Write *tokens*, but only while the store still holds *expected_refresh_token*.
+
+        ``set_tokens`` is the SDK-facing seam and writes unconditionally, which is right
+        for it: the SDK's writes carry no earlier read to be stale against.
+        ``_pre_flight_refresh`` does — it reads a refresh token, awaits a network round,
+        and writes a response derived from what it read. The lock makes that write
+        atomic, not correct: without this check, a login or second refresh landing during
+        the round-trip is overwritten by a response chained to a superseded credential,
+        which under refresh-token rotation is already dead and sends the next run to the
+        browser.
+
+        An entry ``delete_cred`` removed also compares unequal, so a late response cannot
+        resurrect it. Returns whether the write happened; callers may ignore it, since
+        losing this race means something newer is already in place.
+
+        Known gap: a concurrent same-server ``login()`` leaves no entry to compare
+        against between its stash-pop and its own write, so a refresh that succeeded in
+        that window is discarded and the caller gets a re-authentication message.
+        Same-server concurrent logins are last-writer-wins by design.
+        """
+        serialized = self._serialize_tokens(tokens)
+
+        def apply(data: dict) -> bool:
+            stored = (data.get(self._key) or {}).get("tokens") or {}
+            if stored.get("refresh_token") != expected_refresh_token:
+                return False
+            # Same §6 rule as `set_tokens`. Here the value is already known: the check
+            # above just established that the store still holds it.
+            if "refresh_token" not in serialized:
+                serialized["refresh_token"] = expected_refresh_token
+            data.setdefault(self._key, {})["tokens"] = serialized
+            return True
+
+        return bool(self._mutate(apply))
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         data = self._load()
@@ -552,9 +846,12 @@ class FileTokenStorage(TokenStorage):
         return OAuthClientInformationFull(**raw)
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
-        data = self._load()
-        data.setdefault(self._key, {})["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
-        self._save(data)
+        serialized = client_info.model_dump(mode="json", exclude_none=True)
+
+        def apply(data: dict) -> None:
+            data.setdefault(self._key, {})["client_info"] = serialized
+
+        self._mutate(apply)
 
 
 # ── Backend-agnostic migration helpers ──────────────────────────────────────
@@ -635,56 +932,63 @@ def migrate_creds(
     if from_backend == to_backend:
         raise ValueError(f"from_backend and to_backend are both {from_backend!r}; nothing to migrate.")
 
-    # Read source
-    source_all = _read_backend(from_backend, credentials_path)
+    # One lock set for the whole migration, so the read-merge-write of the target and the
+    # read-pop-write of the source are one operation rather than four races. One backend
+    # is always the keyring (`from_backend == to_backend` raises above), so the keyring
+    # set is always right; it also excludes keyring writes made from other `--creds`
+    # paths. This is the longest hold anywhere — an OS keychain prompt inside the window
+    # bounds it by how long someone takes to answer. Other mcpgen processes wait.
+    with _store_locks("keyring", credentials_path):
+        # Read source
+        source_all = _read_backend(from_backend, credentials_path)
 
-    # Filter to requested servers
-    if servers is not None:
-        missing = [s for s in servers if s not in source_all]
-        if missing:
-            raise ValueError(
-                f"Requested server(s) not found in {from_backend!r} backend: " + ", ".join(repr(s) for s in missing)
-            )
-        source_subset = {k: source_all[k] for k in servers}
-    else:
-        source_subset = source_all
-
-    if not source_subset:
-        return {
-            "from": from_backend,
-            "to": to_backend,
-            "migrated": 0,
-            "overwritten": 0,
-            "purged": False,
-            "set_default": False,
-        }
-
-    # Merge into target (source wins on collision)
-    target = _read_backend(to_backend, credentials_path)
-    overwritten = sum(1 for k in source_subset if k in target)
-    merged = {**target, **source_subset}
-    _write_backend(to_backend, credentials_path, merged)
-
-    # Verify write
-    verified = _read_backend(to_backend, credentials_path)
-    missing_after = [k for k in source_subset if k not in verified]
-    if missing_after:
-        raise RuntimeError(
-            f"Migration verification failed: the following server(s) are absent from "
-            f"the {to_backend!r} backend after write: {', '.join(missing_after)}"
-        )
-
-    # Optional purge (remove only the migrated keys from source)
-    did_purge = False
-    if purge:
-        source_remaining = _read_backend(from_backend, credentials_path)
-        for k in source_subset:
-            source_remaining.pop(k, None)
-        if source_remaining:
-            _write_backend(from_backend, credentials_path, source_remaining)
+        # Filter to requested servers
+        if servers is not None:
+            missing = [s for s in servers if s not in source_all]
+            if missing:
+                raise ValueError(
+                    f"Requested server(s) not found in {from_backend!r} backend: " + ", ".join(repr(s) for s in missing)
+                )
+            source_subset = {k: source_all[k] for k in servers}
         else:
-            _clear_backend(from_backend, credentials_path)
-        did_purge = True
+            source_subset = source_all
+
+        if not source_subset:
+            return {
+                "from": from_backend,
+                "to": to_backend,
+                "migrated": 0,
+                "overwritten": 0,
+                "purged": False,
+                "set_default": False,
+            }
+
+        # Merge into target (source wins on collision)
+        target = _read_backend(to_backend, credentials_path)
+        overwritten = sum(1 for k in source_subset if k in target)
+        merged = {**target, **source_subset}
+        _write_backend(to_backend, credentials_path, merged)
+
+        # Verify write
+        verified = _read_backend(to_backend, credentials_path)
+        missing_after = [k for k in source_subset if k not in verified]
+        if missing_after:
+            raise RuntimeError(
+                f"Migration verification failed: the following server(s) are absent from "
+                f"the {to_backend!r} backend after write: {', '.join(missing_after)}"
+            )
+
+        # Optional purge (remove only the migrated keys from source)
+        did_purge = False
+        if purge:
+            source_remaining = _read_backend(from_backend, credentials_path)
+            for k in source_subset:
+                source_remaining.pop(k, None)
+            if source_remaining:
+                _write_backend(from_backend, credentials_path, source_remaining)
+            else:
+                _clear_backend(from_backend, credentials_path)
+            did_purge = True
 
     # Optional config default
     did_set_default = False
@@ -775,15 +1079,265 @@ def delete_cred(
     """
     resolved = resolve_cred_backend(backend)
     resolved = _detect_keyring() if resolved == "auto" else resolved
-    data = _read_backend(resolved, credentials_path)
-    if name not in data:
-        return False
-    data.pop(name)
-    if data:
-        _write_backend(resolved, credentials_path, data)
-    else:
-        _clear_backend(resolved, credentials_path)
+    # The read is inside the lock: "was that the last entry?" decides whether the whole
+    # store is unlinked, so a login for another server landing in that gap would be
+    # deleted by a command that was never asked to touch it.
+    with _store_locks(resolved, credentials_path):
+        data = _read_backend(resolved, credentials_path)
+        if name not in data:
+            return False
+        data.pop(name)
+        if data:
+            _write_backend(resolved, credentials_path, data)
+        else:
+            _clear_backend(resolved, credentials_path)
     return True
+
+
+_SECRET_MEMBERS = frozenset({"access_token", "refresh_token", "id_token", "client_secret"})
+"""Credential-bearing members that must never reach a log line: the token-response members
+of RFC 6749 §5.1 and §4.1.4, plus `client_secret` (RFC 7591 §3.2.1), which gateways echo back
+out of a failed token request and which outlives every token here — a dynamic client's secret
+does not expire.
+
+Matching ignores case *and* the word separator. §5.1 mandates lowercase snake_case, but it
+binds the *authorization server*, and the bodies reaching `_body_excerpt` are the ones where
+something else answered: a WAF, an API gateway, a vendor wrapper re-serialising through its
+own convention as `accessToken` or `access-token`.
+
+Nothing outside a credential is plausibly named any spelling of these four, so the fold costs
+no diagnostic. Near misses do not collide: `access_token_expires_in` normalises to a longer
+string and keeps its value."""
+
+_SECRET_MEMBERS_NORM = frozenset(m.replace("_", "") for m in _SECRET_MEMBERS)
+"""``_SECRET_MEMBERS`` with the separators removed, for key lookups after normalisation."""
+
+# `access[-_]?token|…` — one alternation, built once, shared by both regexes below so the
+# unparsed-body path can never fall a generation behind the structured one. The optional
+# separator class is what reaches `accessToken` and `access-token`; `re.I` does the rest.
+_SECRET_MEMBERS_RE_SRC = "|".join(m.replace("_", "[-_]?") for m in sorted(_SECRET_MEMBERS))
+
+_SECRET_FORM_RE = re.compile(rf"\b({_SECRET_MEMBERS_RE_SRC})=[^&\s\"']*", re.I)
+"""The same members in a form-encoded body. GitHub's token endpoint answers that way by
+default, so the JSON path below is not the only one that can carry a live credential."""
+
+_SECRET_JSON_RE = re.compile(rf'"({_SECRET_MEMBERS_RE_SRC})\\?"\s*:\s*\\?"(?:[^"\\]|\\.)*\\?(?:"|\Z)', re.I)
+"""The same members in text the structured pass cannot reach, in two senses.
+
+First, a body `httpx` refuses to parse: a response truncated mid-token by a proxy still
+carries a live credential and fails `resp.json()` because it was cut short. Second,
+`_redact_secrets` matches on dict *keys*, so a body that parses cleanly but carries the token
+inside a *string* (`{"error_description": "{\\"access_token\\": \\"…\\"}"}`, a gateway echoing
+an upstream body) has no secret key to find. Both regexes therefore run unconditionally after
+the structured pass.
+
+The value ends at a closing quote *or at the end of the text*, since requiring the quote would
+let the most-truncated body through. `(?:[^"\\]|\\.)*` steps over an escaped quote inside the
+value, and the three `\\?` allow the escaped-quote spelling — the nested-in-a-string case
+above, plus a value truncated on a lone trailing backslash.
+
+The over-match is deliberate: inside an escaped blob every quote is escaped, so the match runs
+to the next *unescaped* quote and takes any siblings after it, leaving the excerpt
+structurally unterminated there. Everything before the secret survives, and the loss is
+bounded to the tail of a string that held a live credential. A lazier or length-bounded
+pattern would leak the rest of the token instead."""
+
+_SECRET_REPR_RE = re.compile(rf"'?\b({_SECRET_MEMBERS_RE_SRC})'?\s*[:=]\s*'(?:[^'\\]|\\.)*(?:'|\Z)", re.I)
+"""The same members in a *Python* repr, which is neither of the two shapes above.
+
+This is the spelling an exception message carries, not a response body. The MCP SDK raises
+`OAuthTokenError(f"Invalid token response: {e}")` and `OAuthRegistrationError(...)` over a
+pydantic `ValidationError`, and pydantic quotes the rejected `input_value` as a
+single-quoted dict repr: `input_value={'accessToken': 'ya29…', 'refresh_token': '1//…'}`.
+The two regexes above miss it — one needs a double quote, the other an `=`.
+
+`[:=]` covers the dict spelling and the keyword/attribute spelling (`access_token='ya29…'`)
+in one pattern. That second spelling is why this must run *before* `_SECRET_FORM_RE`, which
+stops at the quote and would leave `access_token=<redacted>'SECRET'` — a substitution that
+reads as redacted and is not.
+
+The value anchor keeps it off prose: the member must be followed by `:` or `=` and then an
+*opening single quote*, so `error_description='access_token was rejected'` survives intact.
+The residual over-match eats a quoted phrase in `invalid 'access_token': 'expected a string'`,
+which is indistinguishable in shape from a key carrying the credential — a bounded cost
+against an unbounded one. `\\Z` catches a repr that arrives cut short with no `input_value=`
+frame around it; framed ones are redacted wholesale by `_PYDANTIC_INPUT_VALUE_RE`.
+
+Not matched: a value Python repr'd with double quotes because it contains an apostrophe
+(`{'access_token': "ya'29"}`). Tokens are base64url or JWT material and cannot contain `'`,
+so that spelling cannot carry one of these four members' real values."""
+
+
+_PYDANTIC_INPUT_VALUE_RE = re.compile(r"\binput_value=.*?(?=,\s*input_type=|$)", re.M)
+"""Pydantic's quoted-input frame, dropped whole rather than scrubbed member by member.
+
+Member-wise redaction cannot cover this text: pydantic truncates the quoted repr mid-way with
+a literal `...`, and the cut lands mid-key as readily as mid-value.
+`{'accessToken': 'SECRET1'...efreshToken': 'SECRET2'}` is real output — the second key lost
+its `r`, so no member pattern matches it while its value is intact. Where the cut lands
+depends on the total repr length, which the server controls, so no key-anchored pattern
+closes the class.
+
+Keying on `input_value=` is independent of the cut: pydantic emits that marker, terminates the
+frame with `, input_type=`, and truncates only inside the frame. The lazy `.*?` therefore does
+not care what the value contains — nested dict, list, bare int, plain string all end at the
+same lookahead. `$` under `re.M` bounds a message some upstream wrapper had already cut.
+
+It also reaches a spelling no key pattern can: a *field-level* error on a secret field prints
+`input_value='ya29…'` with the field name on the line above and no key beside the value.
+
+The cost is the frame's non-secret siblings — `token_type`, `expires_in`, `scope` —
+affordable because every pydantic validation this module can reach is over a token or
+registration response, the two bodies it already declines to print raw. The diagnostic
+survives outside the frame: the field name, `[type=missing]`, `input_type=dict`, the docs URL.
+
+A value containing the literal `, input_type=` would end the match early; a token cannot,
+being base64url or JWT material, and the member patterns still run over whatever tail is
+left."""
+
+
+def _redact_secret_text(text: str, *, pydantic_frames: bool = True) -> str:
+    """*text* with every credential-shaped member removed, in all four spellings.
+
+    One helper, so the two consumers — `_body_excerpt` for response bodies, `_describe` for
+    exception messages — cannot drift and a fifth spelling added later reaches both.
+
+    Order is load-bearing. The pydantic frame goes first, so the member patterns see only
+    what it left behind. The repr pattern then precedes `_SECRET_FORM_RE`, which would
+    otherwise half-match the `key='value'` spelling and stop at the quote, leaving the
+    credential next to the word `<redacted>`.
+
+    Pass `pydantic_frames=False` for text that is not one of *our* exception messages. A raw
+    server body never carries a frame this module made, so the pattern has no work to do
+    there, and an authorization server that puts `str(validation_error)` in its own
+    `error_description` would lose the rest of that line for nothing. The member patterns
+    still cover the body.
+    """
+    if pydantic_frames:
+        text = _PYDANTIC_INPUT_VALUE_RE.sub("input_value=<redacted>", text)
+    text = _SECRET_REPR_RE.sub(r"'\1': '<redacted>'", text)
+    text = _SECRET_FORM_RE.sub(r"\1=<redacted>", text)
+    return _SECRET_JSON_RE.sub(r'"\1": "<redacted>"', text)
+
+
+def _norm_member(key: str) -> str:
+    """*key* folded to the spelling ``_SECRET_MEMBERS_NORM`` is keyed by.
+
+    Case and word separator both go, for the reason given at `_SECRET_MEMBERS`: the
+    responders that reach here are the ones re-serialising through their own naming
+    convention, and `accessToken` is what that convention most often produces.
+    """
+    return key.lower().replace("-", "").replace("_", "")
+
+
+def _redact_secrets(value: object) -> object:
+    """*value* with every ``_SECRET_MEMBERS`` member replaced, at any nesting depth.
+
+    Scanning only the top level would miss the wrapped shape, which is not hypothetical:
+    Slack answers `{"ok": true, "authed_user": {"access_token": …}}`, and that endpoint is
+    the one `_pre_flight_refresh` singles out for in-band failure handling. A top-level
+    scan finds no secret member there and hands the whole live token to the caller.
+    """
+    if isinstance(value, dict):
+        return {
+            k: "<redacted>" if isinstance(k, str) and _norm_member(k) in _SECRET_MEMBERS_NORM else _redact_secrets(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secrets(v) for v in value]
+    return value
+
+
+def _body_excerpt(resp: httpx.Response) -> str:
+    """*resp*'s body, with any credential in it removed, capped at ``_DESCRIBE_LIMIT``.
+
+    A token endpoint's body is the one place a live credential is *expected*, and `cli.py`
+    and the generated runner print these messages to stderr, into CI logs. The riskiest
+    path is the innocuous-looking one: a 200 that fails to validate as an ``OAuthToken``
+    (a `token_type` outside the `Bearer` literal, a non-integer `expires_in`) is still a
+    full token response.
+
+    Redaction runs before truncation, so a secret cannot survive by sitting past the cap.
+    Everything *except* the credential is kept — `error`, `error_description`, an HTML
+    block page are what make the message worth printing.
+    """
+    text = resp.text
+    try:
+        parsed = resp.json()
+    except Exception:  # noqa: BLE001 — a body that is not JSON is handled by the regexes below
+        parsed = None
+    if parsed is not None:
+        try:
+            scrubbed = _redact_secrets(parsed)
+            # Only re-serialise when something was actually removed: a clean body is worth
+            # more to the reader in the server's own formatting than in `json.dumps`'.
+            if scrubbed != parsed:
+                text = json.dumps(scrubbed)
+        except RecursionError:
+            # `_redact_secrets` costs two frames per level, so it gives out at roughly half
+            # the nesting `json.loads` accepts. The regexes below are iterative and depth-
+            # blind, so falling through keeps the redaction instead of raising here.
+            pass
+    text = _redact_secret_text(text, pydantic_frames=False)
+    if len(text) > _DESCRIBE_LIMIT:
+        return text[:_DESCRIBE_LIMIT] + "…"
+    return text
+
+
+def _oauth_error_code(resp: httpx.Response) -> str | None:
+    """The RFC 6749 §5.2 ``error`` code in *resp*, or None if it does not carry one.
+
+    §5.2 defines the shape as a JSON object with a string ``error`` member, which
+    identifies both the *speaker* and *what it objected to* — the only thing separating a
+    dead credential from a rejected request. A proxy or WAF in front of an authorization
+    server usually answers with HTML, so a body naming an RFC code is strong evidence the
+    server itself replied. Not proof: a JSON-speaking API gateway can carry an ``error``
+    member of its own, but its string will not match one of the three
+    ``_DEAD_GRANT_ERRORS``, so it lands in the request-faulted branch — a slightly
+    misleading message, never a wrong decision about the browser.
+
+    A body *labelled* ``application/x-www-form-urlencoded`` is read too: that is what real
+    token endpoints answer unless content negotiation succeeds, and GitHub's does by
+    default, so without the fallback every rejection from such a server, `invalid_grant`
+    included, would arrive with no error code.
+
+    The label is required. An HTML block page carrying the text `error=invalid_grant` is
+    not a body the authorization server sent, and reading a code out of it manufactures
+    the evidence the terminal branch of `_pre_flight_refresh` depends on not having. An
+    unlabelled form-encoded body therefore stays unclassified.
+
+    The status cannot stand in for any of this. §5.2 requires the body on every 400 and
+    401, so a 400 without one did not come from the authorization server, and a
+    non-compliant server that reports a revoked grant with 403 still names it here.
+    """
+    try:
+        parsed = resp.json()
+    except Exception:  # noqa: BLE001 — an unparseable body may still be the form-encoded shape
+        pass
+    else:
+        # A body that parsed as JSON is the server's statement, `error` member or not — and
+        # that includes JSON which is not an object at all. Never re-read it as a form: the
+        # two spellings cannot both be authoritative, and only one of them was sent.
+        code = parsed.get("error") if isinstance(parsed, dict) else None
+        return code if isinstance(code, str) else None
+
+    media_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+    if media_type != "application/x-www-form-urlencoded":
+        return None
+    try:
+        codes = [v for k, v in parse_qsl(resp.text) if k == "error"]
+    except Exception:  # noqa: BLE001 — a body that will not parse as a form is not one of these
+        return None
+    # Exactly one, or nothing. A compliant server sends `error` once; two mean a mangled or
+    # concatenated body, and picking a winner would be a guess. `None` routes to the
+    # terminal branch, which costs a message rather than a browser prompt.
+    if len(codes) != 1:
+        return None
+    # §5.2 defines the value over NQSCHAR, which excludes whitespace, so stripping can only
+    # recover a code a line-oriented intermediary padded — a trailing newline would
+    # otherwise turn `invalid_grant` into an unrecognised code. `or None` keeps an
+    # all-whitespace value on the "no OAuth error body" path.
+    return codes[0].strip() or None
 
 
 async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> None:
@@ -795,6 +1349,19 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     without this the SDK sends the stale token blind → 401 → browser re-auth.
     Mirrors the mcpgen pre-flight. See the module docstring
     for the verified mechanism and version caveat.
+
+    Raises
+    ------
+    ReauthenticationRequired
+        The credential is gone: nothing cached to refresh with (no refresh_token, no
+        client_id, no token_endpoint), or the authorization server named it dead
+        (`invalid_grant`, `invalid_client`, `unauthorized_client`) on any status
+        including 200. Browser login fixes it.
+    TokenRefreshUnavailable
+        Everything else. The authorization server was unreachable, something in front
+        of it answered, it faulted the request rather than the credential, or a 200
+        carried something that is not a token. The refresh token is untouched — a
+        browser round has nothing to replace.
     """
     data = storage._load()
     entry = data.get(server_name, {})
@@ -828,15 +1395,121 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     if client_secret:
         payload["client_secret"] = client_secret
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(token_endpoint, data=payload)
+    # Classify what comes back: the grant and the server that renews it fail independently,
+    # and treating every failure as "log in again" sends the user to the browser for an
+    # outage the browser cannot fix — once per item in a batch.
+    #
+    # `Accept: application/json` asks for the RFC 6749 §5.2 error body the classification
+    # below reads most directly. It is a request, not a guarantee; a server that answers
+    # form-encoded regardless (GitHub's does) is handled by the form-encoded fallback in
+    # `_oauth_error_code`.
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(token_endpoint, data=payload, headers={"Accept": "application/json"})
+    except Exception as exc:  # noqa: BLE001 — the Raises contract above admits exactly two types
+        # Not `httpx.HTTPError`: `InvalidURL` and `CookieConflict` derive from `Exception`
+        # directly, and a `token_endpoint` read from a hand-editable credentials file can
+        # produce the first. The catch is as wide as the Raises contract above.
+        raise TokenRefreshUnavailable(
+            f"Could not reach the token endpoint for '{server_name}': {_describe(exc)}. "
+            f"The refresh token is untouched; retry when the authorization server is back."
+        ) from exc
 
-    if resp.status_code != 200:
+    # A 200 is decided by whether it *is* a token, and the error code is not even read
+    # unless that fails. Some servers pad a good token response with a blank `error`
+    # member; consulting the code first would fail a refresh that plainly succeeded.
+    if resp.status_code == 200:
+        try:
+            token = OAuthToken(**resp.json())
+        except Exception as exc:  # noqa: BLE001 — JSON, pydantic, and TypeError all mean the same here
+            # A 200 that is not a token is either an interstitial served with the wrong
+            # status or a server reporting failure in-band — Slack's rotation endpoint
+            # answers `{"ok": false, "error": ...}` this way. Either can be a dead grant,
+            # so name the command that settles it.
+            #
+            # Both raises are `from None` for redaction, not style: `exc` is the pydantic
+            # `ValidationError` from `OAuthToken(**…)`, which quotes the token response
+            # back as `input_value`. The chain travels with the exception to callers that
+            # do not catch these types, and the interpreter then prints it to stderr, into
+            # CI logs. `from None` suppresses it for every consumer at once. If the
+            # per-field detail is ever wanted, add `exc.errors(include_input=False)` to
+            # the message rather than restoring the chain.
+            if _oauth_error_code(resp) in _DEAD_GRANT_ERRORS:
+                raise ReauthenticationRequired(
+                    f"The token endpoint for '{server_name}' reported a dead credential with a 200: "
+                    f"{_body_excerpt(resp)}. Run: mcpgen login {server_name}"
+                ) from None
+            # `type(exc).__name__`, not `_describe(exc)`: the message would otherwise quote
+            # the `input_value` the chain no longer carries.
+            raise TokenRefreshUnavailable(
+                f"The token endpoint for '{server_name}' returned 200 but not a token "
+                f"({type(exc).__name__}). Body: {_body_excerpt(resp)}. The refresh token is "
+                f"untouched; retry later, and if it persists run: mcpgen login {server_name}"
+            ) from None
+        # Not `set_tokens`: this response was derived from `refresh_token`, read
+        # before the request went out. If the store has moved on since, whatever
+        # moved it is newer than this — see `_set_tokens_if_from`.
+        storage._set_tokens_if_from(token, refresh_token)
+        return
+
+    # Past here the response is a failure, and what it *says* decides which kind. The
+    # credential is dead only when the authorization server names which of its own
+    # credentials died, in its own error format. Status is not a substitute: a 400
+    # from a WAF and a 400 from the server carrying `invalid_grant` are different
+    # events, and only the second one is fixed by opening a browser.
+    error_code = _oauth_error_code(resp)
+
+    # Dead-grant codes are checked before the retryable statuses, so a 503 carrying
+    # `invalid_grant` is read as the grant: a proxy does not invent that code. Being wrong
+    # costs one browser prompt; filing a genuine revocation as retryable never prompts.
+    if error_code in _DEAD_GRANT_ERRORS:
         raise ReauthenticationRequired(
-            f"Token refresh failed ({resp.status_code}): {resp.text[:200]}. Run: mcpgen login {server_name}"
+            f"Token refresh failed ({resp.status_code}, {error_code}): "
+            f"{_body_excerpt(resp)}. Run: mcpgen login {server_name}"
         )
 
-    await storage.set_tokens(OAuthToken(**resp.json()))
+    # 5xx, the retryable statuses, and the codes that name a passing condition can
+    # only be the authorization server or something in front of it, never the grant.
+    if (
+        resp.status_code >= 500
+        or resp.status_code in _RETRYABLE_REFRESH_STATUS
+        or error_code in _RETRYABLE_REFRESH_ERRORS
+    ):
+        # "Retry later" is not actionable on its own. A 429 or 503 that says when is
+        # the difference between a scripted backoff and a guess, so pass it through.
+        retry_after = resp.headers.get("retry-after")
+        when = f" Retry-After: {retry_after}." if retry_after else ""
+        raise TokenRefreshUnavailable(
+            f"Token refresh failed ({resp.status_code}) for '{server_name}': "
+            f"{_body_excerpt(resp)}. The refresh token is untouched; retry later.{when}"
+        )
+
+    # An error code in neither set: the server faulting the *request* rather than the
+    # credential — invalid_request, unsupported_grant_type, invalid_scope — where logging
+    # in again sends the identical refresh request back. A code from outside the RFC lands
+    # here too and could be either, so the message leads with the diagnosis but still
+    # names the command.
+    if error_code is not None:
+        raise TokenRefreshUnavailable(
+            f"The authorization server for '{server_name}' rejected the refresh request itself "
+            f"({resp.status_code}, {error_code}): {_body_excerpt(resp)}. The refresh token "
+            f"is untouched, so this is most likely a client or server configuration problem rather "
+            f"than a dead credential. If the configuration checks out, run: mcpgen login {server_name}"
+        )
+
+    # No error code at all — a 403 from a WAF, a 3xx to a captive portal, a 404 from a
+    # moved endpoint, a bare 401 from an auth proxy, or a 2xx that is not 200. §5.2
+    # requires the body above on a real rejection, so nothing here reached the
+    # authorization server as a token request. Unlike `_DEAD_GRANT_ERRORS`, no statement
+    # from the server names the credential, and a bare status is more often a proxy than a
+    # spec-violating authorization server — so this reports rather than prompts, and
+    # prints the recovery command for the terse-server case.
+    raise TokenRefreshUnavailable(
+        f"Token refresh for '{server_name}' was answered with {resp.status_code} and no OAuth error "
+        f"body, which is not how an authorization server reports a bad grant: "
+        f"{_body_excerpt(resp)}. The refresh token is untouched; retry later, and if it "
+        f"persists run: mcpgen login {server_name}"
+    )
 
 
 @asynccontextmanager
@@ -1384,31 +2057,59 @@ def _persist_token_endpoint(
     the same value, so it costs a load/save and nothing else.
 
     `_get_token_endpoint()` is the SDK's own resolution: the discovered
-    `oauth_metadata.token_endpoint`, or `<origin>/token` when the server publishes
-    no discovery document. Asking it — rather than reading the metadata ourselves
-    and improvising a fallback — is what makes the cached URL the one that just
-    demonstrably worked: we are only ever called with a token in hand, so whatever
-    endpoint issued it is proven, while any endpoint we reconstruct is a guess.
+    `oauth_metadata.token_endpoint`, or `<origin>/token` when the server publishes no
+    discovery document. Asking it caches the endpoint that just issued the token in hand,
+    rather than one reconstructed from the metadata.
 
-    It is private API, and access is direct on purpose: a `getattr` chain would
-    turn an SDK rename into a silent no-op — no endpoint written, every credential
-    expiring into a browser prompt — which is the failure this path exists to stop.
-    `mcp` is pinned to a range, so let a rename raise loudly.
-    `test_sdk_provider_resolves_token_endpoint` pins the name cheaply.
+    It is private API, accessed directly on purpose: a `getattr` chain would turn an SDK
+    rename into a silent no-op — no endpoint written, every credential expiring into a
+    browser prompt. `mcp` is pinned to a range, so let a rename raise;
+    `test_sdk_provider_resolves_token_endpoint` pins the name.
     """
     if provider is None:  # only reachable before the handshake, when no token exists
         return
     endpoint = provider._get_token_endpoint()
     if not endpoint:
         return
-    data = storage._load()
-    data.setdefault(server_name, {})["token_endpoint"] = str(endpoint)
-    storage._save(data)
+
+    def apply(data: dict) -> None:
+        data.setdefault(server_name, {})["token_endpoint"] = str(endpoint)
+
+    storage._mutate(apply)
+
+
+def _restore_stash(server_name: str, stashed: dict) -> Callable[[dict], None]:
+    """Build the ``_mutate`` callback that puts *stashed* back for *server_name*.
+
+    The re-check inside the lock is why this is a callback rather than a plain save: the
+    handler's read predates the lock by a whole browser round, and writing the stash over
+    a token another mcpgen process cached in the meantime is the lockout this restore
+    exists to prevent.
+
+    The check is on ``tokens`` alone, not the whole entry, because a login's own
+    post-registration failure — cancelled consent, callback timeout — leaves fresh
+    ``client_info`` with no tokens, and skipping the restore there would be the same
+    lockout. The cost is a concurrent same-server login caught mid-registration: it
+    presents a token-less entry too, so the stash lands over its registration and its
+    exchange pairs fresh tokens with the stale ``client_id``. Same-server concurrent
+    logins are last-writer-wins by design, and that pair is not silent — the next refresh
+    draws ``invalid_client`` or ``invalid_grant``, so it costs one browser prompt.
+    """
+
+    def restore(fresh: dict) -> None:
+        if not (fresh.get(server_name) or {}).get("tokens"):
+            fresh[server_name] = stashed
+
+    return restore
 
 
 _DESCRIBE_LIMIT = 200
-"""Per-leaf cap on the exception text in a one-line error. Matches the response-body
+"""Per-leaf cap on the exception text in a one-line error. Shared with the response-body
 bound in ``_pre_flight_refresh``: enough to identify the failure, short enough to read."""
+
+_DESCRIBE_TOTAL_LIMIT = 600
+"""Cap on a whole flattened exception group. The per-leaf bound alone lets an N-leaf
+group produce an N × ~215-character "one-line" message; this is what keeps it one line."""
 
 
 def _carries_interrupt(exc: BaseException) -> bool:
@@ -1441,11 +2142,22 @@ def _describe(exc: BaseException) -> str:
 
     Each leaf is capped: an ``HTTPStatusError`` can carry a whole HTML error page
     in its message, and this ends up on one CLI line. Same reasoning — and same
-    bound — as the response-body truncation in ``_pre_flight_refresh``.
+    bound — as the response-body truncation in ``_pre_flight_refresh``. The joined
+    result is capped too: leaves are bounded but their *number* is not, so the
+    per-leaf bound alone does not keep a wide group to one readable line.
+
+    Each leaf is also redacted: the MCP SDK reports a token or registration response that
+    fails validation by interpolating the pydantic error, which quotes the rejected body
+    back as a Python repr, and `login()` feeds this into `PostLoginCheckFailed`, which
+    `cli.py` prints to stderr. Redaction runs per leaf and before both caps, so a secret
+    cannot survive by sitting past one.
     """
     if isinstance(exc, BaseExceptionGroup):
-        return "; ".join(_describe(inner) for inner in exc.exceptions)
-    text = str(exc)
+        joined = "; ".join(_describe(inner) for inner in exc.exceptions)
+        if len(joined) > _DESCRIBE_TOTAL_LIMIT:
+            joined = joined[:_DESCRIBE_TOTAL_LIMIT] + "…"
+        return joined
+    text = _redact_secret_text(str(exc))
     if len(text) > _DESCRIBE_LIMIT:
         text = text[:_DESCRIBE_LIMIT] + "…"
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
@@ -1475,6 +2187,9 @@ async def login(
 
     Raises PostLoginCheckFailed when the OAuth flow succeeded but the post-login
     session failed: the token is saved and re-running login will not help.
+
+    Raises LoginWontHelp when the credential store cannot be parsed *and* cannot be
+    moved aside. The fix is a human moving that file, so no browser round is attempted.
     """
     _servers = servers(config_path=config_path)
     server_url = url or _servers.get(server_name)
@@ -1483,14 +2198,58 @@ async def login(
 
     storage = FileTokenStorage(server_name, creds_path, backend=resolve_cred_backend(cred_backend))
 
-    # Stash the existing entry before clearing it. If the OAuth flow fails before
-    # it produces a token (user cancel, network error, bad registration), we
-    # restore it so the caller is not locked out of a previously-working server.
-    # Once a token *has* been exchanged the stash is stale by definition — see
-    # the handler at the bottom of this function.
-    data = storage._load()
-    stashed = data.pop(server_name, None)
-    storage._save(data)
+    # Stash the existing entry before clearing it. If the OAuth flow fails before it
+    # produces a token (user cancel, network error, bad registration), the handler at the
+    # bottom of this function restores it so the caller is not locked out of a
+    # previously-working server. Once a token has been exchanged the stash is stale.
+    #
+    # A corrupt store must not stop this read: `mcpgen login` exists to produce a fresh
+    # valid entry, so failing it on unparseable JSON leaves hand-deleting the file as the
+    # only route back. Falling through to `{}` is no better — the `_save` below would
+    # write that empty view over other servers' entries, which may still be recoverable
+    # by hand. So the bad file is moved aside and kept. Only `login()` does this;
+    # `_file_load` keeps raising for `_pre_flight_refresh` and the SDK's mid-flow reads,
+    # which run with nobody at the keyboard.
+    #
+    # Read, quarantine, pop and save are one cycle under the store lock, so two logins
+    # finding the same corrupt file cannot each move it aside and race over the survivor.
+    # The lock does not span the whole function: the window from here to the restore
+    # covers the browser round, and holding it would stall every other mcpgen process for
+    # as long as a human takes to click through a consent screen.
+    with _store_locks(storage._lock_backend, storage._path):
+        try:
+            data = storage._load()
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # Both mean bytes on disk that are not a store: `UnicodeDecodeError` from
+            # `read_text`, `json.JSONDecodeError` from `json.loads` and from
+            # `_require_store` for a file that parses into something other than an object.
+            # Narrower than OSError on purpose — an unreadable *path* (permissions, a
+            # directory in the way) is not a corrupt store and must propagate.
+            # Nanoseconds, not seconds: two corrupt-store logins in the same second would
+            # otherwise `os.replace` one quarantine over the other.
+            quarantine = storage._path.with_name(f"{storage._path.name}.corrupt.{time.time_ns()}")
+            try:
+                os.replace(storage._path, quarantine)
+            except OSError as move_failed:
+                # Continuing would `_save({})` over the bytes the quarantine exists to
+                # preserve. Stop instead: the file is still there and the message says what
+                # to do with it. `LoginWontHelp` rather than a subclass — no token was
+                # cached and the token endpoint was never contacted — and `cli.py` and the
+                # generated runner already catch the base, so this prints as a message
+                # rather than a traceback.
+                raise LoginWontHelp(
+                    f"{storage._path} is not a readable credential store ({exc}) and could not be moved aside "
+                    f"({move_failed}). Move or delete it by hand, then run login again."
+                ) from exc
+            print(
+                f"[mcpgen] {storage._path} is not a readable credential store ({exc}); moved to {quarantine}. "
+                f"Other servers' entries are in that file if you need them.",
+                file=sys.stderr,
+                flush=True,
+            )
+            data = {}
+        stashed = data.pop(server_name, None)
+        storage._save(data)
 
     if headless is None:
         headless = _is_headless()
@@ -1576,47 +2335,62 @@ async def login(
                         tools = await s.list_tools()
                         print(f"Login OK ({server_name}); {len(tools.tools)} tool(s) available")
             except OAuthRegistrationError as e:
-                raise _explain_registration_error(e) from e
+                # `from None`: `_explain_registration_error` redacts the text it returns,
+                # and chaining the original would put the unredacted `client_secret` back
+                # in front of anyone printing a traceback. This type is outside the
+                # `LoginWontHelp` taxonomy, so a traceback is its normal rendering.
+                raise _explain_registration_error(e) from None
         finally:
             if callback_future is not None and not callback_future.done():
                 callback_future.set_result((None, None))
             await asyncio.sleep(0)
 
     except BaseException as exc:
-        # Did the flow get far enough to save a token? OAuthClientProvider writes
-        # it from inside the auth handshake, before `initialize()` returns, so a
-        # failure raised out of the session (a 502 from the origin, a transport
-        # error on the first call) leaves a *usable* credential behind. Restoring
-        # the stash over it would throw away the login the user just completed and
-        # send the next run back to the browser — forever, since nothing ever
-        # sticks. Re-read storage rather than trusting the provider object: the
-        # SDK owns that write and this is the same seam it wrote through.
-        # One read, reused for the restore below: nothing writes in between, and on
-        # the keyring backend a second _load() is another keychain round-trip — one
-        # that can even come from a different backend, if the first read tripped the
-        # fallback to file.
-        data = storage._load()
+        # Did the flow get far enough to save a token? OAuthClientProvider writes it from
+        # inside the auth handshake, before `initialize()` returns, so a failure raised out
+        # of the session (a 502 from the origin, a transport error on the first call)
+        # leaves a *usable* credential behind, and restoring the stash over it would throw
+        # away the login the user just completed. Re-read storage rather than trust the
+        # provider object: the SDK owns that write and this is the seam it wrote through.
+        #
+        # This read is unlocked and only picks a branch. The restore re-reads under the
+        # lock, since another mcpgen process may have written during the browser round this
+        # handler is unwinding; on the common path — a token was produced — that second
+        # read never happens, keeping the keyring backend to one keychain round-trip.
+        # Raising from this read would replace the failure the operator needs to see.
+        try:
+            data = storage._load()
+        except Exception:  # noqa: BLE001 — never mask the original failure
+            # Unreadable store: nothing can be said about what the flow produced, so fall
+            # through to re-raising the original unclassified. `PostLoginCheckFailed` would
+            # assert a token is cached, which is what could not be established, and the
+            # resulting traceback puts the read error on screen alongside it.
+            data, restorable = {}, False
+        else:
+            restorable = True
         produced = data.get(server_name) or {}
         if not produced.get("tokens"):
-            if stashed is not None:
-                data[server_name] = stashed
-                storage._save(data)
+            # `restorable` is not redundant with the suppression below: the restore re-reads
+            # under the lock and would likely succeed on a second try, and writing to a
+            # store nobody could read is not something to do by accident.
+            if stashed is not None and restorable:
+                # The write fails for the same reasons the read does — a keyring backend
+                # that has started refusing, a full disk, a permission change. Best effort:
+                # the stash is a nicety, the original failure is the answer. The
+                # suppression covers the lock too.
+                with suppress(Exception):
+                    storage._mutate(_restore_stash(server_name, stashed))
             raise
 
         # A token is only as good as the endpoint that can renew it: without one,
-        # _pre_flight_refresh demands a new login the moment it expires — the very
-        # re-prompt this branch exists to avoid. The normal persistence sits after
-        # initialize(), which is what just failed, so do it here. A storage error
-        # must not swallow the classification below, so it is carried into that
-        # message rather than raised. It does not go through warnings.warn: this is
-        # the one condition that silently reinstates the re-prompt this whole branch
-        # exists to prevent, and a UserWarning is shown once per location and
-        # disappears entirely under PYTHONWARNINGS=ignore. It belongs on the line the
-        # operator is already reading.
-        # What the message may claim depends on what is already on disk, not on which
-        # branch got here: initialize() persists the endpoint too, so a list_tools()
-        # failure can reach this point with one already cached. `produced` was read
-        # after that write, so it answers the question directly.
+        # _pre_flight_refresh demands a new login the moment it expires. The normal
+        # persistence sits after initialize(), which is what just failed, so do it here.
+        # A storage error is carried into the message below rather than raised, and not
+        # through warnings.warn — this is the one condition that silently reinstates the
+        # re-prompt, and a UserWarning shows once per location and vanishes under
+        # PYTHONWARNINGS=ignore. Which message applies depends on what is already on disk:
+        # initialize() persists the endpoint too, so a list_tools() failure can arrive with
+        # one cached, and `produced` was read after that write.
         unrenewable = ""
         try:
             _persist_token_endpoint(storage, server_name, provider)
@@ -1636,16 +2410,19 @@ async def login(
         # but never relabel an interrupt as a failed check.
         if _carries_interrupt(exc):
             raise
-        # State only what is known. A token was issued; that does not prove the
-        # resource server accepted it — a post-login 401, an MCP-level error from
-        # list_tools(), and a 502 from the origin all land here. What they share is
-        # that another browser round cannot fix them, which is the one thing the
-        # caller has to act on.
+        # State only what is known. A token was issued; that does not prove the resource
+        # server accepted it — a post-login 401, an MCP-level error from list_tools(), and
+        # a 502 from the origin all land here, and none is fixed by another browser round.
+        # `from None` because the SDK reports a token response that fails validation as
+        # `OAuthTokenError(f"Invalid token response: {pydantic_error}")`, quoting the
+        # rejected body: `_describe` redacts the message, and chaining would hand the same
+        # credential back to anyone printing a traceback. `__context__` is still set, so
+        # the original remains available programmatically.
         raise PostLoginCheckFailed(
             f"Login succeeded ({server_name}) and the token was saved, but the check that follows "
             f"it failed: {_describe(exc)}. Logging in again will not change this."
             f"{unrenewable}"
-        ) from exc
+        ) from None
 
     print(f"Credentials saved to {creds_path}")
 
@@ -1671,7 +2448,16 @@ async def ensure_login(
     Cases:
     - Fresh token: no-op.
     - Near/past expiry, refresh_token present: silent out-of-band renewal.
-    - Near/past expiry, no refresh_token (or renewal fails): browser login.
+    - Near/past expiry with nothing cached to refresh with (no refresh_token, no
+      client_id, no token_endpoint): browser login.
+    - Near/past expiry and the authorization server answers `invalid_grant`,
+      `invalid_client`, or `unauthorized_client`: browser login. The last two fault
+      the registration rather than the token, and login() drops the cached
+      `client_info`, so the SDK registers anew.
+    - Near/past expiry and the renewal failed any other way — unreachable server, a
+      block page, a request the server faulted: no browser login,
+      `TokenRefreshUnavailable` propagates. The refresh token is intact in all of
+      those, so a browser round has nothing to replace.
     - No token at all: browser login.
     """
     storage = FileTokenStorage(server_name, creds_path, backend=resolve_cred_backend(cred_backend))

@@ -10,6 +10,8 @@
 >
 > Two artifacts, one repo: a **CLI** (`mcpgen`) you run anywhere, and a **Claude Code plugin** (`generate-mcp-wrappers` skill) that drives it for the parts that need judgment.
 
+> This repo ships two artifacts: the `mcp-client-kit` Python package (PyPI; git tags `vX.Y.Z`; installs the `mcpgen` command) and the `mcp-client-kit` Claude Code plugin — which provides the `generate-mcp-wrappers` skill (git tags `plugin-vX.Y.Z`).
+
 ---
 
 ## The problem
@@ -26,7 +28,7 @@ Anthropic's validated fix ("Code execution with MCP," Nov 2025): stop routing sc
 
 Those numbers describe **the pattern**, as reported by Anthropic and by third-party benchmarks — they are not a measurement of this CLI. mcpgen supplies one piece of that pattern: the wrapper layer. What you save depends on how your runtime uses it.
 
-The catch for Python teams: no good tool generated **standalone, importable, reviewable `.py` wrappers** from a live MCP server. So everyone hand-writes `jira.py`, `github.py`, `slack.py` — slowly, inconsistently, and they silently rot when the server changes.
+The catch for Python teams: nothing generated wrappers you could actually **own** — importable `.py` modules, free of a mandatory runtime sidecar, with return types grounded in what the server really sends. So everyone hand-writes `jira.py`, `github.py`, `slack.py` — slowly, inconsistently, and they silently rot when the server changes.
 
 That's the gap mcpgen fills.
 
@@ -74,7 +76,7 @@ Outside the block nothing changes, so existing code keeps working untouched. Det
 
 ## Why developers pick it
 
-**Real source you own.** Importable `.py` modules — not `.pyi` stubs (mcp2py), not a runtime proxy, not tied to one execution framework (ipybox). You can diff it, review it, pin it, and read it in your IDE without a server running.
+**Real source you own.** Importable `.py` modules — not `.pyi` stubs (mcp2py), not a runtime proxy, not a generated CLI script that needs its generator installed (`fastmcp generate-cli`), not modules that require a tool server running to work (mcpygen). You can diff it, review it, pin it, and read it in your IDE without a server running.
 
 **Types that match reality.** A tool's `inputSchema` describes its *inputs* — it tells you nothing about the *output* shape, so `codegen` alone returns `Any`. mcpgen's `probe` makes a live call and records the actual response; you (or the skill) turn that observation into an output model, and regeneration bakes it in. Return types then reflect what the server really sends, not a guess. No other generator does this.
 
@@ -249,6 +251,8 @@ If you write your agent logic in Python and want generated tool wrappers you can
 ## Status
 
 Early access (`v0.x`). The codegen engine, OAuth persistence, live-probe shaping, tool-inventory drift detection (`mcpgen check`), and both Claude Code skills are working today. Transport support is stdio and Streamable HTTP; SSE is discovered but not implemented.
+
+**MCP SDK compatibility.** mcpgen currently pins the official Python SDK to `mcp>=1.27,<2`. The OAuth pre-flight refresh in `_bridge.py` depends on specific `FileTokenStorage` and auth-flow behavior in the 1.x line, and the SDK's 2.x rework for the 2026-07-28 spec changes that surface. The pin is deliberate, not neglect — lifting it means re-validating the token lifecycle against 2.x, which is tracked as the next significant piece of work. Generated wrappers themselves are unaffected: they import only `seam.McpCaller`, so a wrapper generated today keeps working against whatever bridge implementation you supply.
 
 ## License
 

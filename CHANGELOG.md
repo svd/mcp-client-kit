@@ -1,6 +1,270 @@
 # Changelog
 
-## [Unreleased] — 0.7.0
+## [Unreleased] — 0.8.0
+
+## [0.7.0] — 2026-08-25
+
+### Fixed
+
+- **Two mcpgen processes writing credentials at the same time silently dropped one of the
+  updates.** The store is a single JSON document keyed by server, so every write is a
+  read-modify-write of the *whole* file: a process touching one server saves everyone's
+  entry. With the read outside any lock, the second writer's snapshot predates the first
+  writer's `os.replace`, and saving it puts the stale view back — the first server's
+  freshly-issued token is gone, with no error anywhere, and its next run goes to the
+  browser. Two halves needed closing. Corruption: both `FileTokenStorage._file_save()` and
+  the client-config writer staged through a fixed `.tmp` path, so two processes wrote into
+  one partial file; the staging name now carries the pid, matching the convention already
+  used for generated files. Lost updates: whole-store cycles now run under an advisory lock —
+  a sidecar `credentials.json.lock`, `flock` on POSIX and `msvcrt.locking` on Windows —
+  and, critically, **re-read the store inside the lock**, so no write is ever built on a
+  snapshot older than the lock it is under. `delete_cred` was the sharpest edge: it clears
+  the entire store when its view says the entry it removed was the last one, so a login
+  landing in that window had its brand-new credential unlinked by a command that was never
+  asked to touch it. Also covered: `set_tokens`, `set_client_info`, the token-endpoint
+  cache, `login()`'s stash and restore, and `migrate-creds` — whose merge and purge are now
+  one operation rather than four races. Both primitives are released by the OS when the
+  holder's descriptor closes, so a killed process leaves nothing stale to break or time out.
+
+  The lock set follows the *backend*, not the path — a fix covering only the file backend
+  would have left half the surface open. The keyring is one global item, and `--creds` is
+  documented as ignored there, so two keyring processes carrying different paths would
+  otherwise lock different sidecars around the same document and exclude nothing. The
+  keyring backend therefore takes a fixed `~/.mcpgen/keyring.lock` *and* the path sidecar,
+  always in that order (the second is not redundant: a keyring failure falls back to
+  writing the file, and that write has to be covered too).
+
+  Three visible consequences. Keyring-only users now get empty sidecar lock files (0600,
+  holding nothing) under `~/.mcpgen`, the first files mcpgen writes there on that backend.
+  A lock that cannot be created or acquired reports on stderr and proceeds *unlocked*
+  rather than failing the operation — no lock is a lost update under concurrency, while
+  raising would be a failed credential write on a path that worked before (it is not a
+  `warning`, so `-W error` cannot turn that degrade back into the failure it avoids). And
+  the lock is taken before the read that decides whether anything needs writing — that
+  ordering *is* the fix — so deleting an absent credential, or migrating an empty source,
+  now leaves a directory and an empty lock file where both were previously filesystem
+  no-ops. Taking a lock never changes the permissions of a directory it did not create;
+  saving credentials still hardens the directory to 0700, as it always has.
+
+  Three limits. `login()` does **not** hold the lock across the browser round — one person
+  clicking through a consent screen would stall every other mcpgen process for as long as
+  they take — so two concurrent logins for the *same* server remain last-writer-wins; the
+  restore's re-check bounds the damage but does not remove it. The lock is advisory and
+  mcpgen-to-mcpgen: another program writing the same keyring entry is not coordinated, and
+  cannot be. And on Windows the primitive is `msvcrt.locking(LK_LOCK)`, which is not a
+  blocking acquire but a bounded one — about ten retries a second apart, then `OSError`,
+  which is the "cannot be acquired" case above and therefore proceeds unlocked with a line
+  on stderr. Contention lasting longer than ten seconds there is the pre-fix behaviour, and
+  `migrate-creds` is the one operation that holds the lock long enough to reach it. POSIX
+  has no such ceiling: `flock` waits. The 0600 sidecars are likewise a POSIX statement —
+  the mode bits are written on Windows too, and NTFS ACLs are what actually decide.
+
+- **A credential that arrived during a token refresh could be overwritten by the refresh
+  that was already in flight.** No lock can span this one: `_pre_flight_refresh` reads a
+  refresh token, `await`s an HTTP round-trip, and writes what comes back. A login landing
+  inside that window was replaced by a response chained to the refresh token the request
+  had *started* from — and where the authorization server rotates refresh tokens, that
+  chain is already invalid, so the overwrite cached a dead credential and sent the next run
+  to the browser. It now compares and sets: the response is stored only while the store
+  still holds the refresh token it was derived from. A credential deleted meanwhile is not
+  resurrected either, for the same reason. `login()`'s restore does the same check over its
+  own, much longer window.
+
+- **A refresh response that left out `refresh_token` erased the stored one, so the next
+  expiry had nothing to refresh with.** RFC 6749 §6 makes that member optional in a
+  refresh response and says to discard the old token only when a *new* one is issued;
+  Google's token endpoint omits it. mcpgen replaced the whole cached entry with whatever
+  came back, so on a server that does not rotate, the refresh token vanished on the first
+  successful refresh and every token lifetime after that ended in a browser prompt.
+  Both writers now carry the stored refresh token forward when the response has none.
+  A rotated one still replaces it, as §6 requires; revocation is unaffected, because a
+  revoked grant arrives as `invalid_grant` on next use, which is already read as dead.
+
+- **A brief outage at the authorization server sent every run to the browser for a login
+  that could not fix it.** `_pre_flight_refresh()` turned *any* non-200 from the token
+  endpoint into `ReauthenticationRequired`, which `ensure_login()` converts straight into a
+  browser prompt — so a `502`, a `503`, a `429`, or a Cloudflare error page in front of the
+  authorization server produced an interactive re-login that then asked the same unreachable
+  host for a token. Across a batch that is one impossible prompt per item. `httpx` transport
+  errors escaped unclassified entirely, so callers could not branch on them at all. This is
+  the 0.6.0 `login()` bug one layer up: there a completed login was discarded, here a live
+  refresh token was declared dead because the endpoint that would renew it was briefly down.
+  The failure is now classified by who answered and what they faulted, read from the RFC
+  6749 §5.2 JSON `error` body rather than the status. The grant is treated as dead for
+  exactly three codes — `invalid_grant` (the refresh token) and `invalid_client` /
+  `unauthorized_client` (the registration, which `login()` replaces by dropping the cached
+  `client_info` and re-running dynamic client registration) — on whatever status they
+  arrive with, which covers a non-compliant server reporting a revoked grant as `403`.
+  Everything else raises the new `TokenRefreshUnavailable` and leaves the refresh token
+  untouched: a `5xx`, a transport error, a `408` from a proxy that never passed the request
+  on, a `429`, a `temporarily_unavailable` or `server_error` code, a WAF block page, a `3xx`
+  to a captive portal, a `404` from a moved endpoint, a `200` whose body is not a token, and
+  the codes that fault the request rather than the credential (`invalid_request`,
+  `unsupported_grant_type`, `invalid_scope`) — for those, a browser round produces a fresh
+  token and then resends the identical bad request. §5.2 requires the `error` body on every
+  `400` and `401`, so a bare or HTML one is a proxy rather than the authorization server.
+  Nothing that stays out of the browser path
+  is a dead end: every message whose cause is ambiguous enough that a fresh registration
+  could still be the fix names `mcpgen login <server>` as the manual next step. A `200` is
+  decided by whether it parses as a token, so a server that pads a good response with a
+  blank `error` member still refreshes, and one that reports failure in-band with a `200`
+  (Slack's rotation endpoint) is still classified rather than swallowed.
+
+- **A refresh response that failed to parse printed the token it contained to stderr.** A
+  `200` from a token endpoint *is* the token response, so the near-misses that fail
+  validation — a `token_type` outside the `Bearer` literal, a non-integer `expires_in`, a
+  rotation response with no `access_token` — carry a live `access_token` and
+  `refresh_token`. The error naming that failure is printed by `mcpgen login` and by the
+  `generate-mcp-runner` template, i.e. into CI logs. Response bodies quoted in an error now
+  go through a redaction pass that drops `access_token`, `refresh_token`, `id_token`, and
+  `client_secret` values in both JSON and form-encoded bodies, at any nesting depth and
+  whatever casing or word separator the responder spelled them with — `accessToken` from a
+  serializer left on its defaults and `access-token` from a kebab-case house style are the
+  same credential as the RFC's spelling, and the responders that reach this code are exactly
+  the ones re-serialising through a convention of their own — Slack wraps the token
+  in `authed_user`, and a body a proxy truncated mid-response no longer parses as JSON at all
+  yet still carries one — and the pydantic error — which quotes the
+  whole input back on a `missing` field — is reported by type rather than by message.
+  Everything else in the body is kept: `error`, `error_description`, and block-page text are
+  what make the message worth printing.
+
+  Redacting the message was not enough on its own, because the two raises on that path
+  chained the pydantic error with `from exc`, and a chain travels with the exception to
+  every caller. Only `mcpgen login` caught these types; on every other command the
+  interpreter printed the whole chain — including the quoted body — to stderr, which is the
+  CI log this redaction exists for. Both now raise `from None`. What that costs is the
+  per-field pydantic detail, and the redacted body already shows the offending non-secret
+  members; what it buys applies to library callers and the generated runner too, neither of
+  which any CLI-side catch could have covered. (pydantic truncates the quoted value, so what
+  used to escape was a prefix of the credential — a smaller leak, not a different one, and a
+  short secret escaped whole.)
+
+- **The same credential leak was open on the login path, where the SDK does the parsing.**
+  Closing it in `_pre_flight_refresh` covered the refresh only. `login()`'s post-login check
+  goes through the MCP SDK, which reports a token or registration response that fails
+  validation as `OAuthTokenError(f"Invalid token response: {pydantic_error}")` — and that
+  text quotes the rejected body back as a *Python repr*, single-quoted. Neither existing
+  pattern could see it: one needs a double quote, the other an `=`. `_describe()` put it
+  straight into `PostLoginCheckFailed`, and `cli.py` printed that to stderr, so a gateway
+  that camelCased its members turned a failed post-login check into a live refresh token in
+  the CI log. Registration is the same shape with a longer-lived secret — RFC 7591 responses
+  carry `client_secret`, which never expires on its own.
+
+  Redaction is now one helper over four spellings, shared by `_describe()` and
+  `_body_excerpt()` so they cannot drift, and both raise sites drop the chain. The fourth
+  pattern drops pydantic's `input_value=` frame whole rather than scrubbing it member by
+  member, because member-wise redaction is unreliable there by construction: pydantic
+  truncates the quoted repr in the middle, and the cut lands mid-*key* as readily as
+  mid-value — `{'accessToken': 'SECRET1'...efreshToken': 'SECRET2'}` is real output, where
+  the second key has lost the `r` that any pattern would match on and its value is intact.
+  Where the cut falls depends on the total length, which the server controls, so anything
+  key-anchored closes one offset and leaves the rest. What survives the frame is what was
+  ever diagnostic: the field name, the error type, `input_type`. That fourth pattern is
+  scoped to *our own* exception messages and does not run over response bodies — a body
+  never carries a frame this module produced, and an authorization server that puts
+  `str(validation_error)` in its own `error_description` would otherwise lose the rest of
+  that line to a pattern with nothing to do there.
+
+- **Only `mcpgen login` handled an auth failure; every other command printed a traceback.**
+  `codegen`, `probe`, `call`, `list` and `check` caught `(FileNotFoundError, ValueError)`,
+  and the auth taxonomy is neither — so an expired credential or an unreachable token
+  endpoint, both routine, ended in a stack trace. `main()` now catches the two roots,
+  `ReauthenticationRequired` and `LoginWontHelp`, prints the message and exits 1. Catching
+  the roots rather than widening each command's `except` covers the subclasses and whatever
+  command is added next. It stays narrow deliberately: a `KeyError` from a real defect must
+  still reach the interpreter, so it is reported as a bug rather than dressed up as an
+  operational condition. `login`'s own handler runs first and keeps its wording.
+
+- **A form-encoded rejection was never classified, so a dead grant on GitHub-style servers
+  never prompted for a login.** The refresh request now sends `Accept: application/json`,
+  which is what most servers need to answer in the shape §5.2 describes — but `Accept` is a
+  request, not a guarantee, and a server that answers form-encoded anyway (GitHub's token
+  endpoint does by default) still presented every rejection, `invalid_grant` included, as a
+  body with no OAuth error code in it: an unidentified proxy response, permanently
+  unrecoverable for a headless caller. The error code is now also read out of a body
+  *labelled* `application/x-www-form-urlencoded`. The label is the whole point: an HTML block
+  page containing the text `error=invalid_grant` is a body the authorization server did not
+  send, and scraping it would manufacture the speaker evidence the classification turns on.
+  An unlabelled form body therefore stays unclassified, which is what it did before, so the
+  fallback adds no new way to be wrong. A body that parses as JSON is never re-read as a
+  form, and a form body carrying `error` twice, or empty, is treated as carrying none —
+  picking a winner would be a guess about which half the server sent.
+
+- **A credential store that broke mid-login replaced the error the operator needed to
+  see.** `login()`'s `except BaseException` handler re-reads storage to decide whether the
+  flow got far enough to save a token; a corrupt `credentials.json` or a keyring backend
+  that started failing raised from inside that handler, discarding the original transport
+  error. An unreadable store is now treated as "nothing can be said about what was
+  produced": the original failure propagates, and the previous credential — removed from
+  disk when the flow began — is not written back, which means it is lost. That is the
+  accepted half of the trade, not an oversight: writing blind onto a store that cannot be
+  read risks clobbering whatever the unreadable bytes still hold, and when the choice is
+  between one credential and every other server's, the store wins. The restore that follows
+  it is guarded the same way —
+  a store that refuses the *write* (a read-only filesystem, a keyring that has started
+  refusing) would otherwise mask the original failure through the adjacent door.
+
+- **A corrupt credential store broke the very command that repairs it.** `mcpgen login`
+  reads the store before it writes, and that read was bare, so unparseable JSON — a write
+  interrupted by a SIGKILL, a hand-edit gone wrong — met the one command whose job is
+  producing a fresh entry with a raw `JSONDecodeError` and no route back but deleting the
+  file. On the `file` backend `login()` now moves the unreadable file aside as
+  `credentials.json.corrupt.<epoch-ns>`, says so on stderr, and starts from an empty store.
+  The bad bytes are kept because they hold the other servers' entries; falling through to an
+  empty store without them would let the next save erase credentials that were still
+  recoverable by hand. If the file cannot be moved aside either — a permission problem, a
+  lock — `login()` raises `LoginWontHelp` and stops, for the same reason: continuing would
+  save an empty store over the bytes the quarantine exists to keep. It is the bare base class
+  deliberately, since no subclass fits a store that was never read, and both the CLI and the
+  generated runner already catch the base — so it reaches the user as a message rather than a
+  traceback. All of this is scoped to `login()`: the other readers run with nobody at the
+  keyboard, and there "start fresh" is not theirs to decide. (A keyring blob that will not
+  parse is a different path: `_keyring_load` already falls back to the file store with a
+  warning, and nothing is quarantined.)
+
+  A store that parses into something *other* than an object — `[]`, `null`, a bare string,
+  the other plausible outcome of a hand-edit gone wrong — reached the same dead end one door
+  over: it survived the parse and died two lines later inside `data.pop(...)` as a raw
+  `TypeError`. Both credential readers now reject a non-object store where they read it,
+  with the same `JSONDecodeError` unparseable bytes already raise, so the quarantine covers
+  it unchanged and `get_tokens`/`get_client_info` fail with a sentence rather than an
+  `AttributeError`. Who *raises* widened; who *quarantines* did not.
+
+- **A wide exception group could still produce an unreadable "one-line" error.**
+  `_describe()` capped each leaf but not their number, so an N-leaf `BaseExceptionGroup`
+  rendered as N × ~215 characters on a single CLI line. The joined result is now capped too.
+
+### Added
+
+- **`LoginWontHelp`**, exported from `mcpgen` — the base class for every auth failure
+  another browser round cannot fix. `PostLoginCheckFailed` and the new
+  `TokenRefreshUnavailable` both inherit from it, so batch callers catch one type and abort
+  instead of tracking a growing list. `ReauthenticationRequired` deliberately stays outside
+  it: there the browser *is* the fix, and folding it in would make one `except` clause
+  swallow both answers.
+
+- **`TokenRefreshUnavailable`**, exported from `mcpgen`. Raised when a cached grant was not
+  renewed for any reason other than the authorization server naming the credential dead.
+  The refresh token is untouched in every one of them, so the browser has nothing to
+  replace; the message says which case it was and whether retrying is the move.
+
+### Changed
+
+- **A token endpoint that rejects a dead grant with a bare `400`/`401` and no JSON `error`
+  body no longer triggers an automatic browser login.** This is the most visible change
+  here, and it is a deliberate trade. RFC 6749 §5.2 requires that body on exactly those two
+  statuses, so a bare or HTML one is far more often a proxy, a gateway, or a WAF than the
+  authorization server — and the old behaviour opened a browser that met the same block,
+  once per item across a batch. Servers that violate §5.2 lose the automatic prompt: they
+  now raise `TokenRefreshUnavailable`, whose message names `mcpgen login <server>` as the
+  manual route. If you hit this against a real authorization server, that command still
+  recovers it in one step.
+
+- **A refresh-time `502` no longer raises `ReauthenticationRequired`.** Consumers following
+  `doc/USAGE.md` catch only that type today, so their handler stops firing for this case —
+  which is the point, since it opened a browser that could not help. Catching
+  `LoginWontHelp` alongside it is the one-line migration; `mcpgen login` and the
+  `generate-mcp-runner` OAuth template already do.
 
 ## [0.6.0] — 2026-08-24
 

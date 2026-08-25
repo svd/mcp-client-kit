@@ -11,11 +11,16 @@ no pytest-asyncio dependency needed).
 from __future__ import annotations
 
 import asyncio
+import errno as _errno
 import io
+import itertools
 import json
 import os
 import stat
+import sys
+import threading
 import time
+import traceback
 import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -25,10 +30,29 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-from mcp.shared.auth import OAuthClientMetadata
+from mcp.client.auth import OAuthRegistrationError
+from mcp.shared.auth import OAuthClientMetadata, OAuthToken
 from pydantic import AnyUrl
 
 from mcpgen import _bridge
+
+
+@pytest.fixture(autouse=True)
+def _keyring_lock_under_tmp(tmp_path, monkeypatch):
+    """Keep the keyring store lock out of the developer's real ``~/.mcpgen``.
+
+    The keyring is one global item, so its lock path is a module constant rather
+    than something derived from ``--creds`` — which means every keyring-backend
+    test, and every ``migrate_creds`` test, would otherwise create and block on a
+    lock in the real home directory. That is both a suite that escapes ``tmp_path``
+    and the one real flake vector here: under xdist, two CI jobs on one box, or a
+    developer running ``mcpgen login`` while the suite runs, a worker blocks on that
+    machine-global lock until ``_run_concurrently``'s join times out and reports a
+    deadlock that is not one. Autouse, because the trap is the tests that do *not*
+    think they touch the keyring lock.
+    """
+    monkeypatch.setattr(_bridge, "_KEYRING_LOCK_PATH", tmp_path / "keyring-store")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -909,6 +933,54 @@ def test_login_restores_credential_on_oauth_failure(tmp_path):
     assert data["acme"] == original_entry
 
 
+def test_login_survives_a_credential_store_that_cannot_be_written(tmp_path):
+    """A restore that cannot happen must not become the error the operator sees.
+
+    Guarding the re-read alone left the adjacent door open: the restore right after it
+    calls `_save`, and a keyring backend that has started refusing, a full disk, or a
+    permission change fails on write at least as readily as on read. The save error
+    would then replace the original failure — the same masking bug, one line down.
+
+    The stash is a nicety; the original failure is the answer. Losing the restore is
+    survivable (the credential that could not be written was already unusable enough
+    to be worth re-authenticating), losing the diagnosis is not.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "orig_tok"}}}))
+    os.chmod(creds, 0o600)
+
+    async def fake_callback_server():
+        fut = asyncio.get_event_loop().create_future()
+        fut.set_result(("code", "state"))
+        return 9999, fut
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield  # makes this an async generator; unreachable
+
+    real_save = _bridge.FileTokenStorage._save
+
+    def refuses_to_write_the_restore(self, data):
+        # Keyed on what is being written, not on call count: the stash-clearing save
+        # before the flow must succeed, and only the restore in the handler must fail.
+        if data.get("acme", {}).get("tokens", {}).get("access_token") == "orig_tok":
+            raise OSError("Read-only file system")
+        real_save(self, data)
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", fake_callback_server),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+            patch.object(_bridge.FileTokenStorage, "_save", refuses_to_write_the_restore),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+
+
 def test_login_no_prior_credential_does_not_create_on_failure(tmp_path):
     """login() failure when no prior credential existed leaves no partial entry."""
     creds = tmp_path / "credentials.json"
@@ -1037,8 +1109,233 @@ def test_login_reports_server_unavailable_distinctly(tmp_path):
     with pytest.raises(_bridge.PostLoginCheckFailed) as excinfo:
         asyncio.run(run())
 
-    assert excinfo.value.__cause__ is original
+    # `from None` suppresses the *rendering* of the original, because the SDK reports a
+    # token response that failed validation by quoting the body into the exception text —
+    # so a printed traceback was a second way to leak what the message redacts. The object
+    # is still reachable at `__context__` for anything inspecting it programmatically;
+    # only the default rendering goes.
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is original
+    assert excinfo.value.__suppress_context__ is True
     assert "502 Bad Gateway" in str(excinfo.value)
+
+
+def _sdk_invalid_token_response(body):
+    """The SDK's own `OAuthTokenError` over a real pydantic error, not an imitation.
+
+    `mcp/client/auth/utils.py` reports a token response that fails validation as
+    `OAuthTokenError(f"Invalid token response: {e}")`. Building it from a genuine
+    `ValidationError` is the point — the leak is pydantic's `input_value` repr, and a
+    hand-written string would pin the test to a spelling pydantic might not produce.
+    """
+    from mcp.client.auth import OAuthTokenError
+
+    try:
+        OAuthToken(**body)
+    except Exception as exc:  # noqa: BLE001 — whatever pydantic raises is what the SDK quotes
+        return OAuthTokenError(f"Invalid token response: {exc}")
+    raise AssertionError("body validated; it was supposed to fail")
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["bare", "in-task-group"])
+def test_login_does_not_print_a_credential_the_sdk_quoted_back(tmp_path, wrapped):
+    """The same leak as the pre-flight one, one function over and through the SDK.
+
+    `_pre_flight_refresh` parses the token itself, so naming the pydantic error by type
+    was enough there. On the login path the SDK parses it and reports the failure by
+    interpolating that error — `input_value={'accessToken': 'ya29…'}`, a Python repr with
+    single quotes, which neither the JSON nor the form regex can see. `_describe` put that
+    straight into `PostLoginCheckFailed`, and `cli.py` prints it to stderr.
+
+    Short secrets deliberately: pydantic truncates the quoted repr, so a long token leaks
+    a prefix and only a short one leaks whole — a long token would let this pass with the
+    redaction removed. The task-group case is the real arrival shape, and it also pins that
+    redaction runs per *leaf*: `_describe` recurses before it joins.
+    """
+    creds = tmp_path / "credentials.json"
+    # camelCase on purpose — a gateway re-serialising is exactly how a body reaches the
+    # SDK's parser without an `access_token` member to satisfy it.
+    sdk_exc = _sdk_invalid_token_response({"accessToken": "SECRET1", "refreshToken": "SECRET2"})
+    failure = ExceptionGroup("unhandled errors in a TaskGroup", [sdk_exc]) if wrapped else sdk_exc
+    run = _run_login_failing_after_exchange(creds, failure, {"access_token": "fresh_tok"})
+
+    with pytest.raises(_bridge.PostLoginCheckFailed) as excinfo:
+        asyncio.run(run())
+
+    exc = excinfo.value
+    message = str(exc)
+    assert "SECRET1" not in message and "SECRET2" not in message
+    assert "<redacted>" in message
+    assert "Invalid token response" in message, "the operator still has to see what failed"
+    rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    assert "SECRET1" not in rendered and "SECRET2" not in rendered
+
+
+def test_explain_registration_error_does_not_pass_a_client_secret_through(tmp_path):
+    """The registration response is the other body that carries a credential.
+
+    RFC 7591 §3.2.1 puts `client_secret` in it, and the SDK reports a 2xx registration
+    body that fails validation the same way it reports a token one. `client_secret` is the
+    member `_SECRET_MEMBERS` singles out as outliving every token, and it does not expire
+    on its own.
+
+    Redacting inside `_explain_registration_error` rather than at the raise site is what
+    covers both of its exits — the annotated `invalid_client_metadata` message and the
+    pass-through one. `OAuthRegistrationError` is outside the `LoginWontHelp` taxonomy, so
+    it escapes both `_cmd_login`'s catch and `main()`'s roots: a traceback is its ordinary
+    rendering, not its unlucky one, which is why the raise site also drops the chain.
+    """
+    quoted = (
+        "Invalid registration response: 1 validation error for OAuthClientInformationFull\n"
+        "client_id\n  Field required [type=missing, "
+        "input_value={'clientSecret': 'SECRET_CS'}, input_type=dict]"
+    )
+
+    plain = _bridge._explain_registration_error(OAuthRegistrationError(quoted))
+    assert "SECRET_CS" not in str(plain)
+    assert "<redacted>" in str(plain)
+
+    # The annotated exit: same redaction, and the annotation still attaches.
+    annotated = _bridge._explain_registration_error(OAuthRegistrationError(f"invalid_client_metadata\n{quoted}"))
+    assert "SECRET_CS" not in str(annotated)
+    assert "public client" in str(annotated), "the annotation is the reason this function exists"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("{'access_token': 'abc'}", "{'access_token': '<redacted>'}"),
+        ('{"access_token": "abc"}', '{"access_token": "<redacted>"}'),
+        ("{'accessToken': 'abc', 'refresh-token': 'def'}", None),
+        ("{'access_token': 'abc", "{'access_token': '<redacted>'"),
+        ("access_token='abc'", "'access_token': '<redacted>'"),
+        ("error_description='access_token was rejected'", "error_description='access_token was rejected'"),
+    ],
+    ids=["repr", "json-untouched-by-repr-pattern", "repr-camel-and-kebab", "repr-truncated", "kwarg", "prose"],
+)
+def test_redact_secret_text_covers_every_spelling_without_eating_prose(text, expected):
+    """Three shapes, one helper, and one ordering constraint that is easy to get wrong.
+
+    `kwarg` is the case that pins repr-before-form: `_SECRET_FORM_RE` matches
+    `access_token=` and stops at the quote, so running it first yields
+    `access_token=<redacted>'abc'` — a substitution that reads as redacted and still
+    carries the credential.
+
+    `prose` is the guard in the other direction. The pattern demands a separator and an
+    opening quote after the member name, so a message that merely *names* one survives —
+    which is what keeps the excerpt worth printing.
+
+    `repr-truncated` is ordinary rather than exotic here: pydantic cuts that repr at
+    roughly fifty characters, so a value severed mid-token is the common case.
+    """
+    out = _bridge._redact_secret_text(text)
+    if expected is None:
+        assert "abc" not in out and "def" not in out
+        assert out.count("<redacted>") == 2
+    else:
+        assert out == expected
+
+
+def test_redact_secret_text_drops_a_pydantic_frame_truncated_mid_key():
+    """The reproduced spelling, frozen as a regression case.
+
+    Pydantic cuts the quoted repr in the middle, and the cut lands mid-*key* as readily as
+    mid-value: the second member below reads `efreshToken`, having lost its `r`, so no
+    member pattern can match it while its value sits there intact. Redacting the frame is
+    what makes the outcome independent of where the cut fell.
+    """
+    text = (
+        "Field required [type=missing, "
+        "input_value={'accessToken': 'SECRET1'...efreshToken': 'SECRET2'}, input_type=dict]"
+    )
+    out = _bridge._redact_secret_text(text)
+
+    assert "SECRET1" not in out and "SECRET2" not in out
+    # What the reader actually needs survives: which field, which constraint, which type.
+    assert "type=missing" in out and "input_type=dict" in out
+
+
+@pytest.mark.parametrize("pad", [0, 1, 7, 23, 41, 59])
+def test_redact_secret_text_holds_wherever_pydantic_cuts(pad):
+    """Generated from pydantic, not from a hardcoded guess at how it truncates.
+
+    The cut point is a function of the total repr length, which the *server* controls — a
+    `scope` string is enough to move it. Sweeping the padding walks the ellipsis across the
+    key, and a fix that depends on where it lands fails somewhere in this range.
+    """
+    body = {"scope": "x" * pad, "refresh_token": "SECRETX"}
+    with pytest.raises(Exception) as excinfo:  # noqa: B017 — pydantic's own type, whatever it is
+        OAuthToken(**body)
+
+    assert "SECRETX" not in _bridge._redact_secret_text(str(excinfo.value))
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["not a dict", 123, ["a"]],
+    ids=["string", "int", "list"],
+)
+def test_redact_secret_text_handles_every_input_value_shape(value):
+    """`input_value=` is not always a dict, and the terminator is what makes that moot.
+
+    A field-level failure prints a bare string; a non-dict body prints whatever it was.
+    The lazy match runs to `, input_type=` regardless, so no per-shape case is needed —
+    and the frame around it has to survive, or the message stops saying anything.
+    """
+    with pytest.raises(Exception) as excinfo:  # noqa: B017 — pydantic's own type
+        OAuthToken.model_validate(value)
+
+    out = _bridge._redact_secret_text(str(excinfo.value))
+    assert "input_value=<redacted>" in out
+    assert "input_type=" in out
+
+
+def test_redact_secret_text_bounds_a_frame_that_arrives_cut_short():
+    """A message some upstream wrapper already truncated has no `, input_type=` to find.
+
+    Without the end-of-line fallback the match fails and the frame prints verbatim —
+    which is the one case where the value is guaranteed to be the tail of the text.
+    """
+    out = _bridge._redact_secret_text("1 validation error … input_value={'refresh_token': 'SECR")
+    assert "SECR" not in out
+
+
+def test_redact_secret_text_bounds_an_unterminated_frame_at_the_line_end():
+    """The `re.M` on the frame pattern, which nothing else pins.
+
+    `.` excludes newline, so without multiline the `$` fallback cannot match at a line end
+    *inside* the string — an unterminated frame with anything after it stops being redacted
+    at all, and what survives is the mid-key case the pattern exists for. Dropping `re.M`
+    passes every other test in this file.
+    """
+    text = "1 validation error\n  x [input_value={'accessToken': 'S1'...efreshToken': 'SECRET2'\nsee also: docs"
+    out = _bridge._redact_secret_text(text)
+
+    assert "SECRET2" not in out
+    assert "see also: docs" in out, "the fallback bounds the match at the line, not the text"
+
+
+def test_body_excerpt_keeps_a_server_error_that_merely_says_input_value(tmp_path):
+    """The frame pattern is scoped to our own exception messages, and this is why.
+
+    A response body is a different corpus: it never carries a pydantic frame this module
+    produced. An authorization server backed by pydantic that puts `str(validation_error)`
+    into its own `error_description` would otherwise lose the rest of that line — the hint,
+    a support reference — to a pattern with nothing to do there.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = {
+        "error": "invalid_request",
+        "error_description": "validation failed: input_value='foo' is not an int",
+        "hint": "send an integer",
+    }
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(400, json_body=body))())
+
+    message = str(excinfo.value)
+    assert "send an integer" in message
+    assert "is not an int" in message
 
 
 def test_login_classifies_wrapped_transport_failure_as_server_unavailable(tmp_path):
@@ -1250,13 +1547,77 @@ def test_login_kept_token_is_refreshable_without_a_new_login(tmp_path):
     creds.write_text(json.dumps(data))
 
     posted = {}
+    endpoint = _token_endpoint_replying(
+        200, json_body={"access_token": "renewed_tok", "token_type": "bearer"}, record=posted
+    )
+
+    asyncio.run(_run_pre_flight(creds, endpoint)())
+
+    assert posted["url"] == "https://auth.example.com/token"
+    assert posted["data"]["refresh_token"] == "fresh_refresh", "the kept grant is what gets renewed"
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "renewed_tok"
+
+
+# ---------------------------------------------------------------------------
+# _pre_flight_refresh() — classifying what comes back from the token endpoint
+# ---------------------------------------------------------------------------
+
+
+def _refreshable_creds(tmp_path, token_endpoint="https://auth.example.com/token"):
+    """A credential that is past expiry and has everything needed to renew itself."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(
+        json.dumps(
+            {
+                "acme": {
+                    "tokens": {
+                        "access_token": "stale_tok",
+                        "refresh_token": "live_refresh",
+                        "expires_at": 1,  # long past; forces the refresh
+                    },
+                    "client_info": {"client_id": "acme_id"},
+                    "token_endpoint": token_endpoint,
+                }
+            }
+        )
+    )
+    os.chmod(creds, 0o600)
+    return creds
+
+
+class _CaseInsensitiveHeaders(dict):
+    """The one behaviour of `httpx.Headers` the classification depends on."""
+
+    def get(self, key, default=None):
+        return super().get(key.lower(), default)
+
+
+def _token_endpoint_replying(status_code, body="", json_body=None, record=None, headers=None):
+    """Fake httpx.AsyncClient whose token-endpoint POST answers with *status_code*.
+
+    `.json()` parses `.text` the way httpx does — so a non-JSON body raises rather
+    than yielding an empty dict. The classification reads the body shape to tell an
+    authorization server apart from a WAF in front of one, so a fake that quietly
+    turned an HTML error page into `{}` would let those tests pass for free.
+
+    `.headers` is case-insensitive on lookup, as httpx's is: the code reads
+    `retry-after` while servers send `Retry-After`, and a plain dict would make that
+    silently miss.
+
+    Pass *record* a dict to capture the posted url, form data, and request headers.
+    """
+    text = json.dumps(json_body) if json_body is not None else body
+    sent_headers = {k.lower(): v for k, v in (headers or {}).items()}
 
     class _FakeResponse:
-        status_code = 200
+        def __init__(self):
+            self.status_code = status_code
+            self.text = text
+            self.headers = _CaseInsensitiveHeaders(sent_headers)
 
         @staticmethod
         def json():
-            return {"access_token": "renewed_tok", "token_type": "bearer"}
+            return json.loads(text)
 
     class _FakeClient:
         async def __aenter__(self):
@@ -1265,18 +1626,856 @@ def test_login_kept_token_is_refreshable_without_a_new_login(tmp_path):
         async def __aexit__(self, *exc):
             return False
 
-        async def post(self, url, data):
-            posted["url"] = url
+        async def post(self, url, data, headers=None):
+            if record is not None:
+                record["url"] = url
+                record["data"] = data
+                record["headers"] = headers
             return _FakeResponse()
 
-    async def refresh():
+    return _FakeClient
+
+
+def _run_pre_flight(creds, fake_client):
+    """Drive _pre_flight_refresh against *creds* with httpx.AsyncClient faked out."""
+
+    async def run():
         storage = _bridge.FileTokenStorage("acme", creds)
-        with patch("mcpgen._bridge.httpx.AsyncClient", _FakeClient):
+        with patch("mcpgen._bridge.httpx.AsyncClient", fake_client):
             await _bridge._pre_flight_refresh("acme", storage)
 
-    asyncio.run(refresh())
-    assert posted["url"] == "https://auth.example.com/token"
+    return run
+
+
+@pytest.mark.parametrize("status_code", [500, 502, 503, 504, 408, 429])
+def test_pre_flight_refresh_does_not_demand_a_new_login_when_the_endpoint_is_down(tmp_path, status_code):
+    """A retryable status from the authorization server must not open the browser.
+
+    The refresh token is untouched — what failed is the host that would renew it,
+    and another browser round asks that same unreachable host for a token. Before
+    this classification every non-200 became ReauthenticationRequired, so a batch
+    produced one impossible interactive login per item.
+
+    408 belongs here for the same reason as a 5xx even though it is a 4xx: RFC 6749
+    §5.2 has the token endpoint report a dead grant as 400 (401 for client auth), so
+    a 408 is the proxy in front of it saying the request never got processed.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, "<html>bad gateway</html>"))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+    message = str(excinfo.value)
+    assert str(status_code) in message
+    assert "mcpgen login" not in message, "re-logging in cannot fix an unreachable endpoint"
+    # The credential must survive: it is what the retry will use.
+    assert json.loads(creds.read_text())["acme"]["tokens"]["refresh_token"] == "live_refresh"
+
+
+@pytest.mark.parametrize("status_code", [403, 302, 404, 405])
+def test_pre_flight_refresh_does_not_demand_a_new_login_for_a_block_page(tmp_path, status_code):
+    """A WAF blocking the request is not the authorization server rejecting the grant.
+
+    403 is the one that bites: a Cloudflare block, a bot-fight challenge, an IP
+    denylist. Classifying it as a dead grant opens a browser that meets the very
+    same block — the impossible re-prompt this whole change exists to remove. Same
+    for a 3xx to a captive portal and a 404 from a moved endpoint: in none of them
+    did a token request ever reach the authorization server.
+
+    The type is what matters, not the wording: `ensure_login` branches on
+    ReauthenticationRequired alone, so anything else keeps the browser shut. The
+    message does name `mcpgen login` as a manual last resort, which is a suggestion
+    the operator can weigh rather than a browser opening on its own.
+    """
+    creds = _refreshable_creds(tmp_path)
+    blocked = "<html><body>Access denied (Cloudflare error 1020)</body></html>"
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, blocked))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+    assert json.loads(creds.read_text())["acme"]["tokens"]["refresh_token"] == "live_refresh"
+
+
+def test_pre_flight_refresh_believes_an_oauth_error_on_any_status(tmp_path):
+    """Status alone does not decide it: the RFC error format identifies the speaker.
+
+    A server that reports a revoked grant as 403 with a proper `error` body is
+    non-compliant but real, and classifying it as retryable would strand the user —
+    `ensure_login` would never offer the browser that is the actual fix. Nothing in
+    front of an authorization server invents an `error` code, so the body is the
+    thing worth trusting when the status disagrees.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(403, json_body={"error": "invalid_grant"}))
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(run())
+
+    assert "mcpgen login acme" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "status_code,error_code",
+    [
+        (400, "invalid_request"),  # malformed request — the same one login would resend
+        (400, "unsupported_grant_type"),  # refresh_token not enabled on this client
+        (400, "invalid_scope"),
+    ],
+)
+def test_pre_flight_refresh_does_not_demand_a_new_login_for_a_faulted_request(tmp_path, status_code, error_code):
+    """An `error` body is not by itself proof the grant died — the code says which it is.
+
+    RFC 6749 §5.2 splits these: `invalid_grant` and `invalid_client` fault the
+    credential, everything else faults the request. The first classification here read
+    only the *shape* of the body, so a server answering `invalid_request` sent the user
+    to a browser that produced a fresh token and then resent the identical malformed
+    refresh — the re-prompt-per-item loop this whole change exists to remove, reached
+    by a different door.
+
+    The wording assertion is load-bearing. Every other branch also raises
+    TokenRefreshUnavailable and also embeds the body, so a test that only checked the
+    type and the echoed code would pass with this branch deleted outright — and the
+    operator would then be told there was "no OAuth error body" when there was one.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, json_body={"error": error_code}))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    message = str(excinfo.value)
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+    assert "rejected the refresh request itself" in message, "this branch, not the no-error-body fallback"
+    assert error_code in message, "the operator needs the code to act on it"
+    # Diagnosis first, but never a dead end: `unauthorized_client` and codes from
+    # outside the RFC can mean a registration a fresh login would replace.
+    assert "mcpgen login acme" in message
+    assert json.loads(creds.read_text())["acme"]["tokens"]["refresh_token"] == "live_refresh"
+
+
+@pytest.mark.parametrize(
+    "status_code,error_code",
+    [
+        (403, "temporarily_unavailable"),  # a status that is otherwise a block page
+        (400, "server_error"),  # a status that would otherwise read as a rejection
+    ],
+)
+def test_pre_flight_refresh_reads_a_retryable_error_code_on_any_status(tmp_path, status_code, error_code):
+    """These codes name a passing condition, so the advice is retry — not reconfigure.
+
+    Each pairs the code with a status that would classify differently on its own,
+    which is what makes `_RETRYABLE_REFRESH_ERRORS` load-bearing: drop the set and
+    these fall through to the configuration-problem branch, telling the operator to
+    audit a client that is fine while the server is merely busy.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, json_body={"error": error_code}))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    message = str(excinfo.value)
+    assert "retry later" in message
+    assert "configuration problem" not in message, "nothing here is misconfigured"
+    assert json.loads(creds.read_text())["acme"]["tokens"]["refresh_token"] == "live_refresh"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '["invalid_grant"]',  # a JSON array — .get() does not exist on a list
+        '"invalid_grant"',  # a bare JSON string, same
+        "123",
+        '{"error": 123}',  # an object, but the code is not a string
+        '{"error": {"code": "invalid_grant"}}',  # nested, not the §5.2 shape
+        '{"error": null}',
+    ],
+)
+def test_oauth_error_code_reads_only_the_rfc_shape(body):
+    """A body that is JSON but not §5.2 must read as "no error code", not crash or match.
+
+    Both guards in `_oauth_error_code` are load-bearing and neither is obvious. Valid
+    JSON that is not an object makes `.get` an AttributeError, and a non-string `error`
+    would otherwise flow into the frozenset lookups as an int or a dict. Dropping the
+    `isinstance` check passes every other test in this file, so this is the only thing
+    holding it.
+    """
+
+    class _Resp:
+        text = body
+
+        @staticmethod
+        def json():
+            return json.loads(body)
+
+    assert _bridge._oauth_error_code(_Resp()) is None
+
+
+_FORM_CT = "application/x-www-form-urlencoded"
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [_FORM_CT, f"{_FORM_CT}; charset=UTF-8", f"  {_FORM_CT.upper()} ;charset=utf-8"],
+    ids=["bare", "charset", "cased-and-padded"],
+)
+def test_pre_flight_refresh_classifies_a_form_encoded_dead_grant(tmp_path, content_type):
+    """`Accept: application/json` is a request, not a guarantee — GitHub answers form-encoded.
+
+    A server that ignores the header reports `invalid_grant` in a body the JSON parse
+    cannot read, so before the fallback a genuinely revoked grant fell to the terminal
+    "no OAuth error body" branch and raised TokenRefreshUnavailable forever. For a headless
+    caller that is a permanent hard failure with no automatic route back — the outcome the
+    dead-grant ordering exists to prevent.
+
+    The media type is compared with parameters stripped and case folded, because
+    `; charset=UTF-8` is what a real server sends and neither half of that is optional.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        400,
+        "error=invalid_grant&error_description=token+revoked",
+        headers={"Content-Type": content_type},
+    )
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert "mcpgen login acme" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_feeds_the_whole_cascade_from_a_form_encoded_body(tmp_path):
+    """The fallback is not a dead-grant special case: every branch reads the same code.
+
+    A `temporarily_unavailable` spelled form-encoded has to reach the retryable branch,
+    not the terminal one — otherwise the fallback would have fixed the login prompt and
+    left the "retry later" message reading like an unidentified proxy response.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        400,
+        "error=temporarily_unavailable",
+        headers={"Content-Type": _FORM_CT},
+    )
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    message = str(excinfo.value)
+    assert "retry later" in message
+    assert "not how an authorization server reports a bad grant" not in message
+
+
+def test_pre_flight_refresh_ignores_an_rfc_code_in_an_unlabelled_body(tmp_path):
+    """The Content-Type gate is the whole difference between reading and scraping.
+
+    A WAF block page containing the literal text `error=invalid_grant` is a body the
+    authorization server did not send. Reading a code out of it manufactures exactly the
+    speaker evidence the terminal branch reasons about *not* having, and the cost is one
+    browser prompt — or one impossible `mcpgen login` demand — per batch item, for a
+    credential that was never dead.
+
+    The body has to be one `parse_qsl` can actually read, or this test proves nothing:
+    `parse_qsl` splits on `&`, so an HTML page whose only `&` is absent yields a single
+    pair whose key is the whole leading run and never `error`. Written that way it passes
+    with the gate deleted. Written this way it fails — along with the `wrong-label` and
+    `no-label` cases in `test_oauth_error_code_reads_a_labelled_form_body`.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        403,
+        "<html><body>blocked</body></html>&error=invalid_grant",
+        headers={"Content-Type": "text/html; charset=utf-8"},
+    )
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+    assert "no OAuth error body" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type", "expected"),
+    [
+        ("error=invalid_grant", _FORM_CT, "invalid_grant"),
+        ("error=invalid_grant&error=invalid_request", _FORM_CT, None),
+        ("error=", _FORM_CT, None),
+        ("error=invalid_grant", "text/plain", None),
+        ("error=invalid_grant", "", None),
+        ('{"error": "invalid_request"}', _FORM_CT, "invalid_request"),
+        ("error=invalid_grant%0A", _FORM_CT, "invalid_grant"),
+        ("error=%20%20", _FORM_CT, None),
+        ("error=invalid_grant;error_description=x", _FORM_CT, "invalid_grant;error_description=x"),
+    ],
+    ids=["single", "duplicate", "empty", "wrong-label", "no-label", "json-wins", "padded", "blank", "semicolon"],
+)
+def test_oauth_error_code_reads_a_labelled_form_body(body, content_type, expected):
+    """The form fallback, at the seam, including the three ways it must decline.
+
+    Two `error` members mean a mangled or concatenated body; picking a winner would be a
+    guess about which half the server sent, and `None` routes it to the branch that costs
+    a message rather than a browser prompt. An empty value could not match either code set
+    anyway, and "no OAuth error body" is the more honest of the two messages. `json-wins`
+    pins the ordering: a body that parsed as JSON is the server's statement whatever its
+    Content-Type claims, and re-reading it as a form would let a mislabelled response be
+    classified twice, differently.
+
+    `padded` is the one-byte regression: §5.2 values are NQSCHAR, so a trailing newline
+    from a line-oriented intermediary is padding, and without the strip it turns a dead
+    grant into an unrecognised code. `semicolon` pins the opposite decision — `;` has not
+    been a form separator since Python 3.10 and is a legal byte inside a value, so the
+    whole run stays the value and lands in the request-faulted branch. Accepting it would
+    mean splitting on `;` too, which mis-reads compliant bodies to serve a server nobody
+    has met.
+    """
+
+    class _Resp:
+        text = body
+        headers = _CaseInsensitiveHeaders({"content-type": content_type})
+
+        @staticmethod
+        def json():
+            return json.loads(body)
+
+    assert _bridge._oauth_error_code(_Resp()) == expected
+
+
+def test_ensure_login_all_stops_at_the_first_failure_a_browser_cannot_fix(tmp_path):
+    """The batch case the taxonomy exists for: abort, do not walk the whole list.
+
+    `ensure_login_all` is a plain loop, so nothing catches LoginWontHelp on its behalf
+    — which is the design. A caller that wrapped each server instead would be back to
+    one impossible prompt per item.
+    """
+    creds = _refreshable_creds(tmp_path)
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.httpx.AsyncClient", _token_endpoint_replying(503, "unavailable")),
+            patch("mcpgen._bridge.login", AsyncMock()) as fake_login,
+        ):
+            with pytest.raises(_bridge.LoginWontHelp):
+                await _bridge.ensure_login_all(["acme", "beta", "gamma"], creds)
+        fake_login.assert_not_called()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("error_code", ["invalid_grant", "invalid_client", "unauthorized_client"])
+def test_ensure_login_re_registers_when_the_registration_is_what_failed(tmp_path, error_code):
+    """A condition re-registration can repair must not need a human to notice it.
+
+    `unauthorized_client` is the one that argues for itself. Filing it as
+    TokenRefreshUnavailable reads well interactively — the message explains the likely
+    misconfiguration — but automation and headless callers never see a prompt, so a
+    condition `login()` fixes on its own becomes a permanent failure until a person
+    runs the printed command. A server whose policy genuinely forbids refresh for this
+    client answers the same way to the new registration, costing one prompt per expiry;
+    that is the cheaper of the two errors.
+    """
+    creds = _refreshable_creds(tmp_path)
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.httpx.AsyncClient", _token_endpoint_replying(400, json_body={"error": error_code})),
+            patch("mcpgen._bridge.login", AsyncMock()) as fake_login,
+        ):
+            await _bridge.ensure_login("acme", creds)
+        assert fake_login.call_count == 1
+
+    asyncio.run(run())
+
+
+def test_pre_flight_refresh_passes_retry_after_through(tmp_path):
+    """ "Retry later" is not actionable without a when, and the server often sends one.
+
+    The header name is checked case-insensitively, as httpx does: servers send
+    `Retry-After`, and reading a plain dict for `retry-after` would drop it silently.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(429, "slow down", headers={"Retry-After": "120"})
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert "Retry-After: 120" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_says_nothing_about_retry_after_when_none_is_sent(tmp_path):
+    """No header must not render an empty or `None` value into the operator's line."""
+    creds = _refreshable_creds(tmp_path)
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(503, "unavailable"))())
+
+    assert "Retry-After" not in str(excinfo.value)
+    assert "None" not in str(excinfo.value)
+
+
+def test_pre_flight_refresh_takes_a_200_that_carries_a_token(tmp_path):
+    """A good token response is not disqualified by a stray `error` member.
+
+    Some servers pad every response with `"error": ""`. Reading the error code before
+    the token would fail a refresh that plainly succeeded, and `ensure_login` would
+    then open a browser for a credential that had just been renewed.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(200, json_body={"access_token": "renewed_tok", "token_type": "bearer", "error": ""})
+
+    asyncio.run(_run_pre_flight(creds, fake)())
+
     assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "renewed_tok"
+
+
+def test_pre_flight_refresh_demands_a_new_login_for_a_dead_grant_reported_with_200(tmp_path):
+    """Failure reported in-band on a 200 still reaches the browser when the grant died.
+
+    Slack's token-rotation endpoint answers `{"ok": false, "error": ...}` with a 200.
+    Deciding on the status alone would file a revoked refresh token as an unparseable
+    body — retryable forever, and `ensure_login` never offers the fix.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(200, json_body={"ok": False, "error": "invalid_grant"})
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert "mcpgen login acme" in str(excinfo.value)
+
+
+def test_ensure_login_does_not_open_the_browser_for_a_faulted_request(tmp_path):
+    """The end-to-end half of the case above: no browser, through the real entry point."""
+    creds = _refreshable_creds(tmp_path)
+
+    async def run():
+        with (
+            patch(
+                "mcpgen._bridge.httpx.AsyncClient",
+                _token_endpoint_replying(400, json_body={"error": "invalid_request"}),
+            ),
+            patch("mcpgen._bridge.login", AsyncMock()) as fake_login,
+        ):
+            with pytest.raises(_bridge.TokenRefreshUnavailable):
+                await _bridge.ensure_login("acme", creds)
+        fake_login.assert_not_called()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status_code", [400, 401])
+def test_pre_flight_refresh_does_not_demand_a_new_login_for_a_bare_rejection(tmp_path, status_code):
+    """A 400/401 with no OAuth error body did not come from the authorization server.
+
+    §5.2 requires the JSON `error` body on exactly these two statuses, so a bare or
+    HTML one is an auth proxy, a WAF, or a gateway — none of which a browser round
+    reaches. This used to take the status at face value on the theory that a terse
+    non-compliant server might mean a dead grant; that theory cost a guaranteed
+    useless browser prompt on every proxy 400 to buy an auto-prompt for a server that
+    violates the spec. The message carries `mcpgen login` instead, so the terse-server
+    case still has a way out — a printed command rather than a browser nobody asked for.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, "<html>Forbidden</html>"))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+    assert "mcpgen login acme" in str(excinfo.value), "the manual fallback is the only way out here"
+
+
+def test_pre_flight_refresh_classifies_a_200_that_is_not_a_token(tmp_path):
+    """An interstitial served with 200 must not escape as a raw parse error.
+
+    It used to reach `OAuthToken(**resp.json())` and raise JSONDecodeError or a
+    pydantic ValidationError, which no caller catches: `mcpgen login` printed a
+    traceback and batch callers could not branch on it at all.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(200, "<html>sign in to continue</html>"))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable):
+        asyncio.run(run())
+
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "stale_tok"
+
+
+@pytest.mark.parametrize(
+    "status_code,body",
+    [
+        (400, '{"error":"invalid_grant"}'),
+        (401, '{"error":"invalid_client"}'),
+        (400, '{"error":"unauthorized_client"}'),
+        # The description is free text and irrelevant to the decision.
+        (400, '{"error":"invalid_grant","error_description":"Token is not active"}'),
+    ],
+)
+def test_pre_flight_refresh_demands_a_new_login_when_the_grant_is_dead(tmp_path, status_code, body):
+    """The OAuth error codes a browser round *does* fix.
+
+    `invalid_grant` is the refresh token itself. `invalid_client` and
+    `unauthorized_client` are the registration, which `login()` replaces by dropping
+    the cached `client_info` and re-running dynamic client registration. Narrowing the
+    dead-grant test to the error code must not swallow these — `ensure_login` opens
+    the browser for this type and no other, so misfiling them leaves an expired
+    credential with no automatic way back.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, body))
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(run())
+
+    assert "mcpgen login acme" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_classifies_a_transport_error(tmp_path):
+    """A connect error used to escape unclassified, so callers could not branch on it."""
+    creds = _refreshable_creds(tmp_path)
+    original = httpx.ConnectError("[Errno 8] nodename nor servname provided")
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, data, headers=None):
+            raise original
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _FakeClient)())
+
+    assert excinfo.value.__cause__ is original
+    assert "ConnectError" in str(excinfo.value), "the operator has to see what went wrong"
+
+
+def test_pre_flight_refresh_classifies_an_unusable_token_endpoint(tmp_path):
+    """Not every httpx failure is an httpx.HTTPError, and the Raises contract is total.
+
+    `InvalidURL` and `CookieConflict` derive from Exception directly, so `except
+    httpx.HTTPError` let them escape as neither of the two documented types —
+    unclassified, which is the exact failure this classification exists to remove.
+    `credentials.json` is hand-editable, so a token_endpoint that is not a usable URL
+    is a reachable state and not a hypothetical.
+    """
+    creds = _refreshable_creds(tmp_path, token_endpoint="not a url")
+    original = httpx.InvalidURL("Invalid URL component 'scheme'")
+    assert not isinstance(original, httpx.HTTPError), "the premise of this test"
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, data, headers=None):
+            raise original
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _FakeClient)())
+
+    assert excinfo.value.__cause__ is original
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+
+
+@pytest.mark.parametrize("status_code", [503, 429])
+def test_pre_flight_refresh_reads_the_grant_before_the_retryable_status(tmp_path, status_code):
+    """When the status says "retry" and the body says "dead grant", the body wins.
+
+    The two conditions overlap — a server can shed load with a 503 and still name
+    `invalid_grant`, and a rate limiter can sit in front of a real rejection. The
+    branch order resolves it deliberately, and it must resolve it this way: a proxy
+    does not invent an RFC error code, so the server did speak. Getting it wrong in
+    this direction costs one unnecessary browser prompt; getting it wrong the other
+    way files a genuine revocation as "retry later", and ensure_login then never
+    offers the browser at all — no route back without a human reading the message.
+
+    Pinned because the ordering is otherwise invisible to the suite: reversing the
+    two blocks reads like a harmless cleanup, and every other test still passes.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(status_code, json_body={"error": "invalid_grant"}))
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(run())
+
+    assert "mcpgen login acme" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_does_not_print_the_token_it_could_not_parse(tmp_path):
+    """A 200 that fails validation is still a token response — it must not reach a log.
+
+    This is the dangerous shape precisely because it looks harmless: a `token_type`
+    outside the `Bearer` literal, or a non-integer `expires_in`, fails OAuthToken and
+    lands on the error path with a live access_token and refresh_token in the body.
+    Both cli.py and the generated runner print that message to stderr, so an echoed
+    body is a credential in CI logs. pydantic v2 also embeds the rejected input_value
+    in its own message, which is why the exception type is named instead of described.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        200,
+        json_body={
+            "access_token": "SECRET_ACCESS",
+            "refresh_token": "SECRET_REFRESH",
+            "id_token": "SECRET_ID",
+            "token_type": "not-a-bearer",
+            "error_description": "issued but malformed",
+        },
+    )
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    message = str(excinfo.value)
+    for secret in ("SECRET_ACCESS", "SECRET_REFRESH", "SECRET_ID"):
+        assert secret not in message, f"{secret} leaked into an error printed to stderr"
+    assert "<redacted>" in message
+    # Redaction is not censorship: what makes the message worth printing has to survive.
+    assert "issued but malformed" in message
+    assert "mcpgen login acme" in message
+
+
+def test_pre_flight_refresh_does_not_let_the_validation_error_carry_the_body(tmp_path):
+    """Redacting the body is not enough while pydantic quotes the body back at us.
+
+    Verified against pydantic 2.13: a *field-level* failure quotes only that field, but
+    a `missing` error quotes the whole input — `input_value={'refresh_token': '...'}`.
+    A response that rotates the refresh token but omits `access_token` produces exactly
+    that, so describing the exception re-prints the credential the excerpt just scrubbed.
+    Naming the exception type instead is what closes it; this pins that choice.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(200, json_body={"refresh_token": "SECRET_REFRESH"})
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert "SECRET_REFRESH" not in str(excinfo.value)
+    assert "ValidationError" in str(excinfo.value), "the operator still has to see what failed"
+
+
+@pytest.mark.parametrize(
+    ("json_body", "expected"),
+    [
+        ({"refresh_token": "SECRET1"}, _bridge.TokenRefreshUnavailable),
+        # `token_type` outside the `Bearer` literal is what fails validation here — the
+        # body has to both name a dead grant and still carry a credential, which is the
+        # padded shape `_body_excerpt` exists for.
+        (
+            {"error": "invalid_grant", "access_token": "SECRET1", "token_type": "bogus"},
+            _bridge.ReauthenticationRequired,
+        ),
+    ],
+    ids=["not-a-token", "dead-grant-with-token"],
+)
+def test_pre_flight_refresh_does_not_chain_the_body_into_a_traceback(tmp_path, json_body, expected):
+    """A clean message on an exception that chains the body is a leak that moved, not closed.
+
+    The chain travels with the exception object, and every CLI command except `login`
+    lets these types reach the interpreter — which prints the whole chain to stderr, i.e.
+    into the CI logs this redaction exists for. `format_exception` renders it exactly as
+    the interpreter would at exit, so this is the direct proof and not a proxy for one.
+
+    The short secret is the point: pydantic truncates the `input_value` repr, so a long
+    token leaks a prefix and a short one leaks whole. Asserting on a long token would
+    pass with the chain restored.
+
+    `__suppress_context__` is pinned alongside the rendering because a regression to a
+    bare `raise` still displays the context while `str()` stays clean — a rendering-only
+    assertion could miss it if the fake ever changes.
+    """
+    creds = _refreshable_creds(tmp_path)
+
+    with pytest.raises(expected) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, json_body=json_body))())
+
+    exc = excinfo.value
+    rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    assert "SECRET1" not in rendered
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
+
+
+def test_pre_flight_refresh_redacts_a_form_encoded_token_body(tmp_path):
+    """The JSON path is not the only one that can carry a credential.
+
+    GitHub's token endpoint answers form-encoded unless asked otherwise, and a body
+    that does not parse as JSON skips the member-wise redaction entirely. Without the
+    regex fallback the same secret leaks through a differently-encoded door.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = "access_token=SECRET_ACCESS&refresh_token=SECRET_REFRESH&scope=repo&token_type=bearer"
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    message = str(excinfo.value)
+    assert "SECRET_ACCESS" not in message
+    assert "SECRET_REFRESH" not in message
+    assert "scope=repo" in message, "the non-secret members are the diagnostic"
+
+
+def test_pre_flight_refresh_redacts_a_nested_token_body(tmp_path):
+    """A credential one level down is still a credential.
+
+    Slack answers `{"ok": …, "authed_user": {"access_token": …}}` — the very endpoint
+    `_pre_flight_refresh` singles out for in-band failure handling. A top-level scan of
+    the parsed members finds no secret there and prints the live token verbatim, so the
+    redaction has to walk the whole structure rather than the outermost mapping.
+
+    The value is a *list* deliberately. A nested string value is covered by the regex
+    fallback too, so with a string here the test would still pass on a walk flattened to
+    one level — it would pin nothing. Only the structural walk reaches a non-string value.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        200,
+        json_body={
+            "ok": False,
+            "error": "token_revoked",
+            "authed_user": {"access_token": ["SECRET_ACCESS"], "scope": "chat:write"},
+        },
+    )
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    message = str(excinfo.value)
+    assert "SECRET_ACCESS" not in message, "a nested token leaked into an error printed to stderr"
+    assert "<redacted>" in message
+    assert "chat:write" in message, "the non-secret members are the diagnostic"
+
+
+def test_pre_flight_refresh_redacts_a_truncated_json_token_body(tmp_path):
+    """A body cut short by a proxy fails `resp.json()` while still carrying the token.
+
+    The structured pass cannot reach it — that is exactly the case the parse failed on —
+    and the form-encoded regex does not match JSON syntax. Without a JSON-shaped fallback
+    running unconditionally, the least-parseable body is the one that leaks.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = '{"ok": false, "authed_user": {"access_token": "SECRET_ACCESS", "scope": "chat'
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    assert "SECRET_ACCESS" not in str(excinfo.value)
+    assert "<redacted>" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_redacts_a_body_cut_inside_the_token(tmp_path):
+    """The most-truncated body must not be the one that leaks.
+
+    A cut *after* the token still leaves its closing quote, so a value pattern that
+    insists on one passes that case while failing the shape the fallback exists for:
+    the proxy that stopped mid-token. The value therefore also ends at end-of-text.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = '{"ok": false, "authed_user": {"access_token": "SECRET_ACCESS_TAIL'
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    assert "SECRET_ACCESS_TAIL" not in str(excinfo.value)
+    assert "<redacted>" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_redacts_past_an_escaped_quote_in_the_token(tmp_path):
+    """Stopping at the first `"` inside the value would re-emit everything after it.
+
+    A value pattern that cannot step over `\\"` ends the match early, so the redaction
+    covers the head of the token and the substitution prints the tail back out.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = '{"access_token": "SEC\\"RET_TAIL", "scope": "chat'
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    assert "RET_TAIL" not in str(excinfo.value)
+
+
+def test_pre_flight_refresh_asks_the_token_endpoint_for_json(tmp_path):
+    """Without Accept: application/json some servers never send an OAuth error body.
+
+    The whole classification reads that body to tell the authorization server apart
+    from whatever stands in front of it. A server defaulting to form-encoded — GitHub
+    again — would present every rejection, `invalid_grant` included, as a body with no
+    error code, i.e. as a block page, and a genuinely dead grant would never prompt.
+    """
+    creds = _refreshable_creds(tmp_path)
+    record = {}
+    fake = _token_endpoint_replying(200, json_body={"access_token": "tok", "token_type": "bearer"}, record=record)
+
+    asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert record["headers"]["Accept"] == "application/json"
+
+
+def test_pre_flight_refresh_marks_a_truncated_body_as_truncated(tmp_path):
+    """An operator must be able to tell a short body from the front of a huge one.
+
+    `_describe` appends an ellipsis when it truncates; the response-body excerpt used
+    not to, so a 20KB block page and a 200-character one read identically.
+    """
+    creds = _refreshable_creds(tmp_path)
+    run = _run_pre_flight(creds, _token_endpoint_replying(503, "<html>" + "x" * 5000 + "</html>"))
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(run())
+
+    assert "…" in str(excinfo.value)
+
+
+def test_ensure_login_does_not_open_the_browser_when_the_token_endpoint_is_down(tmp_path):
+    """The regression this classification exists for: no browser prompt on an outage.
+
+    ensure_login() catches ReauthenticationRequired and only that, so the fix is
+    load-bearing here — misclassify the 503 and login() runs, opening a browser the
+    outage guarantees cannot help.
+    """
+    creds = _refreshable_creds(tmp_path)
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.httpx.AsyncClient", _token_endpoint_replying(503, "unavailable")),
+            patch("mcpgen._bridge.login", AsyncMock()) as fake_login,
+        ):
+            with pytest.raises(_bridge.TokenRefreshUnavailable):
+                await _bridge.ensure_login("acme", creds)
+        fake_login.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_pre_flight_refresh_still_renews_on_200(tmp_path):
+    """The happy path stays untouched by the classification above."""
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(200, json_body={"access_token": "renewed_tok", "token_type": "bearer"})
+
+    asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "renewed_tok"
+
+
+def test_the_failures_a_browser_cannot_fix_share_one_catchable_type(tmp_path):
+    """Batch callers catch LoginWontHelp once instead of tracking a growing list.
+
+    ReauthenticationRequired must stay outside it: there the browser *is* the fix,
+    and folding it in would make one except clause swallow both answers.
+    """
+    assert issubclass(_bridge.PostLoginCheckFailed, _bridge.LoginWontHelp)
+    assert issubclass(_bridge.TokenRefreshUnavailable, _bridge.LoginWontHelp)
+    assert not issubclass(_bridge.ReauthenticationRequired, _bridge.LoginWontHelp)
 
 
 def test_login_says_so_when_the_kept_token_cannot_be_refreshed(tmp_path):
@@ -1374,6 +2573,474 @@ def test_describe_caps_a_runaway_exception_message():
     assert described.endswith("…")
 
 
+def test_describe_caps_a_runaway_exception_group():
+    """Leaves are bounded but their number is not — the join has to be capped too.
+
+    Without this, a group of N fat leaves produces an N × ~215-character "one-line"
+    message, which is the same unreadable CLI line the per-leaf cap exists to stop.
+    """
+    group = ExceptionGroup("unhandled errors in a TaskGroup", [RuntimeError("x" * 5000) for _ in range(20)])
+
+    described = _bridge._describe(group)
+
+    assert len(described) < 800
+    assert described.endswith("…")
+    assert described.startswith("RuntimeError: xxx")
+
+
+def test_login_survives_an_unreadable_credential_store(tmp_path):
+    """A corrupt store must not replace the failure the operator actually needs to see.
+
+    The re-read lives inside `except BaseException`, so a JSONDecodeError from it
+    used to propagate in place of the transport error that got us there — and the
+    restore would have written the stash on top of an unreadable file.
+
+    The store is readable at the start (that read stashes the previous entry) and
+    breaks during the flow: a keyring backend that starts failing, or a file another
+    process truncated. A store that is already unreadable never reaches the handler.
+
+    A previous credential exists, so the restore branch is live — writing the stash
+    back on top of a store that could not be read is the one move that could turn a
+    server outage into a lost credential.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "old_tok"}}}))
+    os.chmod(creds, 0o600)
+    original = RuntimeError("502 Bad Gateway")
+    run = _run_login_failing_after_exchange(creds, original, {"access_token": "fresh_tok"})
+
+    real_load = _bridge.FileTokenStorage._load
+
+    def breaks_once_the_new_token_is_written(self):
+        # Keyed on state, not call count: everything up to the token exchange must
+        # read normally, and only the handler's re-read sees the broken store.
+        data = real_load(self)
+        if data.get("acme", {}).get("tokens", {}).get("access_token") == "fresh_tok":
+            raise json.JSONDecodeError("Expecting value", "", 0)
+        return data
+
+    with (
+        patch.object(_bridge.FileTokenStorage, "_load", breaks_once_the_new_token_is_written),
+        pytest.raises(RuntimeError) as excinfo,
+    ):
+        asyncio.run(run())
+
+    on_disk = json.loads(creds.read_text())
+    assert on_disk["acme"]["tokens"]["access_token"] == "fresh_tok", (
+        "the stash must not be restored over a store that could not be read"
+    )
+
+    assert excinfo.value is original
+    assert not isinstance(excinfo.value, json.JSONDecodeError)
+
+
+def test_login_quarantines_a_store_it_cannot_parse(tmp_path, capsys):
+    """`mcpgen login` is the recovery command, so it cannot be the one a corrupt store kills.
+
+    The 0.7.0 guard covers the handler's *re-read*. The read at the top of `login()` still
+    ran bare, so a truncated `credentials.json` met the one command whose job is writing a
+    fresh entry with a raw JSONDecodeError and no route back but deleting the file by hand.
+
+    Falling through to `{}` alone would be worse than the traceback: the `_save` on the next
+    line writes that empty view over the file, taking every other server's entry with it.
+    The bad bytes have to survive somewhere, which is what quarantine buys.
+    """
+    creds = tmp_path / "credentials.json"
+    garbage = '{"acme": {"tokens": {"access_'  # truncated mid-write
+    creds.write_text(garbage)
+    os.chmod(creds, 0o600)
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield  # makes this an async generator; unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+
+    quarantined = list(tmp_path.glob("credentials.json.corrupt.*"))
+    assert len(quarantined) == 1, "the unreadable bytes are the only copy of the other entries"
+    assert quarantined[0].read_text() == garbage
+    # The quarantined file still holds every other server's live tokens, so it is a
+    # credential store under a different name. `os.replace` preserves the mode, which is
+    # why this passes — and why nothing would notice if the quarantine ever grew a copy
+    # step that did not.
+    assert stat.S_IMODE(quarantined[0].stat().st_mode) == 0o600
+    assert "moved to" in capsys.readouterr().err, "silent quarantine is a file the user never finds"
+    # login() clears the entry before the flow and the flow here fails before any token
+    # exchange, so the live store must exist and be readable — and must not carry a
+    # fabricated entry for a login that never produced one.
+    assert json.loads(creds.read_text()) == {}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"Access_Token": "s3cr3t", "scope": "repo"}',
+        '{"authed_user": {"REFRESH_TOKEN": "s3cr3t"}, "scope": "repo"}',
+        "ACCESS_TOKEN=s3cr3t&scope=repo",
+        '{"Id_Token": "s3cr3t", "scope": "repo',
+        '{"accessToken": "s3cr3t", "scope": "repo"}',
+        '{"access-token": "s3cr3t", "scope": "repo"}',
+        '{"authed_user": {"refreshToken": "s3cr3t"}, "scope": "repo"}',
+        '{"clientSecret": "s3cr3t", "scope": "repo',
+        "accessToken=s3cr3t&scope=repo",
+        '{"access-token": "s3cr3t", "scope": "repo',
+        "access-token=s3cr3t&scope=repo",
+    ],
+    ids=[
+        "json",
+        "nested",
+        "form",
+        "truncated",
+        "camel",
+        "kebab",
+        "nested-camel",
+        "truncated-camel",
+        "form-camel",
+        "truncated-kebab",
+        "form-kebab",
+    ],
+)
+def test_body_excerpt_matches_secret_members_case_insensitively(tmp_path, body):
+    """§5.1 mandates the lowercase spelling, but it binds the authorization server.
+
+    Every body that reaches this function is one where something else may have answered —
+    a WAF, a gateway, a vendor wrapper with its own naming convention. Holding a
+    non-compliant responder to the compliant spelling is how the credential gets printed,
+    and the single most common thing such a wrapper does to a member name is re-case it: a
+    JSON serializer on its defaults emits `accessToken`. The camel and kebab cases run on
+    the truncated and form bodies too, because those take the regex path rather than the
+    structured one — a normalisation applied to only one of the two leaves the other a
+    generation behind, which is a leak that no test of the parsed shape would catch.
+    """
+    creds = _refreshable_creds(tmp_path)
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    message = str(excinfo.value)
+    assert "s3cr3t" not in message
+    assert "<redacted>" in message
+    assert "repo" in message, "folding the case must not start eating non-secret members"
+
+
+def test_body_excerpt_redacts_a_secret_nested_inside_a_json_string(tmp_path):
+    """The structured pass matches keys, so a token inside a *string* has no key to find.
+
+    A gateway echoing an upstream body into `error_description` produces exactly that, and
+    the body parses cleanly — so `scrubbed == parsed`, nothing is re-serialised, and the
+    regex fallback is the only thing standing between the token and stderr. This is the
+    case that makes the fallback load-bearing on the happy path, not just on broken input.
+    """
+    creds = _refreshable_creds(tmp_path)
+    echoed = json.dumps({"access_token": "SECRET_ACCESS", "token_type": "bearer"})
+    fake = _token_endpoint_replying(200, json_body={"error": "invalid_client", "error_description": echoed})
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    message = str(excinfo.value)
+    assert "SECRET_ACCESS" not in message
+    assert "invalid_client" in message, "everything before the secret is the diagnostic"
+
+
+def test_secret_json_re_redacts_a_value_truncated_after_a_backslash(tmp_path):
+    """A value cut on a lone trailing backslash has nothing for `\\\\.` to consume.
+
+    The star stops before it and the terminator alternation then fails at that position,
+    so without the optional backslash the whole match fails and the value prints verbatim.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = '{"access_token":"SECRET_ACCESS\\'
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    assert "SECRET_ACCESS" not in str(excinfo.value)
+
+
+def test_body_excerpt_survives_a_body_nested_deeper_than_the_recursion_limit(tmp_path):
+    """The reporting path must not be the thing that crashes.
+
+    `_redact_secrets` spends two frames per level, so it gives out at roughly half the
+    nesting `json.loads` accepts — a window where a body the parser took blows up the code
+    describing it. The regexes are iterative, so falling through to them keeps redaction.
+    """
+    creds = _refreshable_creds(tmp_path)
+    depth = 700
+    # The secret goes first, ahead of the nesting: buried past `_DESCRIBE_LIMIT` it would be
+    # cut by truncation, and the assertion below would hold whether or not anything redacted
+    # it. In front, only the regex fallback can account for its absence.
+    # `token_type` outside the Bearer literal is what fails OAuthToken and lands this on the
+    # error path at all — with a valid token response there is nothing to report.
+    head = '{"access_token": "SECRET_ACCESS", "token_type": "not-a-bearer", "deep": '
+    body = head + '{"a": ' * depth + "null" + "}" * depth + "}"
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    assert "SECRET_ACCESS" not in str(excinfo.value)
+    assert "<redacted>" in str(excinfo.value), "absence must come from redaction, not truncation"
+
+
+@pytest.mark.parametrize(
+    "garbage",
+    ["[]", "null", '"a string"', "42"],
+    ids=["array", "null", "string", "number"],
+)
+def test_login_quarantines_a_store_that_is_not_an_object(tmp_path, capsys, garbage):
+    """Valid JSON that is not a store is the same dead end, one door over.
+
+    A hand-edit that leaves `[]` or `null` behind parses cleanly, so the quarantine's
+    `JSONDecodeError` catch never fired — and the value travelled one more line to die
+    inside `data.pop(...)` as a raw TypeError. That is exactly the traceback-with-no-way-out
+    the quarantine was written to remove, reached through a shape it did not recognise.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(garbage)
+    os.chmod(creds, 0o600)
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield  # makes this an async generator; unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+
+    quarantined = list(tmp_path.glob("credentials.json.corrupt.*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text() == garbage
+    assert "moved to" in capsys.readouterr().err
+    assert json.loads(creds.read_text()) == {}
+
+
+@pytest.mark.parametrize("garbage", ["[]", "null", '"a string"', "42"])
+def test_file_load_rejects_a_store_that_is_not_an_object(tmp_path, garbage):
+    """The headless readers raise, and raise the type their callers already handle.
+
+    `get_tokens` and friends run with nobody at the keyboard, so "start fresh" is not
+    theirs to decide — but dying on `AttributeError: 'list' object has no attribute 'get'`
+    says nothing about what is wrong. `JSONDecodeError` is the exception every reader of
+    this store already handles for "bytes on disk that are not a store", which is what
+    lets `login()`'s quarantine cover this shape without a second except clause.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(garbage)
+    os.chmod(creds, 0o600)
+    storage = _bridge.FileTokenStorage("acme", creds)
+
+    with pytest.raises(json.JSONDecodeError, match="not a JSON object"):
+        storage._load()
+    with pytest.raises(json.JSONDecodeError):
+        asyncio.run(storage.get_tokens())
+    with pytest.raises(json.JSONDecodeError):
+        asyncio.run(storage.get_client_info())
+
+
+def test_pre_flight_refresh_propagates_a_store_that_is_not_an_object(tmp_path):
+    """Who raises widened; who quarantines did not.
+
+    `_pre_flight_refresh` runs with nobody at the keyboard, so it must not move anyone's
+    file aside — it reports and stops, exactly as it does for unparseable bytes. Pinned
+    so a later "fix" does not push the quarantine down into the shared read path.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text("[]")
+    os.chmod(creds, 0o600)
+
+    with pytest.raises(json.JSONDecodeError):
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200))())
+
+    assert not list(tmp_path.glob("credentials.json.corrupt.*"))
+    assert creds.read_text() == "[]"
+
+
+def test_keyring_load_falls_back_when_the_blob_is_not_an_object(tmp_path, monkeypatch):
+    """A keyring blob that is not a store lands on the documented fallback, not around it.
+
+    `_keyring_load` catches broadly and downgrades to the hardened file with a warning;
+    a non-object blob is a blob that will not parse *as a store*, so raising from
+    `_keyring_read_raw` routes it there rather than letting a list reach `.get`.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "from_file"}}}))
+    os.chmod(creds, 0o600)
+
+    monkeypatch.setattr(_bridge, "_keyring_read_raw", lambda: _bridge._require_store(json.loads("[]"), "[]"))
+    storage = _bridge.FileTokenStorage("acme", creds, backend="keyring")
+
+    with pytest.warns(UserWarning, match="keyring unusable"):
+        assert storage._load() == {"acme": {"tokens": {"access_token": "from_file"}}}
+    assert storage._backend == "file", "one failure downgrades the instance for good"
+
+
+def test_login_quarantines_a_store_that_is_not_utf8(tmp_path, capsys):
+    """`read_text` runs before `json.loads`, so the decode error is the other half of this.
+
+    A store saved in another encoding, or bytes a filesystem mangled, never reaches
+    `json.loads` at all. Catching only `JSONDecodeError` leaves that file killing `login`
+    with a traceback — the same dead end, one exception type over.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_bytes(b'{"acme": {"tokens": {"access_token": "caf\xc3"}}}')
+    os.chmod(creds, 0o600)
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield  # makes this an async generator; unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+
+    assert len(list(tmp_path.glob("credentials.json.corrupt.*"))) == 1
+    assert "moved to" in capsys.readouterr().err
+
+
+def test_login_stops_when_a_corrupt_store_cannot_be_moved_aside(tmp_path):
+    """A quarantine that failed must not be followed by the write it was protecting against.
+
+    Swallowing the rename error prints a promise to keep the old bytes and then saves an
+    empty store over them one line later — the data loss the quarantine exists to prevent,
+    with a message saying it did not happen.
+    """
+    creds = tmp_path / "credentials.json"
+    garbage = '{"acme": {"tokens": {"access_'
+    creds.write_text(garbage)
+    os.chmod(creds, 0o600)
+
+    def replace_fails(src, dst):
+        raise OSError("sharing violation")
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.os.replace", replace_fails),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(_bridge.LoginWontHelp, match="could not be moved aside") as excinfo:
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+            # The bare base, not a subclass: PostLoginCheckFailed would assert a token is
+            # cached and TokenRefreshUnavailable that the token endpoint answered, and
+            # neither happened. Pinned so nobody later "classifies" it into a lie.
+            assert type(excinfo.value) is _bridge.LoginWontHelp
+
+    asyncio.run(run())
+
+    assert creds.read_text() == garbage, "the store the quarantine failed to move must survive"
+
+
+def test_body_excerpt_redacts_client_secret(tmp_path):
+    """`client_secret` outlives every token in the set — a dynamic client's secret never expires.
+
+    Two real carriers put it in the text printed to stderr: an RFC 7591 registration response,
+    and a gateway that echoes the failed token request back in its error body. The diagnostic
+    a reader wants from it is that it was *sent*, which `<redacted>` still says.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        200,
+        json_body={
+            "error_description": "client authentication failed",
+            "registration": {"client_id": "public-id", "client_secret": "SECRET_CLIENT"},
+        },
+    )
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    message = str(excinfo.value)
+    assert "SECRET_CLIENT" not in message
+    assert "public-id" in message, "the client_id is the diagnostic, and is not a credential"
+
+
+def test_body_excerpt_redacts_a_form_encoded_client_secret(tmp_path):
+    """The form-encoded door has to close on the same member as the JSON one.
+
+    Both regexes and the recursive pass derive from one frozenset precisely so a member
+    cannot be covered on one path and open on the other; this pins that they do.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = "error=invalid_client&client_secret=SECRET_CLIENT&grant_type=refresh_token"
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(400, body))())
+
+    assert "SECRET_CLIENT" not in str(excinfo.value)
+    assert "error=invalid_client" in str(excinfo.value), "the non-secret members are the diagnostic"
+
+
+def test_file_storage_stages_writes_under_a_pid_unique_name(tmp_path):
+    """A fixed ".tmp" lets two mcpgen processes clobber each other's partial write."""
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("acme", creds)
+    staged = []
+
+    real_replace = os.replace
+
+    def record(src, dst):
+        staged.append(str(src))
+        real_replace(src, dst)
+
+    with patch("mcpgen._bridge.os.replace", record):
+        storage._save({"acme": {"tokens": {"access_token": "tok"}}})
+
+    assert len(staged) == 1
+    assert str(os.getpid()) in staged[0], "concurrent processes must not share a staging path"
+    assert not list(tmp_path.glob("*.tmp*")), "the staging file is renamed away, not left behind"
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "tok"
+
+
+def test_client_config_stages_writes_under_a_pid_unique_name(tmp_path):
+    """The client config writer got the same fix and needs the same pin.
+
+    Two files, one convention: leaving either on a fixed ".tmp" reinstates the
+    collision for that file alone, which is exactly the kind of asymmetry a later
+    refactor restores by accident.
+    """
+    target = tmp_path / "config.json"
+    staged = []
+
+    real_replace = os.replace
+
+    def record(src, dst):
+        staged.append(str(src))
+        real_replace(src, dst)
+
+    with patch("mcpgen._bridge.os.replace", record):
+        _bridge._save_client_config({"cred_backend": "keyring"}, target)
+
+    assert len(staged) == 1
+    assert str(os.getpid()) in staged[0], "concurrent processes must not share a staging path"
+    assert not list(tmp_path.glob("*.tmp*"))
+    assert json.loads(target.read_text())["cred_backend"] == "keyring"
+
+
 def test_sdk_saves_tokens_before_initialize_returns(tmp_path):
     """Pin the SDK ordering the whole fix rests on, against the real SDK.
 
@@ -1389,7 +3056,7 @@ def test_sdk_saves_tokens_before_initialize_returns(tmp_path):
     does not.
     """
     from mcp.client.auth import OAuthClientProvider
-    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+    from mcp.shared.auth import OAuthClientInformationFull
 
     saved: list[OAuthToken] = []
 
@@ -1680,6 +3347,13 @@ def test_login_explains_public_client_rejection(tmp_path):
         ):
             with pytest.raises(OAuthRegistrationError) as exc:
                 await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+        # `from None` at the raise site, pinned here because this is the only test that
+        # reaches it: the annotated text is redacted, and chaining the original would put
+        # the unredacted registration body — `client_secret` included — back in front of
+        # anyone printing a traceback. This type sits outside the `LoginWontHelp` taxonomy,
+        # so it escapes both `_cmd_login` and `main()`: a traceback is its normal rendering.
+        assert exc.value.__cause__ is None
+        assert exc.value.__suppress_context__ is True
         return str(exc.value)
 
     message = asyncio.run(run())
@@ -3134,3 +4808,915 @@ def test_parse_multiple_python_repr_blocks():
     """The ast.literal_eval fallback applies per block, not just to the first."""
     blocks = [{"type": "text", "text": "{'a': 1}"}, {"type": "text", "text": "{'b': 2}"}]
     assert _bridge.parse(blocks) == [{"a": 1}, {"b": 2}]
+
+
+# ---------------------------------------------------------------------------
+# Concurrent credential writes: the store lock and the _mutate seam
+# ---------------------------------------------------------------------------
+
+
+def _run_concurrently(fns, stagger=0.05):
+    """Start each callable on its own thread, `stagger` seconds apart, and join.
+
+    Threads rather than processes on purpose: `flock` is held per open file
+    description, not per process, so two `open()` calls from one interpreter
+    contend exactly as two interpreters would. That keeps the test honest
+    without paying for a process spawn.
+    """
+    import threading
+
+    errors: list[BaseException] = []
+
+    def guard(fn):
+        def run():
+            try:
+                fn()
+            except BaseException as exc:  # noqa: BLE001 — surfaced by the assert below
+                errors.append(exc)
+
+        return run
+
+    # Daemon threads: a worker that deadlocks on the lock never returns, and a
+    # non-daemon one would hold the interpreter open at exit — so a regression would
+    # hang the suite forever instead of failing the assert below.
+    threads = [threading.Thread(target=guard(fn), daemon=True) for fn in fns]
+    for t in threads:
+        t.start()
+        time.sleep(stagger)
+    for t in threads:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in threads), "a worker thread deadlocked"
+    assert not errors, f"worker raised: {errors!r}"
+
+
+def test_concurrent_set_tokens_for_different_servers_keep_both_entries(tmp_path):
+    """The reported bug: two processes read-modify-write the whole store, last wins.
+
+    Without serialisation the second writer's snapshot predates the first
+    writer's `os.replace`, so the first server's freshly-issued token is
+    silently dropped and its next run goes back to the browser.
+    """
+    creds = tmp_path / "credentials.json"
+    real_load = _bridge.FileTokenStorage._file_load
+
+    def slow_load(self):
+        data = real_load(self)
+        time.sleep(0.2)  # widen the read-modify-write window past the stagger
+        return data
+
+    def writer(name):
+        def run():
+            storage = _bridge.FileTokenStorage(name, credentials_path=creds, backend="file")
+            asyncio.run(storage.set_tokens(OAuthToken(access_token=f"tok-{name}", token_type="bearer")))
+
+        return run
+
+    with patch.object(_bridge.FileTokenStorage, "_file_load", slow_load):
+        _run_concurrently([writer("alpha"), writer("beta")])
+
+    stored = json.loads(creds.read_text())
+    assert stored["alpha"]["tokens"]["access_token"] == "tok-alpha"
+    assert stored["beta"]["tokens"]["access_token"] == "tok-beta"
+
+
+def test_concurrent_keyring_writes_keep_both_entries(tmp_path):
+    """The keyring backend has the same read-modify-write shape and needs the same lock.
+
+    A fix that only covers the file backend leaves half the surface open, so the
+    lock file — which exists on disk regardless of backend — is the rendezvous
+    for both.
+    """
+    fake_kr = _FakeKeyring()
+    creds = tmp_path / "credentials.json"
+    real_read = _bridge._keyring_read_raw
+
+    def slow_read():
+        data = real_read()
+        time.sleep(0.2)
+        return data
+
+    def writer(name):
+        def run():
+            storage = _bridge.FileTokenStorage(name, credentials_path=creds, backend="keyring")
+            asyncio.run(storage.set_tokens(OAuthToken(access_token=f"tok-{name}", token_type="bearer")))
+
+        return run
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}), patch.object(_bridge, "_keyring_read_raw", slow_read):
+        _run_concurrently([writer("alpha"), writer("beta")])
+
+    stored = json.loads(fake_kr._store[(_bridge._KEYRING_SERVICE, _bridge._KEYRING_USER)])
+    assert stored["alpha"]["tokens"]["access_token"] == "tok-alpha"
+    assert stored["beta"]["tokens"]["access_token"] == "tok-beta"
+
+
+def test_concurrent_token_endpoint_writes_keep_both_entries(tmp_path):
+    """_persist_token_endpoint is a read-modify-write of the whole store too."""
+    creds = tmp_path / "credentials.json"
+    real_load = _bridge.FileTokenStorage._file_load
+
+    def slow_load(self):
+        data = real_load(self)
+        time.sleep(0.2)
+        return data
+
+    def writer(name):
+        def run():
+            storage = _bridge.FileTokenStorage(name, credentials_path=creds, backend="file")
+            provider = SimpleNamespace(_get_token_endpoint=lambda: f"https://{name}.example/token")
+            _bridge._persist_token_endpoint(storage, name, provider)
+
+        return run
+
+    with patch.object(_bridge.FileTokenStorage, "_file_load", slow_load):
+        _run_concurrently([writer("alpha"), writer("beta")])
+
+    stored = json.loads(creds.read_text())
+    assert stored["alpha"]["token_endpoint"] == "https://alpha.example/token"
+    assert stored["beta"]["token_endpoint"] == "https://beta.example/token"
+
+
+def test_mutate_reads_the_store_fresh_inside_the_lock(tmp_path):
+    """The callback must see the store as of lock acquisition, not an earlier read.
+
+    A `_mutate` that merged into a dict captured before the lock would reinstate
+    the lost update it exists to prevent.
+    """
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("alpha", credentials_path=creds, backend="file")
+    storage._save({"beta": {"tokens": {"access_token": "written-by-someone-else"}}})
+
+    seen: list[dict] = []
+
+    def add_alpha(data):
+        seen.append(json.loads(json.dumps(data)))
+        data.setdefault("alpha", {})["tokens"] = {"access_token": "tok"}
+        return "result"
+
+    assert storage._mutate(add_alpha) == "result", "_mutate returns the callback's value"
+    assert seen == [{"beta": {"tokens": {"access_token": "written-by-someone-else"}}}]
+    assert json.loads(creds.read_text())["beta"]["tokens"]["access_token"] == "written-by-someone-else"
+
+
+def test_mutate_does_not_write_when_the_callback_raises(tmp_path):
+    """A callback that fails half-way must leave the store as it found it."""
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("alpha", credentials_path=creds, backend="file")
+    storage._save({"beta": {"tokens": {"access_token": "keep-me"}}})
+
+    def boom(data):
+        data.clear()
+        raise RuntimeError("callback failed")
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        storage._mutate(boom)
+
+    assert json.loads(creds.read_text()) == {"beta": {"tokens": {"access_token": "keep-me"}}}
+
+
+def test_store_lock_serialises_two_open_file_descriptions(tmp_path):
+    """Two holders of the lock must not be inside it at once."""
+    creds = tmp_path / "credentials.json"
+    overlap = []
+    inside = []
+
+    def hold():
+        with _bridge._store_lock(creds):
+            inside.append(1)
+            overlap.append(len(inside))
+            time.sleep(0.2)
+            inside.pop()
+
+    _run_concurrently([hold, hold])
+    assert overlap == [1, 1], "the lock allowed two holders inside at once"
+
+
+def test_store_lock_is_reentrant_within_one_thread(tmp_path):
+    """A nested acquire must not self-deadlock.
+
+    `flock` is per open file description, so a second `open()` + `LOCK_EX` from a
+    thread that already holds the lock blocks on itself forever. Any future
+    `_mutate` nested inside another would hang rather than fail.
+    """
+    creds = tmp_path / "credentials.json"
+    reached = []
+
+    def nest():
+        with _bridge._store_lock(creds):
+            with _bridge._store_lock(creds):
+                reached.append(True)
+
+    _run_concurrently([nest])
+    assert reached == [True]
+
+
+def test_store_lock_file_is_0600_in_a_0700_directory(tmp_path):
+    """The lock file sits next to the credentials and gets the same hardening."""
+    creds = tmp_path / "sub" / "credentials.json"
+    with _bridge._store_lock(creds):
+        pass
+    lock = creds.with_name(creds.name + ".lock")
+    assert lock.exists(), "the lock file must be created next to the store"
+    assert stat.S_IMODE(os.stat(lock).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(lock.parent).st_mode) == 0o700
+
+
+def test_store_lock_degrades_to_a_noop_without_a_platform_primitive(tmp_path):
+    """No fcntl and no msvcrt: yield anyway rather than fail every credential write."""
+    creds = tmp_path / "credentials.json"
+    with patch.object(_bridge, "_lock_fd", None):
+        with _bridge._store_lock(creds):
+            pass
+    assert not list(tmp_path.iterdir()), "a no-op lock must not leave a lock file behind"
+
+
+_LOGIN_FAILURE_PATH_READS = 3
+"""How many times a failing login() reads the whole store for its own server.
+
+1 is the stash-pop at the top (locked), 2 is the failure handler's branch-deciding
+read (deliberately *unlocked* — it only picks a branch and writes nothing), 3 is the
+restore's read inside `_mutate` (locked). `_login_racing_a_foreign_writer` aims its
+race window by this numbering, so a refactor that adds or drops a read moves every
+window; the helper asserts the count rather than trusting it.
+"""
+
+
+def _login_racing_a_foreign_writer(tmp_path, window_call_index):
+    """Run a failing login() while another mcpgen writes a *different* server.
+
+    `window_call_index` picks which of login()'s store reads to open the race in —
+    see `_LOGIN_FAILURE_PATH_READS` for the numbering. Only the two locked reads (1
+    and 3) are worth aiming at: they open a read-modify-write cycle, and the competing
+    writer is released from inside the window and then races the save that closes it,
+    so an unserialised cycle loses the foreign entry and a serialised one makes the
+    writer wait its turn. Aiming at 2 tests nothing — the restore re-reads afterwards
+    either way, so the assertion holds with the lock removed.
+
+    Returns the store as it ends up on disk.
+    """
+    import threading
+
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "orig_tok", "token_type": "bearer"}}}))
+    os.chmod(creds, 0o600)
+
+    window_open = threading.Event()
+    reads = 0
+    real_load = _bridge.FileTokenStorage._file_load
+
+    def load_then_open_the_window(self):
+        data = real_load(self)
+        # Count only the login's own reads. `_file_load` is patched at class level, so
+        # the racing writer's own load runs through here too — counting it would shift
+        # the index after the window opens and aim later windows at the wrong call site.
+        if self._key == "acme":
+            nonlocal reads
+            reads += 1
+            if reads == window_call_index:
+                window_open.set()
+                time.sleep(0.2)
+        return data
+
+    def foreign_writer():
+        # Hard-fail rather than fall through: `window_call_index` is coupled to an exact
+        # count of internal reads, so a refactor that adds one would silently aim this
+        # test at the wrong window and pass without racing anything.
+        assert window_open.wait(timeout=5), "the race window never opened"
+        other = _bridge.FileTokenStorage("other", credentials_path=creds, backend="file")
+        asyncio.run(other.set_tokens(OAuthToken(access_token="tok-other", token_type="bearer")))
+
+    async def fake_callback_server():
+        fut = asyncio.get_event_loop().create_future()
+        fut.set_result(("code", "state"))
+        return 9999, fut
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield  # makes this an async generator; unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", fake_callback_server),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    writer = threading.Thread(target=foreign_writer, daemon=True)
+    with patch.object(_bridge.FileTokenStorage, "_file_load", load_then_open_the_window):
+        writer.start()
+        asyncio.run(run())
+        writer.join(timeout=10)
+    assert not writer.is_alive(), "the competing writer deadlocked"
+    # The index above names one specific read. A refactor that adds or removes one
+    # renumbers the rest, and the window would silently move to a call site this test
+    # does not claim to cover — passing without exercising the lock at all.
+    assert reads == _LOGIN_FAILURE_PATH_READS, (
+        f"login()'s failure path read the store {reads} times, not {_LOGIN_FAILURE_PATH_READS}; "
+        "re-check which read `window_call_index` now names"
+    )
+    return json.loads(creds.read_text())
+
+
+def test_login_stash_does_not_drop_a_concurrent_write_to_another_server(tmp_path):
+    """login() clears its own entry by saving the whole store — under the lock."""
+    stored = _login_racing_a_foreign_writer(tmp_path, window_call_index=1)
+    assert stored["other"]["tokens"]["access_token"] == "tok-other"
+
+
+def test_login_restore_does_not_drop_a_concurrent_write_to_another_server(tmp_path):
+    """The failure handler's restore is a whole-store write too, and races the same way.
+
+    Window 3, not 2: 2 is the handler's unlocked branch-deciding read, and the restore
+    re-reads after it, so a race opened there is repaired by the very read under test.
+    """
+    stored = _login_racing_a_foreign_writer(tmp_path, window_call_index=3)
+    assert stored["other"]["tokens"]["access_token"] == "tok-other"
+    assert stored["acme"]["tokens"]["access_token"] == "orig_tok", "the restore itself must still happen"
+
+
+def test_delete_cred_does_not_destroy_a_concurrently_written_entry(tmp_path):
+    """delete_cred clears the whole store when its (stale) view says nothing is left.
+
+    Reading outside a lock makes that decision on a snapshot: a login that lands
+    between the read and the unlink writes an entry into a file `delete_cred` is
+    about to delete, and the credential is gone with no error anywhere.
+    """
+    import threading
+
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "orig"}}}))
+    os.chmod(creds, 0o600)
+
+    window_open = threading.Event()
+    real_read = _bridge._read_backend
+
+    def slow_read(backend, path):
+        data = real_read(backend, path)
+        window_open.set()
+        time.sleep(0.2)
+        return data
+
+    def foreign_writer():
+        # Hard-fail rather than fall through: a window that never opens would otherwise
+        # let this test pass without ever having raced anything.
+        assert window_open.wait(timeout=5), "the race window never opened"
+        other = _bridge.FileTokenStorage("other", credentials_path=creds, backend="file")
+        asyncio.run(other.set_tokens(OAuthToken(access_token="tok-other", token_type="bearer")))
+
+    writer = threading.Thread(target=foreign_writer, daemon=True)
+    with patch.object(_bridge, "_read_backend", slow_read):
+        writer.start()
+        assert _bridge.delete_cred("acme", backend="file", credentials_path=creds) is True
+        writer.join(timeout=10)
+    assert not writer.is_alive(), "the competing writer deadlocked"
+
+    assert creds.exists(), "the store was cleared on a stale view of what was left"
+    stored = json.loads(creds.read_text())
+    assert stored["other"]["tokens"]["access_token"] == "tok-other"
+    assert "acme" not in stored, "the requested deletion must still happen"
+
+
+def test_migrate_purge_does_not_drop_a_concurrent_write_to_the_source(tmp_path):
+    """The purge re-reads the source, and that read races every other mcpgen write."""
+    import threading
+
+    fake_kr = _FakeKeyringMig()
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "orig"}}}))
+    os.chmod(creds, 0o600)
+
+    window_open = threading.Event()
+    real_read = _bridge._read_backend
+    file_reads = itertools.count(1)
+
+    def slow_read(backend, path):
+        data = real_read(backend, path)
+        # The second file read is the purge's; the window that matters is between it
+        # and the write that follows, not between the first read and anything.
+        if backend == "file" and next(file_reads) == 2:
+            window_open.set()
+            time.sleep(0.2)
+        return data
+
+    def foreign_writer():
+        # Hard-fail rather than fall through: a window that never opens would otherwise
+        # let this test pass without ever having raced anything.
+        assert window_open.wait(timeout=5), "the race window never opened"
+        other = _bridge.FileTokenStorage("other", credentials_path=creds, backend="file")
+        asyncio.run(other.set_tokens(OAuthToken(access_token="tok-other", token_type="bearer")))
+
+    writer = threading.Thread(target=foreign_writer, daemon=True)
+    with patch.dict("sys.modules", {"keyring": fake_kr}), patch.object(_bridge, "_read_backend", slow_read):
+        writer.start()
+        _bridge.migrate_creds(
+            from_backend="file",
+            to_backend="keyring",
+            purge=True,
+            credentials_path=creds,
+            config_path=tmp_path / "config.json",
+        )
+        writer.join(timeout=10)
+    assert not writer.is_alive(), "the competing writer deadlocked"
+
+    stored = json.loads(creds.read_text())
+    assert stored["other"]["tokens"]["access_token"] == "tok-other"
+    assert "acme" not in stored, "the migrated entry must still be purged"
+
+
+_CONCURRENT_WRITER = """
+import asyncio, sys, time
+from pathlib import Path
+from unittest.mock import patch
+from mcp.shared.auth import OAuthToken
+from mcpgen import _bridge
+
+name, creds = sys.argv[1], Path(sys.argv[2])
+real = _bridge.FileTokenStorage._file_load
+
+
+def slow(self):
+    data = real(self)
+    time.sleep(0.4)
+    return data
+
+
+with patch.object(_bridge.FileTokenStorage, "_file_load", slow):
+    storage = _bridge.FileTokenStorage(name, credentials_path=creds, backend="file")
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="tok-" + name, token_type="bearer")))
+"""
+
+
+def test_two_processes_writing_different_servers_keep_both_entries(tmp_path):
+    """The reported bug was two processes, and only two processes prove the fix.
+
+    The threaded tests exercise the same primitive — `flock` is held per open file
+    description, so two `open()` calls contend whether or not they share an
+    interpreter — but they cannot catch a fix that accidentally depends on shared
+    process state. This one can, at the cost of two interpreter startups.
+    """
+    import subprocess
+
+    creds = tmp_path / "credentials.json"
+    script = tmp_path / "writer.py"
+    script.write_text(_CONCURRENT_WRITER)
+
+    procs = [subprocess.Popen([sys.executable, str(script), name, str(creds)]) for name in ("alpha", "beta")]
+    try:
+        for proc in procs:
+            assert proc.wait(timeout=60) == 0, "writer process failed"
+    finally:
+        # A timeout here means one writer is blocked on a lock it will never get.
+        # Leaving it running would outlive the test and hold that lock against the
+        # rest of the suite.
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+
+    stored = json.loads(creds.read_text())
+    assert stored["alpha"]["tokens"]["access_token"] == "tok-alpha"
+    assert stored["beta"]["tokens"]["access_token"] == "tok-beta"
+
+
+def test_store_lock_leaves_an_existing_directory_alone(tmp_path):
+    """Taking a lock must not chmod a directory it did not create.
+
+    `_file_save` hardens the parent because secrets land in it. The lock file is
+    empty and 0600 and protects nothing, so doing it here reached paths that never
+    write — including the current working directory, when `--creds` is relative.
+    """
+    loose = tmp_path / "loose"
+    loose.mkdir(mode=0o755)
+    os.chmod(loose, 0o755)  # mkdir's mode is masked by umask; set it outright
+    with _bridge._store_lock(loose / "credentials.json"):
+        pass
+    assert stat.S_IMODE(os.stat(loose).st_mode) == 0o755, "an existing directory must not be re-moded"
+
+
+def test_store_lock_creates_its_own_directory_private(tmp_path):
+    """A directory the lock itself creates is born 0700 — it may hold the store next."""
+    creds = tmp_path / "fresh" / "credentials.json"
+    with _bridge._store_lock(creds):
+        pass
+    assert stat.S_IMODE(os.stat(creds.parent).st_mode) == 0o700
+
+
+def test_store_lock_reports_and_proceeds_when_it_cannot_be_created(tmp_path, capsys):
+    """A lock that cannot be set up is a lost update, never a failed credential write.
+
+    Under `simplefilter("error")` — `-W error`, or a downstream suite running with
+    `filterwarnings = error` — a `warnings.warn` here would raise and abort the very
+    write this branch exists to keep working. So it goes to stderr, for the same
+    reason the corrupt-store quarantine message does: it has to reach the operator
+    whatever their warnings filter says, and it must never be fatal.
+    """
+    unwritable = tmp_path / "ro"
+    unwritable.mkdir()
+    os.chmod(unwritable, 0o500)
+    reached = []
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with _bridge._store_lock(unwritable / "sub" / "credentials.json"):
+                reached.append(True)
+    finally:
+        os.chmod(unwritable, 0o700)
+    assert reached == [True], "the body must run even though the lock could not be created"
+    assert "proceeding without cross-process locking" in capsys.readouterr().err
+
+
+def test_store_lock_reports_and_proceeds_when_the_acquire_fails(tmp_path, capsys):
+    """`flock` raises ENOLCK on some NFS mounts, and Windows `LK_LOCK` gives up after ~10s.
+
+    Both are the same situation as having no primitive at all, and the module's
+    policy for that is to degrade rather than fail the write.
+    """
+    creds = tmp_path / "credentials.json"
+
+    def refuse(fd):
+        raise OSError(_errno.ENOLCK, "No locks available")
+
+    reached = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with patch.object(_bridge, "_lock_fd", refuse):
+            with _bridge._store_lock(creds):
+                reached.append(True)
+    assert reached == [True], "a refused acquire must not abort the write"
+    assert "proceeding without cross-process locking" in capsys.readouterr().err
+
+
+def test_keyring_set_tokens_survives_a_credentials_dir_it_cannot_create(tmp_path, capsys):
+    """The keyring backend never touched disk before; a lock must not change that.
+
+    Raising here puts a raw OSError in the middle of the SDK's httpx auth
+    handshake, replacing a login that used to work.
+    """
+    fake_kr = _FakeKeyring()
+    unwritable = tmp_path / "ro"
+    unwritable.mkdir()
+    os.chmod(unwritable, 0o500)
+    creds = unwritable / "sub" / "credentials.json"
+    try:
+        with patch.dict("sys.modules", {"keyring": fake_kr}), warnings.catch_warnings():
+            warnings.simplefilter("error")  # the degrade must survive a fatal warnings filter
+            storage = _bridge.FileTokenStorage("srv", credentials_path=creds, backend="keyring")
+            asyncio.run(storage.set_tokens(OAuthToken(access_token="kr_token", token_type="bearer")))
+    finally:
+        os.chmod(unwritable, 0o700)
+    stored = json.loads(fake_kr._store[(_bridge._KEYRING_SERVICE, _bridge._KEYRING_USER)])
+    assert stored["srv"]["tokens"]["access_token"] == "kr_token"
+    assert "proceeding without cross-process locking" in capsys.readouterr().err, (
+        "the degrade branch must actually have been reached"
+    )
+
+
+def test_delete_cred_of_an_absent_name_still_reports_false(tmp_path):
+    """The lock is taken before the read that decides this, and that ordering is the fix."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "t"}}}))
+    os.chmod(creds, 0o600)
+    assert _bridge.delete_cred("nope", backend="file", credentials_path=creds) is False
+    assert json.loads(creds.read_text())["acme"]["tokens"]["access_token"] == "t"
+
+
+def test_store_lock_reentrancy_survives_a_differently_spelled_path(tmp_path):
+    """Two spellings of one file must be one key, or the nested acquire self-deadlocks.
+
+    `flock` is per open file description: a miss opens a second descriptor to a lock
+    this thread already holds and blocks on it forever. Cross-*process* exclusion is
+    unaffected either way — different spellings resolve to the same inode — so only
+    the in-process guard needs the resolution.
+    """
+    creds = tmp_path / "credentials.json"
+    (tmp_path / "sub").mkdir()  # pathlib keeps "..", so this is a genuinely other spelling
+    reached = []
+
+    def nest():
+        with _bridge._store_lock(creds):
+            with _bridge._store_lock(tmp_path / "sub" / ".." / "credentials.json"):
+                reached.append(True)
+
+    _run_concurrently([nest])
+    assert reached == [True]
+
+
+def test_mutate_reads_the_store_only_once_it_holds_the_lock(tmp_path):
+    """Not just "fresh" — fresh *as of the acquire*, which is the whole fix.
+
+    A `_mutate` that read the store and only then blocked on the lock would look
+    correct in a single-threaded test and still lose every update it was written to
+    prevent. So the competing write lands while this caller is already waiting.
+    """
+    import threading
+
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("alpha", credentials_path=creds, backend="file")
+    storage._save({"beta": {"tokens": {"access_token": "v1"}}})
+
+    holding = threading.Event()
+
+    def holder():
+        with _bridge._store_lock(creds):
+            holding.set()
+            time.sleep(0.1)  # long enough for the caller below to be blocked on the lock
+            # `_save` does not lock — this is the write of a holder that already has it.
+            storage._save({"beta": {"tokens": {"access_token": "v2"}}})
+            time.sleep(0.05)
+
+    seen: list[dict] = []
+    thread = threading.Thread(target=holder, daemon=True)
+    thread.start()
+    assert holding.wait(timeout=5), "the holder never took the lock"
+    storage._mutate(lambda data: seen.append(json.loads(json.dumps(data))))
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+
+    assert seen == [{"beta": {"tokens": {"access_token": "v2"}}}], "_mutate read the store before it held the lock"
+
+
+def test_concurrent_keyring_writes_at_different_creds_paths_keep_both_entries(tmp_path):
+    """The keyring is one global item; the file path is not its identity.
+
+    `--creds` is accepted on every command and documented as ignored by the keyring
+    backend, so two keyring processes may legitimately carry different paths. Keying
+    the lock on the path alone puts them on different sidecars while they read and
+    rewrite the same keyring document — no exclusion at all, on the backend the
+    whole both-backends claim rests on.
+    """
+    fake_kr = _FakeKeyring()
+    real_read = _bridge._keyring_read_raw
+
+    def slow_read():
+        data = real_read()
+        time.sleep(0.2)
+        return data
+
+    def writer(name, creds):
+        def run():
+            storage = _bridge.FileTokenStorage(name, credentials_path=creds, backend="keyring")
+            asyncio.run(storage.set_tokens(OAuthToken(access_token=f"tok-{name}", token_type="bearer")))
+
+        return run
+
+    with (
+        patch.dict("sys.modules", {"keyring": fake_kr}),
+        patch.object(_bridge, "_keyring_read_raw", slow_read),
+    ):
+        _run_concurrently(
+            [
+                writer("alpha", tmp_path / "alpha-creds.json"),
+                writer("beta", tmp_path / "beta-creds.json"),
+            ]
+        )
+
+    stored = json.loads(fake_kr._store[(_bridge._KEYRING_SERVICE, _bridge._KEYRING_USER)])
+    assert stored["alpha"]["tokens"]["access_token"] == "tok-alpha"
+    assert stored["beta"]["tokens"]["access_token"] == "tok-beta"
+
+
+def test_migrate_holds_the_keyring_lock_against_a_writer_at_another_path(tmp_path):
+    """A migration always pairs the keyring with the file, so it needs both locks."""
+    fake_kr = _FakeKeyringMig()
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "orig"}}}))
+    os.chmod(creds, 0o600)
+
+    window_open = threading.Event()
+    real_read = _bridge._keyring_read_raw
+
+    def slow_read():
+        data = real_read()
+        window_open.set()
+        time.sleep(0.2)
+        return data
+
+    def foreign_writer():
+        assert window_open.wait(timeout=5), "the race window never opened"
+        other = _bridge.FileTokenStorage("other", credentials_path=tmp_path / "other-creds.json", backend="keyring")
+        asyncio.run(other.set_tokens(OAuthToken(access_token="tok-other", token_type="bearer")))
+
+    writer = threading.Thread(target=foreign_writer, daemon=True)
+    with (
+        patch.dict("sys.modules", {"keyring": fake_kr}),
+        patch.object(_bridge, "_keyring_read_raw", slow_read),
+    ):
+        writer.start()
+        _bridge.migrate_creds(
+            from_backend="file",
+            to_backend="keyring",
+            credentials_path=creds,
+            config_path=tmp_path / "config.json",
+        )
+        writer.join(timeout=10)
+    assert not writer.is_alive(), "the competing writer deadlocked"
+
+    stored = json.loads(fake_kr._store[(_bridge._KEYRING_SERVICE, _bridge._KEYRING_USER)])
+    assert stored["other"]["tokens"]["access_token"] == "tok-other"
+    assert stored["acme"]["tokens"]["access_token"] == "orig", "the migration must still land"
+
+
+# ---------------------------------------------------------------------------
+# _pre_flight_refresh: the write must still belong to the credential it started from
+# ---------------------------------------------------------------------------
+
+
+def _expired_entry(refresh_token="old-rt"):
+    return {
+        "tokens": {
+            "access_token": "expired",
+            "token_type": "Bearer",
+            "refresh_token": refresh_token,
+            "expires_at": int(time.time()) - 10,
+        },
+        "client_info": {"client_id": "cid"},
+        "token_endpoint": "https://auth.example/token",
+    }
+
+
+def _refresh_racing(creds, during_post):
+    """Drive _pre_flight_refresh with *during_post* running inside the network round.
+
+    The lock cannot cover this window — it is an HTTP round-trip — so what the
+    callback does is exactly what a concurrent login or second refresh does: install
+    a newer credential while this one is waiting on the wire.
+    """
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, data, headers=None):
+            during_post()
+            return SimpleNamespace(
+                status_code=200,
+                text="",
+                headers={},
+                json=lambda: {
+                    "access_token": "late-old-refresh",
+                    "token_type": "Bearer",
+                    "refresh_token": "rotated-rt",
+                },
+            )
+
+    async def run():
+        storage = _bridge.FileTokenStorage("acme", creds)
+        with patch("mcpgen._bridge.httpx.AsyncClient", _FakeClient):
+            await _bridge._pre_flight_refresh("acme", storage)
+
+    asyncio.run(run())
+
+
+def test_pre_flight_refresh_does_not_overwrite_a_credential_that_arrived_meanwhile(tmp_path):
+    """A login landing inside the refresh round-trip must survive it.
+
+    The response chains from the refresh token this call read *before* the request.
+    Under refresh-token rotation the authorization server invalidates that chain when
+    it issues the newer one, so writing the late response over the login does not
+    merely lose an update — it caches a credential that is already dead, and the next
+    run goes to the browser. Same shape as `login()`'s restore, one window over.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": _expired_entry()}))
+    os.chmod(creds, 0o600)
+
+    def concurrent_login():
+        # Through the same seam a real login writes, but synchronously: this runs
+        # inside the caller's event loop, where asyncio.run() cannot.
+        other = _bridge.FileTokenStorage("acme", credentials_path=creds, backend="file")
+        other._mutate(
+            lambda data: data.setdefault("acme", {}).__setitem__(
+                "tokens", {"access_token": "new-login", "token_type": "Bearer", "refresh_token": "new-rt"}
+            )
+        )
+
+    _refresh_racing(creds, concurrent_login)
+
+    stored = json.loads(creds.read_text())["acme"]["tokens"]
+    assert stored["access_token"] == "new-login", "the newer credential must win"
+    assert stored["refresh_token"] == "new-rt"
+
+
+def test_pre_flight_refresh_does_not_resurrect_a_credential_deleted_meanwhile(tmp_path):
+    """`delete_cred` landing inside the round-trip must not be undone by the response."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": _expired_entry(), "other": {"tokens": {"access_token": "keep"}}}))
+    os.chmod(creds, 0o600)
+
+    def concurrent_delete():
+        _bridge.delete_cred("acme", backend="file", credentials_path=creds)
+
+    _refresh_racing(creds, concurrent_delete)
+
+    stored = json.loads(creds.read_text())
+    assert "acme" not in stored, "a deleted credential must not come back"
+    assert stored["other"]["tokens"]["access_token"] == "keep"
+
+
+def test_pre_flight_refresh_stores_the_new_token_when_nothing_raced_it(tmp_path):
+    """The uncontended path must still write — a veto that fires always is no fix."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": _expired_entry()}))
+    os.chmod(creds, 0o600)
+
+    _refresh_racing(creds, lambda: None)
+
+    stored = json.loads(creds.read_text())["acme"]["tokens"]
+    assert stored["access_token"] == "late-old-refresh"
+    assert stored["refresh_token"] == "rotated-rt"
+
+
+# ---------------------------------------------------------------------------
+# A refresh response may legally omit refresh_token (RFC 6749 §6)
+# ---------------------------------------------------------------------------
+
+
+def test_set_tokens_keeps_a_refresh_token_the_response_omitted(tmp_path):
+    """§6 makes the refresh token optional in a refresh response; Google omits it.
+
+    Writing the entry wholesale erases the stored one, and the next expiry then has
+    nothing to refresh with — a browser prompt every token lifetime, on a server that
+    did nothing wrong.
+    """
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("acme", credentials_path=creds, backend="file")
+    storage._save({"acme": {"tokens": {"access_token": "old", "token_type": "Bearer", "refresh_token": "RT"}}})
+
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="new", token_type="bearer", expires_in=3600)))
+
+    stored = json.loads(creds.read_text())["acme"]["tokens"]
+    assert stored["access_token"] == "new"
+    assert stored["refresh_token"] == "RT", "an omitted refresh token means keep using the one you have"
+
+
+def test_set_tokens_replaces_a_rotated_refresh_token(tmp_path):
+    """§6 also says: when the server *does* issue a new one, discard the old."""
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("acme", credentials_path=creds, backend="file")
+    storage._save({"acme": {"tokens": {"access_token": "old", "token_type": "Bearer", "refresh_token": "RT"}}})
+
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="new", token_type="bearer", refresh_token="RT2")))
+
+    assert json.loads(creds.read_text())["acme"]["tokens"]["refresh_token"] == "RT2"
+
+
+def test_set_tokens_does_not_invent_a_refresh_token_for_a_new_entry(tmp_path):
+    """Carrying forward must mean carrying, not fabricating."""
+    creds = tmp_path / "credentials.json"
+    storage = _bridge.FileTokenStorage("acme", credentials_path=creds, backend="file")
+
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="new", token_type="bearer")))
+
+    assert "refresh_token" not in json.loads(creds.read_text())["acme"]["tokens"]
+
+
+def test_pre_flight_refresh_keeps_the_refresh_token_when_the_response_omits_it(tmp_path):
+    """The whole point of the compare-and-set key is that it must survive its own write."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": _expired_entry()}))
+    os.chmod(creds, 0o600)
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, data, headers=None):
+            return SimpleNamespace(
+                status_code=200,
+                text="",
+                headers={},
+                json=lambda: {"access_token": "NEW", "token_type": "Bearer", "expires_in": 3600},
+            )
+
+    async def run():
+        storage = _bridge.FileTokenStorage("acme", creds)
+        with patch("mcpgen._bridge.httpx.AsyncClient", _FakeClient):
+            await _bridge._pre_flight_refresh("acme", storage)
+
+    asyncio.run(run())
+    stored = json.loads(creds.read_text())["acme"]["tokens"]
+    assert stored["access_token"] == "NEW"
+    assert stored["refresh_token"] == "old-rt", "the next refresh must still have something to send"
+
+
+def test_store_lock_degrades_on_a_path_with_no_sidecar_name(tmp_path, capsys):
+    """Deriving the sidecar name can fail too, and that is still not a failed write.
+
+    `Path("/").with_name(...)` raises `ValueError`, not `OSError`. Left outside the
+    guard it escapes as a traceback — from a keyring operation, where `--creds` is
+    documented as ignored, so the path that broke it was never even used.
+    """
+    reached = []
+    with _bridge._store_lock(Path("/")):
+        reached.append(True)
+    assert reached == [True]
+    assert "proceeding without cross-process locking" in capsys.readouterr().err

@@ -12,6 +12,7 @@ jobs:
     environment: pypi          # must match the PyPI Trusted Publisher config
     permissions:
       id-token: write          # OIDC token for Trusted Publishing (no API token needed)
+      contents: write          # create the GitHub Release for the tag
     steps:
       - uses: actions/checkout@v4
 
@@ -34,3 +35,21 @@ jobs:
 
       - name: Publish to PyPI (Trusted Publishing)
         run: uv publish --trusted-publishing always
+
+      # Notes come from CHANGELOG.md, never a commit list. No build artifacts are
+      # attached: PyPI is the single source of truth for distribution.
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ./extract-changelog.sh "$version" > notes.md
+          if [ ! -s notes.md ]; then
+            echo "No CHANGELOG.md section for $version"; exit 1
+          fi
+          printf '\n---\n\nInstall: `uv add mcp-client-kit==%s` · [PyPI](https://pypi.org/project/mcp-client-kit/%s/)\n' \
+            "$version" "$version" >> notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --latest --verify-tag

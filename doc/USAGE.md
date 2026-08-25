@@ -171,7 +171,16 @@ no declared type and will instead fail at the transport layer with the SDK's own
 mcpgen login myserver   # opens browser; token stored at ~/.mcpgen/credentials.json
 ```
 
-Re-run when you see `ReauthenticationRequired`.
+Re-run when you see `ReauthenticationRequired` — that is the one error a trip through the
+browser fixes. mcpgen raises it when the credential is gone: either there is nothing
+cached to refresh with (no refresh token, no client id, or credentials predating the
+version that started caching the token endpoint), or the authorization server named it
+dead — the refresh token (`invalid_grant`) or the client registration (`invalid_client`,
+`unauthorized_client`, which a fresh login re-registers).
+
+`TokenRefreshUnavailable` is everything else: the cached refresh token is untouched, so
+the browser has nothing to replace. Its message says whether to retry or fix a
+configuration.
 
 The browser flow waits up to 300 seconds for the redirect. If you cancel on the consent
 screen, many authorization servers just close the tab without redirecting back, so mcpgen
@@ -277,7 +286,7 @@ python3 -c "import keyring; print(keyring.get_password('mcpgen', 'credentials'))
 
 If this prints JSON, the keyring backend succeeded.
 If it prints `None` (or errors), the fallback file was used instead — check for a
-`[mcpgen] keyring unavailable` warning in the `mcpgen login` output.
+`[mcpgen] keyring unusable` warning in the `mcpgen login` output.
 
 > **macOS note:** `security find-generic-password -w` prints raw binary, not JSON —
 > use the Python command above instead.
@@ -428,12 +437,17 @@ How it works:
   accept `headless=True`/`False` to force the paste-the-URL or browser flow explicitly.
 - **Lower-level alternative** — skip `ensure_login` and catch
   `ReauthenticationRequired` from the first failing `.call()`, then call
-  `login(SERVER, url=URL)` and retry. `ReauthenticationRequired`, `PostLoginCheckFailed`
-  and `login` are all exported from `mcpgen`.
-- **Batch callers** — catch `PostLoginCheckFailed` separately from
-  `ReauthenticationRequired`. The first means the token was issued and cached but the
-  post-login check failed, whatever the cause; another browser round cannot fix it, so
-  abort the batch instead of re-prompting once per item.
+  `login(SERVER, url=URL)` and retry. Catch that type and no wider: `.call()` runs the
+  pre-flight refresh, so it can also raise `TokenRefreshUnavailable`, where another login
+  is not the fix. Let it propagate, or handle it as the next bullet describes.
+  `ReauthenticationRequired`, `LoginWontHelp`, `PostLoginCheckFailed`,
+  `TokenRefreshUnavailable` and `login` are all exported from `mcpgen`.
+- **Batch callers** — catch `LoginWontHelp` separately from `ReauthenticationRequired`.
+  It is the base class for every auth failure another browser round cannot fix, so one
+  `except` covers them all: `PostLoginCheckFailed` (the token was issued and cached but
+  the check after it failed) and `TokenRefreshUnavailable` (the cached grant was not
+  renewed, and not because the credential died). Abort the batch there instead of
+  re-prompting once per item. Catch a subclass only when the difference matters.
 
 `McpBridgeCaller` kwargs mirror the CLI connection flags — `url=`, `bearer=` (PAT),
 `cmd=` (stdio), `config_path=`, `client_name=`. One instance is reusable across
@@ -663,7 +677,12 @@ accepts values outside the declared enum, the appropriate fix is to update the s
 |---------|-----|
 | Skill not listed in `/help` | Plugin not installed — run `/plugin marketplace add …` |
 | `ReauthenticationRequired` | Run `mcpgen login <server>` |
-| `PostLoginCheckFailed` | The counterpart: the token was issued and saved, but the check after login failed. Read the cause in the message — logging in again changes nothing |
+| `PostLoginCheckFailed` | The token was issued and saved, but the check after login failed. Read the cause in the message — logging in again changes nothing |
+| `TokenRefreshUnavailable` | The cached grant was not renewed, and the authorization server did not name the credential as the reason — a 5xx, a transport error, a `408`/`429`, a `temporarily_unavailable`/`server_error` code, a WAF block page, a `200` that is not a token, or a code faulting the request (`invalid_request`, `unsupported_grant_type`, `invalid_scope`). The message says which, and whether to retry or fix a configuration. It also names `mcpgen login <server>` wherever the cause is ambiguous enough that a fresh registration could still be the fix |
+| `LoginWontHelp` | The base class of the two above. Catch it in batch code to abort on the first failure a browser round cannot fix. Also raised directly, with no subclass, when the credential store cannot be parsed *and* cannot be moved aside — see the row below |
+| `[mcpgen] error: …` on any command | Every command, not just `login`, reports an auth failure as this one-line message and exit `1` — no traceback. The text is the exception's own message, so the rows above say what to do about it. A traceback from `mcpgen` is a bug worth reporting, never an expired credential |
+| `credentials.json is not a readable credential store … moved to …` | `mcpgen login` quarantined an unparseable store (`file` backend only) and started clean. Log in again for each server you use; the `.corrupt.<epoch-ns>` file still holds the old entries if you want to salvage one by hand |
+| `… is not a readable credential store … and could not be moved aside` | The corrupt store could not be quarantined — a permission problem or a file lock. Move or delete `credentials.json` by hand, then run `mcpgen login` again |
 | Config not found | Check the search order above; paths resolve from your cwd |
 | Bearer token rejected | Confirm the env var is exported in the current shell |
 | `uses SSE transport, which this mcpgen version does not support` | Only stdio and Streamable HTTP are implemented — see [§ Supported transports](#supported-transports) |
