@@ -1,0 +1,33 @@
+{
+  "solidity-account": {
+    "name": "MyAccount"
+  },
+  "solidity-custom": {
+    "name": "MyContract"
+  },
+  "solidity-erc1155": {
+    "name": "MyMulti",
+    "uri": "https://example.com/metadata/{id}.json"
+  },
+  "solidity-erc20": {
+    "name": "MyToken",
+    "symbol": "MTK"
+  },
+  "solidity-erc721": {
+    "name": "MyNFT",
+    "symbol": "MNFT"
+  },
+  "solidity-governor": {
+    "name": "MyGovernor",
+    "delay": "1 day",
+    "period": "1 week"
+  },
+  "solidity-rwa": {
+    "name": "MyAsset",
+    "symbol": "MRWA"
+  },
+  "solidity-stablecoin": {
+    "name": "MyStable",
+    "symbol": "MSTB"
+  }
+}

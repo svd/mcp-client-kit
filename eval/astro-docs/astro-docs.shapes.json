@@ -1,0 +1,25 @@
+{
+  "search_astro_docs": {
+    "unwrap": [
+      "search_results"
+    ],
+    "return_model": "AstroDocSearchResult",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {
+      "content": "str",
+      "source_url": "str",
+      "title": "str",
+      "source_type": "str"
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "query": "content collections"
+      },
+      {
+        "query": "view transitions"
+      }
+    ]
+  }
+}

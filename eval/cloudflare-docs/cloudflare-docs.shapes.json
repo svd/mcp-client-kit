@@ -1,0 +1,24 @@
+{
+  "migrate_pages_to_workers_guide": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {},
+    "_observed_shape": "str",
+    "_observed_bytes": 5716
+  },
+  "search_cloudflare_documentation": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "How do I bind a KV namespace to a Worker?"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 16470
+  }
+}

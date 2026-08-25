@@ -1,0 +1,34 @@
+{
+  "web_fetch_exa": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {
+      "maxCharacters": "int"
+    },
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "urls": [
+        "https://example.com"
+      ],
+      "maxCharacters": 500
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 374
+  },
+  "web_search_exa": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {
+      "numResults": "int"
+    },
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "blog post comparing React and Vue performance",
+      "numResults": 2
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 14662
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "web_fetch_exa": {
+    "urls": [
+      "https://example.com"
+    ],
+    "maxCharacters": 500
+  },
+  "web_search_exa": {
+    "query": "blog post comparing React and Vue performance",
+    "numResults": 2
+  }
+}

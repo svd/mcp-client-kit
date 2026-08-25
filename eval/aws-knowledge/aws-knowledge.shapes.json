@@ -1,0 +1,132 @@
+{
+  "aws___get_regional_availability": {
+    "unwrap": [
+      "content",
+      "result"
+    ],
+    "return_model": "RegionalAvailability",
+    "input_overrides": {},
+    "fields": {
+      "products": "dict",
+      "service_apis": "dict",
+      "cfn_resources": "dict",
+      "next_token": "str",
+      "failed_regions": "Any | None"
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "resource_type": "product",
+        "regions": [
+          "us-east-1"
+        ]
+      },
+      {
+        "resource_type": "api",
+        "regions": [
+          "us-east-1"
+        ]
+      },
+      {
+        "resource_type": "cfn",
+        "regions": [
+          "us-east-1"
+        ]
+      }
+    ],
+    "_observed_bytes": 27125,
+    "note": "Base model across resource_type variants (product|api|cfn): each variant populates exactly one of products/service_apis/cfn_resources. Inner maps are open-ended catalogs keyed by AWS product/API/CFN-type name, so they stay `dict`."
+  },
+  "aws___list_regions": {
+    "unwrap": [
+      "content",
+      "result"
+    ],
+    "return_model": "Region",
+    "input_overrides": {},
+    "fields": {
+      "region_id": "str",
+      "region_long_name": "str"
+    },
+    "source": "live",
+    "probed_args": {},
+    "_observed_bytes": 2781,
+    "return_container": "list"
+  },
+  "aws___read_documentation": {
+    "unwrap": [
+      "content",
+      "result"
+    ],
+    "return_model": "DocumentationPage",
+    "input_overrides": {},
+    "fields": {
+      "status": "str",
+      "url": "str",
+      "content": "str",
+      "total_length": "int",
+      "start_index": "int",
+      "end_index": "int",
+      "truncated": "bool",
+      "redirected_url": "str | None"
+    },
+    "source": "live",
+    "probed_args": {
+      "requests": [
+        {
+          "url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html",
+          "max_length": 2000
+        }
+      ]
+    },
+    "_observed_bytes": 2548,
+    "return_container": "list"
+  },
+  "aws___retrieve_skill": {
+    "unwrap": [
+      "content"
+    ],
+    "return_model": "SkillDocument",
+    "input_overrides": {},
+    "fields": {
+      "skill_content": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "skill_name": "aws-serverless"
+    },
+    "_observed_bytes": 4387
+  },
+  "aws___search_documentation": {
+    "unwrap": [
+      "content",
+      "result"
+    ],
+    "return_model": "SearchResultItem",
+    "input_overrides": {},
+    "fields": {
+      "rank_order": "int",
+      "title": "str",
+      "context": "str",
+      "url": "str",
+      "skill_description": "str",
+      "skill_name": "str"
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "search_phrase": "S3 bucket versioning",
+        "limit": 3
+      },
+      {
+        "search_phrase": "lambda deployment skill",
+        "topics": [
+          "agent_skills"
+        ],
+        "limit": 3
+      }
+    ],
+    "_observed_bytes": 4519,
+    "return_container": "list"
+  }
+}

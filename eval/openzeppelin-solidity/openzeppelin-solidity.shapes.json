@@ -1,0 +1,107 @@
+{
+  "solidity-account": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyAccount"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 853
+  },
+  "solidity-custom": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyContract"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 111
+  },
+  "solidity-erc1155": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyMulti",
+      "uri": "https://example.com/metadata/{id}.json"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 563
+  },
+  "solidity-erc20": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyToken",
+      "symbol": "MTK"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 422
+  },
+  "solidity-erc721": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyNFT",
+      "symbol": "MNFT"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 291
+  },
+  "solidity-governor": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {
+      "decimals": "int"
+    },
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyGovernor",
+      "delay": "1 day",
+      "period": "1 week"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 3298
+  },
+  "solidity-rwa": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyAsset",
+      "symbol": "MRWA"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 423
+  },
+  "solidity-stablecoin": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyStable",
+      "symbol": "MSTB"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 426
+  }
+}
