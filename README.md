@@ -74,6 +74,24 @@ Outside the block nothing changes, so existing code keeps working untouched. Det
 
 ---
 
+## Real generated output
+
+The snippet above is an illustration. These are the actual committed files — generated end-to-end by the skill against live MCP servers, not written by hand:
+
+| Server | Generated wrapper | Transport |
+|---|---|---|
+| `github` | [`github.py`](https://github.com/svd/mcp-client-kit/blob/eval/eval/github/github.py) | HTTP + bearer |
+| `filesystem` | [`filesystem.py`](https://github.com/svd/mcp-client-kit/blob/eval/eval/filesystem/filesystem.py) | stdio |
+| `huggingface` | [`huggingface.py`](https://github.com/svd/mcp-client-kit/blob/eval/eval/huggingface/huggingface.py) | HTTP, no auth |
+| `sqlite` | [`sqlite.py`](https://github.com/svd/mcp-client-kit/blob/eval/eval/sqlite/sqlite.py) | stdio |
+| `time` | [`time.py`](https://github.com/svd/mcp-client-kit/blob/eval/eval/time/time.py) | stdio |
+
+All thirteen servers: [`eval/`](https://github.com/svd/mcp-client-kit/tree/eval/eval). Each folder also holds the `<server>.shapes.json` sidecar that produced the typed returns, and a `run.py` sample runner.
+
+These live on a separate [`eval`](https://github.com/svd/mcp-client-kit/tree/eval) branch because the harness that produces them is its own project, not part of the shipped package — see [`doc/EVALS.md`](doc/EVALS.md).
+
+---
+
 ## Why developers pick it
 
 **Real source you own.** Importable `.py` modules — not `.pyi` stubs (mcp2py), not a runtime proxy, not a generated CLI script that needs its generator installed (`fastmcp generate-cli`), not modules that require a tool server running to work (mcpygen). You can diff it, review it, pin it, and read it in your IDE without a server running.
@@ -247,6 +265,7 @@ If you write your agent logic in Python and want generated tool wrappers you can
 
 - [`doc/USAGE.md`](doc/USAGE.md) — full end-user guide: install paths, server config, auth, the shape-spec, and calling generated wrappers.
 - [`doc/RUNNING_LOCALLY.md`](doc/RUNNING_LOCALLY.md) — run from a local clone without installing.
+- [`doc/EVALS.md`](doc/EVALS.md) — generated wrappers for thirteen real MCP servers, plus the evaluation harness and report, on the `eval` branch.
 
 ## Status
 
