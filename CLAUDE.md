@@ -25,6 +25,13 @@ uv build
 .venv/bin/mcpgen codegen <server> --out <server>.py
 ```
 
+## Comments
+
+Comments describe the code as it stands, not the changes that produced it. Write what
+constrains the current implementation — RFC citations, ordering requirements, known gaps —
+and leave the history to git. Do not append a new paragraph per fix: revise the existing
+comment instead, so it never explains behaviour that is no longer there.
+
 ## Architecture
 
 Four layers, strict one-way dependency:
