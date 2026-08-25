@@ -16,6 +16,7 @@ import json
 import os
 import stat
 import time
+import traceback
 import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -25,7 +26,8 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-from mcp.shared.auth import OAuthClientMetadata
+from mcp.client.auth import OAuthRegistrationError
+from mcp.shared.auth import OAuthClientMetadata, OAuthToken
 from pydantic import AnyUrl
 
 from mcpgen import _bridge
@@ -1085,8 +1087,233 @@ def test_login_reports_server_unavailable_distinctly(tmp_path):
     with pytest.raises(_bridge.PostLoginCheckFailed) as excinfo:
         asyncio.run(run())
 
-    assert excinfo.value.__cause__ is original
+    # `from None` suppresses the *rendering* of the original, because the SDK reports a
+    # token response that failed validation by quoting the body into the exception text —
+    # so a printed traceback was a second way to leak what the message redacts. The object
+    # is still reachable at `__context__` for anything inspecting it programmatically;
+    # only the default rendering goes.
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is original
+    assert excinfo.value.__suppress_context__ is True
     assert "502 Bad Gateway" in str(excinfo.value)
+
+
+def _sdk_invalid_token_response(body):
+    """The SDK's own `OAuthTokenError` over a real pydantic error, not an imitation.
+
+    `mcp/client/auth/utils.py` reports a token response that fails validation as
+    `OAuthTokenError(f"Invalid token response: {e}")`. Building it from a genuine
+    `ValidationError` is the point — the leak is pydantic's `input_value` repr, and a
+    hand-written string would pin the test to a spelling pydantic might not produce.
+    """
+    from mcp.client.auth import OAuthTokenError
+
+    try:
+        OAuthToken(**body)
+    except Exception as exc:  # noqa: BLE001 — whatever pydantic raises is what the SDK quotes
+        return OAuthTokenError(f"Invalid token response: {exc}")
+    raise AssertionError("body validated; it was supposed to fail")
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["bare", "in-task-group"])
+def test_login_does_not_print_a_credential_the_sdk_quoted_back(tmp_path, wrapped):
+    """The same leak as the pre-flight one, one function over and through the SDK.
+
+    `_pre_flight_refresh` parses the token itself, so naming the pydantic error by type
+    was enough there. On the login path the SDK parses it and reports the failure by
+    interpolating that error — `input_value={'accessToken': 'ya29…'}`, a Python repr with
+    single quotes, which neither the JSON nor the form regex can see. `_describe` put that
+    straight into `PostLoginCheckFailed`, and `cli.py` prints it to stderr.
+
+    Short secrets deliberately: pydantic truncates the quoted repr, so a long token leaks
+    a prefix and only a short one leaks whole — a long token would let this pass with the
+    redaction removed. The task-group case is the real arrival shape, and it also pins that
+    redaction runs per *leaf*: `_describe` recurses before it joins.
+    """
+    creds = tmp_path / "credentials.json"
+    # camelCase on purpose — a gateway re-serialising is exactly how a body reaches the
+    # SDK's parser without an `access_token` member to satisfy it.
+    sdk_exc = _sdk_invalid_token_response({"accessToken": "SECRET1", "refreshToken": "SECRET2"})
+    failure = ExceptionGroup("unhandled errors in a TaskGroup", [sdk_exc]) if wrapped else sdk_exc
+    run = _run_login_failing_after_exchange(creds, failure, {"access_token": "fresh_tok"})
+
+    with pytest.raises(_bridge.PostLoginCheckFailed) as excinfo:
+        asyncio.run(run())
+
+    exc = excinfo.value
+    message = str(exc)
+    assert "SECRET1" not in message and "SECRET2" not in message
+    assert "<redacted>" in message
+    assert "Invalid token response" in message, "the operator still has to see what failed"
+    rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    assert "SECRET1" not in rendered and "SECRET2" not in rendered
+
+
+def test_explain_registration_error_does_not_pass_a_client_secret_through(tmp_path):
+    """The registration response is the other body that carries a credential.
+
+    RFC 7591 §3.2.1 puts `client_secret` in it, and the SDK reports a 2xx registration
+    body that fails validation the same way it reports a token one. `client_secret` is the
+    member `_SECRET_MEMBERS` singles out as outliving every token, and it does not expire
+    on its own.
+
+    Redacting inside `_explain_registration_error` rather than at the raise site is what
+    covers both of its exits — the annotated `invalid_client_metadata` message and the
+    pass-through one. `OAuthRegistrationError` is outside the `LoginWontHelp` taxonomy, so
+    it escapes both `_cmd_login`'s catch and `main()`'s roots: a traceback is its ordinary
+    rendering, not its unlucky one, which is why the raise site also drops the chain.
+    """
+    quoted = (
+        "Invalid registration response: 1 validation error for OAuthClientInformationFull\n"
+        "client_id\n  Field required [type=missing, "
+        "input_value={'clientSecret': 'SECRET_CS'}, input_type=dict]"
+    )
+
+    plain = _bridge._explain_registration_error(OAuthRegistrationError(quoted))
+    assert "SECRET_CS" not in str(plain)
+    assert "<redacted>" in str(plain)
+
+    # The annotated exit: same redaction, and the annotation still attaches.
+    annotated = _bridge._explain_registration_error(OAuthRegistrationError(f"invalid_client_metadata\n{quoted}"))
+    assert "SECRET_CS" not in str(annotated)
+    assert "public client" in str(annotated), "the annotation is the reason this function exists"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("{'access_token': 'abc'}", "{'access_token': '<redacted>'}"),
+        ('{"access_token": "abc"}', '{"access_token": "<redacted>"}'),
+        ("{'accessToken': 'abc', 'refresh-token': 'def'}", None),
+        ("{'access_token': 'abc", "{'access_token': '<redacted>'"),
+        ("access_token='abc'", "'access_token': '<redacted>'"),
+        ("error_description='access_token was rejected'", "error_description='access_token was rejected'"),
+    ],
+    ids=["repr", "json-untouched-by-repr-pattern", "repr-camel-and-kebab", "repr-truncated", "kwarg", "prose"],
+)
+def test_redact_secret_text_covers_every_spelling_without_eating_prose(text, expected):
+    """Three shapes, one helper, and one ordering constraint that is easy to get wrong.
+
+    `kwarg` is the case that pins repr-before-form: `_SECRET_FORM_RE` matches
+    `access_token=` and stops at the quote, so running it first yields
+    `access_token=<redacted>'abc'` — a substitution that reads as redacted and still
+    carries the credential.
+
+    `prose` is the guard in the other direction. The pattern demands a separator and an
+    opening quote after the member name, so a message that merely *names* one survives —
+    which is what keeps the excerpt worth printing.
+
+    `repr-truncated` is ordinary rather than exotic here: pydantic cuts that repr at
+    roughly fifty characters, so a value severed mid-token is the common case.
+    """
+    out = _bridge._redact_secret_text(text)
+    if expected is None:
+        assert "abc" not in out and "def" not in out
+        assert out.count("<redacted>") == 2
+    else:
+        assert out == expected
+
+
+def test_redact_secret_text_drops_a_pydantic_frame_truncated_mid_key():
+    """The reproduced spelling, frozen as a regression case.
+
+    Pydantic cuts the quoted repr in the middle, and the cut lands mid-*key* as readily as
+    mid-value: the second member below reads `efreshToken`, having lost its `r`, so no
+    member pattern can match it while its value sits there intact. Redacting the frame is
+    what makes the outcome independent of where the cut fell.
+    """
+    text = (
+        "Field required [type=missing, "
+        "input_value={'accessToken': 'SECRET1'...efreshToken': 'SECRET2'}, input_type=dict]"
+    )
+    out = _bridge._redact_secret_text(text)
+
+    assert "SECRET1" not in out and "SECRET2" not in out
+    # What the reader actually needs survives: which field, which constraint, which type.
+    assert "type=missing" in out and "input_type=dict" in out
+
+
+@pytest.mark.parametrize("pad", [0, 1, 7, 23, 41, 59])
+def test_redact_secret_text_holds_wherever_pydantic_cuts(pad):
+    """Generated from pydantic, not from a hardcoded guess at how it truncates.
+
+    The cut point is a function of the total repr length, which the *server* controls — a
+    `scope` string is enough to move it. Sweeping the padding walks the ellipsis across the
+    key, and a fix that depends on where it lands fails somewhere in this range.
+    """
+    body = {"scope": "x" * pad, "refresh_token": "SECRETX"}
+    with pytest.raises(Exception) as excinfo:  # noqa: B017 — pydantic's own type, whatever it is
+        OAuthToken(**body)
+
+    assert "SECRETX" not in _bridge._redact_secret_text(str(excinfo.value))
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["not a dict", 123, ["a"]],
+    ids=["string", "int", "list"],
+)
+def test_redact_secret_text_handles_every_input_value_shape(value):
+    """`input_value=` is not always a dict, and the terminator is what makes that moot.
+
+    A field-level failure prints a bare string; a non-dict body prints whatever it was.
+    The lazy match runs to `, input_type=` regardless, so no per-shape case is needed —
+    and the frame around it has to survive, or the message stops saying anything.
+    """
+    with pytest.raises(Exception) as excinfo:  # noqa: B017 — pydantic's own type
+        OAuthToken.model_validate(value)
+
+    out = _bridge._redact_secret_text(str(excinfo.value))
+    assert "input_value=<redacted>" in out
+    assert "input_type=" in out
+
+
+def test_redact_secret_text_bounds_a_frame_that_arrives_cut_short():
+    """A message some upstream wrapper already truncated has no `, input_type=` to find.
+
+    Without the end-of-line fallback the match fails and the frame prints verbatim —
+    which is the one case where the value is guaranteed to be the tail of the text.
+    """
+    out = _bridge._redact_secret_text("1 validation error … input_value={'refresh_token': 'SECR")
+    assert "SECR" not in out
+
+
+def test_redact_secret_text_bounds_an_unterminated_frame_at_the_line_end():
+    """The `re.M` on the frame pattern, which nothing else pins.
+
+    `.` excludes newline, so without multiline the `$` fallback cannot match at a line end
+    *inside* the string — an unterminated frame with anything after it stops being redacted
+    at all, and what survives is the mid-key case the pattern exists for. Dropping `re.M`
+    passes every other test in this file.
+    """
+    text = "1 validation error\n  x [input_value={'accessToken': 'S1'...efreshToken': 'SECRET2'\nsee also: docs"
+    out = _bridge._redact_secret_text(text)
+
+    assert "SECRET2" not in out
+    assert "see also: docs" in out, "the fallback bounds the match at the line, not the text"
+
+
+def test_body_excerpt_keeps_a_server_error_that_merely_says_input_value(tmp_path):
+    """The frame pattern is scoped to our own exception messages, and this is why.
+
+    A response body is a different corpus: it never carries a pydantic frame this module
+    produced. An authorization server backed by pydantic that puts `str(validation_error)`
+    into its own `error_description` would otherwise lose the rest of that line — the hint,
+    a support reference — to a pattern with nothing to do there.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = {
+        "error": "invalid_request",
+        "error_description": "validation failed: input_value='foo' is not an int",
+        "hint": "send an integer",
+    }
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(400, json_body=body))())
+
+    message = str(excinfo.value)
+    assert "send an integer" in message
+    assert "is not an int" in message
 
 
 def test_login_classifies_wrapped_transport_failure_as_server_unavailable(tmp_path):
@@ -1566,6 +1793,136 @@ def test_oauth_error_code_reads_only_the_rfc_shape(body):
     assert _bridge._oauth_error_code(_Resp()) is None
 
 
+_FORM_CT = "application/x-www-form-urlencoded"
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [_FORM_CT, f"{_FORM_CT}; charset=UTF-8", f"  {_FORM_CT.upper()} ;charset=utf-8"],
+    ids=["bare", "charset", "cased-and-padded"],
+)
+def test_pre_flight_refresh_classifies_a_form_encoded_dead_grant(tmp_path, content_type):
+    """`Accept: application/json` is a request, not a guarantee — GitHub answers form-encoded.
+
+    A server that ignores the header reports `invalid_grant` in a body the JSON parse
+    cannot read, so before the fallback a genuinely revoked grant fell to the terminal
+    "no OAuth error body" branch and raised TokenRefreshUnavailable forever. For a headless
+    caller that is a permanent hard failure with no automatic route back — the outcome the
+    dead-grant ordering exists to prevent.
+
+    The media type is compared with parameters stripped and case folded, because
+    `; charset=UTF-8` is what a real server sends and neither half of that is optional.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        400,
+        "error=invalid_grant&error_description=token+revoked",
+        headers={"Content-Type": content_type},
+    )
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert "mcpgen login acme" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_feeds_the_whole_cascade_from_a_form_encoded_body(tmp_path):
+    """The fallback is not a dead-grant special case: every branch reads the same code.
+
+    A `temporarily_unavailable` spelled form-encoded has to reach the retryable branch,
+    not the terminal one — otherwise the fallback would have fixed the login prompt and
+    left the "retry later" message reading like an unidentified proxy response.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        400,
+        "error=temporarily_unavailable",
+        headers={"Content-Type": _FORM_CT},
+    )
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    message = str(excinfo.value)
+    assert "retry later" in message
+    assert "not how an authorization server reports a bad grant" not in message
+
+
+def test_pre_flight_refresh_ignores_an_rfc_code_in_an_unlabelled_body(tmp_path):
+    """The Content-Type gate is the whole difference between reading and scraping.
+
+    A WAF block page containing the literal text `error=invalid_grant` is a body the
+    authorization server did not send. Reading a code out of it manufactures exactly the
+    speaker evidence the terminal branch reasons about *not* having, and the cost is one
+    browser prompt — or one impossible `mcpgen login` demand — per batch item, for a
+    credential that was never dead.
+
+    The body has to be one `parse_qsl` can actually read, or this test proves nothing:
+    `parse_qsl` splits on `&`, so an HTML page whose only `&` is absent yields a single
+    pair whose key is the whole leading run and never `error`. Written that way it passes
+    with the gate deleted. Written this way it fails — along with the `wrong-label` and
+    `no-label` cases in `test_oauth_error_code_reads_a_labelled_form_body`.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        403,
+        "<html><body>blocked</body></html>&error=invalid_grant",
+        headers={"Content-Type": "text/html; charset=utf-8"},
+    )
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    assert not isinstance(excinfo.value, _bridge.ReauthenticationRequired)
+    assert "no OAuth error body" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type", "expected"),
+    [
+        ("error=invalid_grant", _FORM_CT, "invalid_grant"),
+        ("error=invalid_grant&error=invalid_request", _FORM_CT, None),
+        ("error=", _FORM_CT, None),
+        ("error=invalid_grant", "text/plain", None),
+        ("error=invalid_grant", "", None),
+        ('{"error": "invalid_request"}', _FORM_CT, "invalid_request"),
+        ("error=invalid_grant%0A", _FORM_CT, "invalid_grant"),
+        ("error=%20%20", _FORM_CT, None),
+        ("error=invalid_grant;error_description=x", _FORM_CT, "invalid_grant;error_description=x"),
+    ],
+    ids=["single", "duplicate", "empty", "wrong-label", "no-label", "json-wins", "padded", "blank", "semicolon"],
+)
+def test_oauth_error_code_reads_a_labelled_form_body(body, content_type, expected):
+    """The form fallback, at the seam, including the three ways it must decline.
+
+    Two `error` members mean a mangled or concatenated body; picking a winner would be a
+    guess about which half the server sent, and `None` routes it to the branch that costs
+    a message rather than a browser prompt. An empty value could not match either code set
+    anyway, and "no OAuth error body" is the more honest of the two messages. `json-wins`
+    pins the ordering: a body that parsed as JSON is the server's statement whatever its
+    Content-Type claims, and re-reading it as a form would let a mislabelled response be
+    classified twice, differently.
+
+    `padded` is the one-byte regression: §5.2 values are NQSCHAR, so a trailing newline
+    from a line-oriented intermediary is padding, and without the strip it turns a dead
+    grant into an unrecognised code. `semicolon` pins the opposite decision — `;` has not
+    been a form separator since Python 3.10 and is a legal byte inside a value, so the
+    whole run stays the value and lands in the request-faulted branch. Accepting it would
+    mean splitting on `;` too, which mis-reads compliant bodies to serve a server nobody
+    has met.
+    """
+
+    class _Resp:
+        text = body
+        headers = _CaseInsensitiveHeaders({"content-type": content_type})
+
+        @staticmethod
+        def json():
+            return json.loads(body)
+
+    assert _bridge._oauth_error_code(_Resp()) == expected
+
+
 def test_ensure_login_all_stops_at_the_first_failure_a_browser_cannot_fix(tmp_path):
     """The batch case the taxonomy exists for: abort, do not walk the whole list.
 
@@ -1884,6 +2241,48 @@ def test_pre_flight_refresh_does_not_let_the_validation_error_carry_the_body(tmp
     assert "ValidationError" in str(excinfo.value), "the operator still has to see what failed"
 
 
+@pytest.mark.parametrize(
+    ("json_body", "expected"),
+    [
+        ({"refresh_token": "SECRET1"}, _bridge.TokenRefreshUnavailable),
+        # `token_type` outside the `Bearer` literal is what fails validation here — the
+        # body has to both name a dead grant and still carry a credential, which is the
+        # padded shape `_body_excerpt` exists for.
+        (
+            {"error": "invalid_grant", "access_token": "SECRET1", "token_type": "bogus"},
+            _bridge.ReauthenticationRequired,
+        ),
+    ],
+    ids=["not-a-token", "dead-grant-with-token"],
+)
+def test_pre_flight_refresh_does_not_chain_the_body_into_a_traceback(tmp_path, json_body, expected):
+    """A clean message on an exception that chains the body is a leak that moved, not closed.
+
+    The chain travels with the exception object, and every CLI command except `login`
+    lets these types reach the interpreter — which prints the whole chain to stderr, i.e.
+    into the CI logs this redaction exists for. `format_exception` renders it exactly as
+    the interpreter would at exit, so this is the direct proof and not a proxy for one.
+
+    The short secret is the point: pydantic truncates the `input_value` repr, so a long
+    token leaks a prefix and a short one leaks whole. Asserting on a long token would
+    pass with the chain restored.
+
+    `__suppress_context__` is pinned alongside the rendering because a regression to a
+    bare `raise` still displays the context while `str()` stays clean — a rendering-only
+    assertion could miss it if the fake ever changes.
+    """
+    creds = _refreshable_creds(tmp_path)
+
+    with pytest.raises(expected) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, json_body=json_body))())
+
+    exc = excinfo.value
+    rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    assert "SECRET1" not in rendered
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
+
+
 def test_pre_flight_refresh_redacts_a_form_encoded_token_body(tmp_path):
     """The JSON path is not the only one that can carry a credential.
 
@@ -1901,6 +2300,86 @@ def test_pre_flight_refresh_redacts_a_form_encoded_token_body(tmp_path):
     assert "SECRET_ACCESS" not in message
     assert "SECRET_REFRESH" not in message
     assert "scope=repo" in message, "the non-secret members are the diagnostic"
+
+
+def test_pre_flight_refresh_redacts_a_nested_token_body(tmp_path):
+    """A credential one level down is still a credential.
+
+    Slack answers `{"ok": …, "authed_user": {"access_token": …}}` — the very endpoint
+    `_pre_flight_refresh` singles out for in-band failure handling. A top-level scan of
+    the parsed members finds no secret there and prints the live token verbatim, so the
+    redaction has to walk the whole structure rather than the outermost mapping.
+
+    The value is a *list* deliberately. A nested string value is covered by the regex
+    fallback too, so with a string here the test would still pass on a walk flattened to
+    one level — it would pin nothing. Only the structural walk reaches a non-string value.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        200,
+        json_body={
+            "ok": False,
+            "error": "token_revoked",
+            "authed_user": {"access_token": ["SECRET_ACCESS"], "scope": "chat:write"},
+        },
+    )
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    message = str(excinfo.value)
+    assert "SECRET_ACCESS" not in message, "a nested token leaked into an error printed to stderr"
+    assert "<redacted>" in message
+    assert "chat:write" in message, "the non-secret members are the diagnostic"
+
+
+def test_pre_flight_refresh_redacts_a_truncated_json_token_body(tmp_path):
+    """A body cut short by a proxy fails `resp.json()` while still carrying the token.
+
+    The structured pass cannot reach it — that is exactly the case the parse failed on —
+    and the form-encoded regex does not match JSON syntax. Without a JSON-shaped fallback
+    running unconditionally, the least-parseable body is the one that leaks.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = '{"ok": false, "authed_user": {"access_token": "SECRET_ACCESS", "scope": "chat'
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    assert "SECRET_ACCESS" not in str(excinfo.value)
+    assert "<redacted>" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_redacts_a_body_cut_inside_the_token(tmp_path):
+    """The most-truncated body must not be the one that leaks.
+
+    A cut *after* the token still leaves its closing quote, so a value pattern that
+    insists on one passes that case while failing the shape the fallback exists for:
+    the proxy that stopped mid-token. The value therefore also ends at end-of-text.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = '{"ok": false, "authed_user": {"access_token": "SECRET_ACCESS_TAIL'
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    assert "SECRET_ACCESS_TAIL" not in str(excinfo.value)
+    assert "<redacted>" in str(excinfo.value)
+
+
+def test_pre_flight_refresh_redacts_past_an_escaped_quote_in_the_token(tmp_path):
+    """Stopping at the first `"` inside the value would re-emit everything after it.
+
+    A value pattern that cannot step over `\\"` ends the match early, so the redaction
+    covers the head of the token and the substitution prints the tail back out.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = '{"access_token": "SEC\\"RET_TAIL", "scope": "chat'
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    assert "RET_TAIL" not in str(excinfo.value)
 
 
 def test_pre_flight_refresh_asks_the_token_endpoint_for_json(tmp_path):
@@ -2133,6 +2612,367 @@ def test_login_survives_an_unreadable_credential_store(tmp_path):
     assert not isinstance(excinfo.value, json.JSONDecodeError)
 
 
+def test_login_quarantines_a_store_it_cannot_parse(tmp_path, capsys):
+    """`mcpgen login` is the recovery command, so it cannot be the one a corrupt store kills.
+
+    The 0.7.0 guard covers the handler's *re-read*. The read at the top of `login()` still
+    ran bare, so a truncated `credentials.json` met the one command whose job is writing a
+    fresh entry with a raw JSONDecodeError and no route back but deleting the file by hand.
+
+    Falling through to `{}` alone would be worse than the traceback: the `_save` on the next
+    line writes that empty view over the file, taking every other server's entry with it.
+    The bad bytes have to survive somewhere, which is what quarantine buys.
+    """
+    creds = tmp_path / "credentials.json"
+    garbage = '{"acme": {"tokens": {"access_'  # truncated mid-write
+    creds.write_text(garbage)
+    os.chmod(creds, 0o600)
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield  # makes this an async generator; unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+
+    quarantined = list(tmp_path.glob("credentials.json.corrupt.*"))
+    assert len(quarantined) == 1, "the unreadable bytes are the only copy of the other entries"
+    assert quarantined[0].read_text() == garbage
+    # The quarantined file still holds every other server's live tokens, so it is a
+    # credential store under a different name. `os.replace` preserves the mode, which is
+    # why this passes — and why nothing would notice if the quarantine ever grew a copy
+    # step that did not.
+    assert stat.S_IMODE(quarantined[0].stat().st_mode) == 0o600
+    assert "moved to" in capsys.readouterr().err, "silent quarantine is a file the user never finds"
+    # login() clears the entry before the flow and the flow here fails before any token
+    # exchange, so the live store must exist and be readable — and must not carry a
+    # fabricated entry for a login that never produced one.
+    assert json.loads(creds.read_text()) == {}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"Access_Token": "s3cr3t", "scope": "repo"}',
+        '{"authed_user": {"REFRESH_TOKEN": "s3cr3t"}, "scope": "repo"}',
+        "ACCESS_TOKEN=s3cr3t&scope=repo",
+        '{"Id_Token": "s3cr3t", "scope": "repo',
+        '{"accessToken": "s3cr3t", "scope": "repo"}',
+        '{"access-token": "s3cr3t", "scope": "repo"}',
+        '{"authed_user": {"refreshToken": "s3cr3t"}, "scope": "repo"}',
+        '{"clientSecret": "s3cr3t", "scope": "repo',
+        "accessToken=s3cr3t&scope=repo",
+        '{"access-token": "s3cr3t", "scope": "repo',
+        "access-token=s3cr3t&scope=repo",
+    ],
+    ids=[
+        "json",
+        "nested",
+        "form",
+        "truncated",
+        "camel",
+        "kebab",
+        "nested-camel",
+        "truncated-camel",
+        "form-camel",
+        "truncated-kebab",
+        "form-kebab",
+    ],
+)
+def test_body_excerpt_matches_secret_members_case_insensitively(tmp_path, body):
+    """§5.1 mandates the lowercase spelling, but it binds the authorization server.
+
+    Every body that reaches this function is one where something else may have answered —
+    a WAF, a gateway, a vendor wrapper with its own naming convention. Holding a
+    non-compliant responder to the compliant spelling is how the credential gets printed,
+    and the single most common thing such a wrapper does to a member name is re-case it: a
+    JSON serializer on its defaults emits `accessToken`. The camel and kebab cases run on
+    the truncated and form bodies too, because those take the regex path rather than the
+    structured one — a normalisation applied to only one of the two leaves the other a
+    generation behind, which is a leak that no test of the parsed shape would catch.
+    """
+    creds = _refreshable_creds(tmp_path)
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    message = str(excinfo.value)
+    assert "s3cr3t" not in message
+    assert "<redacted>" in message
+    assert "repo" in message, "folding the case must not start eating non-secret members"
+
+
+def test_body_excerpt_redacts_a_secret_nested_inside_a_json_string(tmp_path):
+    """The structured pass matches keys, so a token inside a *string* has no key to find.
+
+    A gateway echoing an upstream body into `error_description` produces exactly that, and
+    the body parses cleanly — so `scrubbed == parsed`, nothing is re-serialised, and the
+    regex fallback is the only thing standing between the token and stderr. This is the
+    case that makes the fallback load-bearing on the happy path, not just on broken input.
+    """
+    creds = _refreshable_creds(tmp_path)
+    echoed = json.dumps({"access_token": "SECRET_ACCESS", "token_type": "bearer"})
+    fake = _token_endpoint_replying(200, json_body={"error": "invalid_client", "error_description": echoed})
+
+    with pytest.raises(_bridge.ReauthenticationRequired) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    message = str(excinfo.value)
+    assert "SECRET_ACCESS" not in message
+    assert "invalid_client" in message, "everything before the secret is the diagnostic"
+
+
+def test_secret_json_re_redacts_a_value_truncated_after_a_backslash(tmp_path):
+    """A value cut on a lone trailing backslash has nothing for `\\\\.` to consume.
+
+    The star stops before it and the terminator alternation then fails at that position,
+    so without the optional backslash the whole match fails and the value prints verbatim.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = '{"access_token":"SECRET_ACCESS\\'
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    assert "SECRET_ACCESS" not in str(excinfo.value)
+
+
+def test_body_excerpt_survives_a_body_nested_deeper_than_the_recursion_limit(tmp_path):
+    """The reporting path must not be the thing that crashes.
+
+    `_redact_secrets` spends two frames per level, so it gives out at roughly half the
+    nesting `json.loads` accepts — a window where a body the parser took blows up the code
+    describing it. The regexes are iterative, so falling through to them keeps redaction.
+    """
+    creds = _refreshable_creds(tmp_path)
+    depth = 700
+    # The secret goes first, ahead of the nesting: buried past `_DESCRIBE_LIMIT` it would be
+    # cut by truncation, and the assertion below would hold whether or not anything redacted
+    # it. In front, only the regex fallback can account for its absence.
+    # `token_type` outside the Bearer literal is what fails OAuthToken and lands this on the
+    # error path at all — with a valid token response there is nothing to report.
+    head = '{"access_token": "SECRET_ACCESS", "token_type": "not-a-bearer", "deep": '
+    body = head + '{"a": ' * depth + "null" + "}" * depth + "}"
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200, body))())
+
+    assert "SECRET_ACCESS" not in str(excinfo.value)
+    assert "<redacted>" in str(excinfo.value), "absence must come from redaction, not truncation"
+
+
+@pytest.mark.parametrize(
+    "garbage",
+    ["[]", "null", '"a string"', "42"],
+    ids=["array", "null", "string", "number"],
+)
+def test_login_quarantines_a_store_that_is_not_an_object(tmp_path, capsys, garbage):
+    """Valid JSON that is not a store is the same dead end, one door over.
+
+    A hand-edit that leaves `[]` or `null` behind parses cleanly, so the quarantine's
+    `JSONDecodeError` catch never fired — and the value travelled one more line to die
+    inside `data.pop(...)` as a raw TypeError. That is exactly the traceback-with-no-way-out
+    the quarantine was written to remove, reached through a shape it did not recognise.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(garbage)
+    os.chmod(creds, 0o600)
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield  # makes this an async generator; unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+
+    quarantined = list(tmp_path.glob("credentials.json.corrupt.*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text() == garbage
+    assert "moved to" in capsys.readouterr().err
+    assert json.loads(creds.read_text()) == {}
+
+
+@pytest.mark.parametrize("garbage", ["[]", "null", '"a string"', "42"])
+def test_file_load_rejects_a_store_that_is_not_an_object(tmp_path, garbage):
+    """The headless readers raise, and raise the type their callers already handle.
+
+    `get_tokens` and friends run with nobody at the keyboard, so "start fresh" is not
+    theirs to decide — but dying on `AttributeError: 'list' object has no attribute 'get'`
+    says nothing about what is wrong. `JSONDecodeError` is the exception every reader of
+    this store already handles for "bytes on disk that are not a store", which is what
+    lets `login()`'s quarantine cover this shape without a second except clause.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(garbage)
+    os.chmod(creds, 0o600)
+    storage = _bridge.FileTokenStorage("acme", creds)
+
+    with pytest.raises(json.JSONDecodeError, match="not a JSON object"):
+        storage._load()
+    with pytest.raises(json.JSONDecodeError):
+        asyncio.run(storage.get_tokens())
+    with pytest.raises(json.JSONDecodeError):
+        asyncio.run(storage.get_client_info())
+
+
+def test_pre_flight_refresh_propagates_a_store_that_is_not_an_object(tmp_path):
+    """Who raises widened; who quarantines did not.
+
+    `_pre_flight_refresh` runs with nobody at the keyboard, so it must not move anyone's
+    file aside — it reports and stops, exactly as it does for unparseable bytes. Pinned
+    so a later "fix" does not push the quarantine down into the shared read path.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text("[]")
+    os.chmod(creds, 0o600)
+
+    with pytest.raises(json.JSONDecodeError):
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(200))())
+
+    assert not list(tmp_path.glob("credentials.json.corrupt.*"))
+    assert creds.read_text() == "[]"
+
+
+def test_keyring_load_falls_back_when_the_blob_is_not_an_object(tmp_path, monkeypatch):
+    """A keyring blob that is not a store lands on the documented fallback, not around it.
+
+    `_keyring_load` catches broadly and downgrades to the hardened file with a warning;
+    a non-object blob is a blob that will not parse *as a store*, so raising from
+    `_keyring_read_raw` routes it there rather than letting a list reach `.get`.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "from_file"}}}))
+    os.chmod(creds, 0o600)
+
+    monkeypatch.setattr(_bridge, "_keyring_read_raw", lambda: _bridge._require_store(json.loads("[]"), "[]"))
+    storage = _bridge.FileTokenStorage("acme", creds, backend="keyring")
+
+    with pytest.warns(UserWarning, match="keyring unusable"):
+        assert storage._load() == {"acme": {"tokens": {"access_token": "from_file"}}}
+    assert storage._backend == "file", "one failure downgrades the instance for good"
+
+
+def test_login_quarantines_a_store_that_is_not_utf8(tmp_path, capsys):
+    """`read_text` runs before `json.loads`, so the decode error is the other half of this.
+
+    A store saved in another encoding, or bytes a filesystem mangled, never reaches
+    `json.loads` at all. Catching only `JSONDecodeError` leaves that file killing `login`
+    with a traceback — the same dead end, one exception type over.
+    """
+    creds = tmp_path / "credentials.json"
+    creds.write_bytes(b'{"acme": {"tokens": {"access_token": "caf\xc3"}}}')
+    os.chmod(creds, 0o600)
+
+    @asynccontextmanager
+    async def fake_http_fail(*args, **kwargs):
+        raise RuntimeError("network error")
+        yield  # makes this an async generator; unreachable
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", fake_http_fail),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="network error"):
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+
+    assert len(list(tmp_path.glob("credentials.json.corrupt.*"))) == 1
+    assert "moved to" in capsys.readouterr().err
+
+
+def test_login_stops_when_a_corrupt_store_cannot_be_moved_aside(tmp_path):
+    """A quarantine that failed must not be followed by the write it was protecting against.
+
+    Swallowing the rename error prints a promise to keep the old bytes and then saves an
+    empty store over them one line later — the data loss the quarantine exists to prevent,
+    with a message saying it did not happen.
+    """
+    creds = tmp_path / "credentials.json"
+    garbage = '{"acme": {"tokens": {"access_'
+    creds.write_text(garbage)
+    os.chmod(creds, 0o600)
+
+    def replace_fails(src, dst):
+        raise OSError("sharing violation")
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.os.replace", replace_fails),
+            patch("mcpgen._bridge.OAuthClientProvider", MagicMock()),
+        ):
+            with pytest.raises(_bridge.LoginWontHelp, match="could not be moved aside") as excinfo:
+                await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+            # The bare base, not a subclass: PostLoginCheckFailed would assert a token is
+            # cached and TokenRefreshUnavailable that the token endpoint answered, and
+            # neither happened. Pinned so nobody later "classifies" it into a lie.
+            assert type(excinfo.value) is _bridge.LoginWontHelp
+
+    asyncio.run(run())
+
+    assert creds.read_text() == garbage, "the store the quarantine failed to move must survive"
+
+
+def test_body_excerpt_redacts_client_secret(tmp_path):
+    """`client_secret` outlives every token in the set — a dynamic client's secret never expires.
+
+    Two real carriers put it in the text printed to stderr: an RFC 7591 registration response,
+    and a gateway that echoes the failed token request back in its error body. The diagnostic
+    a reader wants from it is that it was *sent*, which `<redacted>` still says.
+    """
+    creds = _refreshable_creds(tmp_path)
+    fake = _token_endpoint_replying(
+        200,
+        json_body={
+            "error_description": "client authentication failed",
+            "registration": {"client_id": "public-id", "client_secret": "SECRET_CLIENT"},
+        },
+    )
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, fake)())
+
+    message = str(excinfo.value)
+    assert "SECRET_CLIENT" not in message
+    assert "public-id" in message, "the client_id is the diagnostic, and is not a credential"
+
+
+def test_body_excerpt_redacts_a_form_encoded_client_secret(tmp_path):
+    """The form-encoded door has to close on the same member as the JSON one.
+
+    Both regexes and the recursive pass derive from one frozenset precisely so a member
+    cannot be covered on one path and open on the other; this pins that they do.
+    """
+    creds = _refreshable_creds(tmp_path)
+    body = "error=invalid_client&client_secret=SECRET_CLIENT&grant_type=refresh_token"
+
+    with pytest.raises(_bridge.TokenRefreshUnavailable) as excinfo:
+        asyncio.run(_run_pre_flight(creds, _token_endpoint_replying(400, body))())
+
+    assert "SECRET_CLIENT" not in str(excinfo.value)
+    assert "error=invalid_client" in str(excinfo.value), "the non-secret members are the diagnostic"
+
+
 def test_file_storage_stages_writes_under_a_pid_unique_name(tmp_path):
     """A fixed ".tmp" lets two mcpgen processes clobber each other's partial write."""
     creds = tmp_path / "credentials.json"
@@ -2194,7 +3034,7 @@ def test_sdk_saves_tokens_before_initialize_returns(tmp_path):
     does not.
     """
     from mcp.client.auth import OAuthClientProvider
-    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+    from mcp.shared.auth import OAuthClientInformationFull
 
     saved: list[OAuthToken] = []
 
@@ -2485,6 +3325,13 @@ def test_login_explains_public_client_rejection(tmp_path):
         ):
             with pytest.raises(OAuthRegistrationError) as exc:
                 await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+        # `from None` at the raise site, pinned here because this is the only test that
+        # reaches it: the annotated text is redacted, and chaining the original would put
+        # the unredacted registration body — `client_secret` included — back in front of
+        # anyone printing a traceback. This type sits outside the `LoginWontHelp` taxonomy,
+        # so it escapes both `_cmd_login` and `main()`: a traceback is its normal rendering.
+        assert exc.value.__cause__ is None
+        assert exc.value.__suppress_context__ is True
         return str(exc.value)
 
     message = asyncio.run(run())

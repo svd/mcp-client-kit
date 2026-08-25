@@ -89,9 +89,15 @@ Files to update:
 - `.claude-plugin/marketplace.json` → `"plugins"[0]["version"]` field only  
   *(leave top-level `"version"` — that's the catalog version, bumped only when the catalog listing itself changes, not per plugin release)*
 
-Optionally raise the version floor in `skills/generate-mcp-wrappers/SKILL.md` — but only if the skill now requires a CLI feature from a newer engine. Two coupled spots:
+Optionally raise the version floor — but only if the skill now requires a CLI feature from a newer engine. Each skill carries its own floor, and they move independently: `skills/generate-mcp-wrappers/SKILL.md` (step 0) and `skills/generate-mcp-runner/SKILL.md` (step 0). The runner's floor is the one that moves most often, because its templates `import` from `mcpgen` directly. Coupled spots per skill — grep the file for the old version, do not fix two of three:
 - Line with `mcpgen >= X.Y.Z` in the prose
 - `min=X.Y.Z` in the bash version check below it
+- Any sentence naming the version in the rationale (`generate-mcp-runner` has one: "does not
+  exist before X.Y.Z"). A floor bump that misses it leaves the guard contradicting its reason.
+
+**A plugin tag whose floor exceeds the latest published engine must not be cut.** The floor
+promises a version users can install; publish the engine tag (`vX.Y.Z`) first, then the
+plugin tag. Otherwise the guard fails with nothing to upgrade to.
 
 **2. Commit + PR → main**
 ```bash

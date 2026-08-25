@@ -53,7 +53,11 @@ mcpgen codegen …
 ```
 
 Step 0 of the procedure guards this: it checks the CLI is present and at or above a
-**version floor** (`>= 0.1.0`), aborting with an install/upgrade hint otherwise.
+**version floor**, aborting with an install/upgrade hint otherwise. Each skill carries its
+own floor and they move independently — `generate-mcp-wrappers` is at `>= 0.1.0` (its
+output imports only `seam.py`), while `generate-mcp-runner` is at `>= 0.7.0`, because its
+`http_oauth.py` template imports `LoginWontHelp` from `mcpgen` directly. Templates that
+import from the engine are what make a floor move; prose changes are not.
 
 So: **PyPI publish** makes the engine installable; **repo-as-plugin** delivers the
 skill; **the step-0 floor check** is the link. It is a floor, not an exact pin, so the
@@ -181,17 +185,26 @@ before the real release.
 ## CI guard: floor must reference a real engine
 
 No pin-equality check is needed — the skill is not pinned to an exact engine. The only
-invariant worth asserting at release is that the SKILL.md floor does not *exceed* the
-engine version in `pyproject.toml`, so the skill can never require an engine that has
-not been published yet:
+invariant worth asserting at release is that no SKILL.md floor *exceeds* an engine version
+that is actually installable, so the skill can never require an engine nobody can get:
 
 ```
-SKILL.md floor (mcpgen >= X.Y.Z)  <=  pyproject.toml version
+every SKILL.md floor (mcpgen >= X.Y.Z)  <=  latest published engine
 ```
 
-A ~5-line check (grep both, compare). Fail the release if the floor is higher than the
-published engine. The product / `plugin.json` version is free to differ — it is only
-the release counter.
+Compare against the **published** engine, not the working `pyproject.toml` version. Those
+differ for the whole of a development cycle: a floor of `0.7.0` is correct on a tree whose
+`pyproject.toml` reads `0.7.0.dev1`, and PEP 440 sorts `0.7.0.dev1` *below* `0.7.0`, so a
+naive comparison against the dev version fails every push. Run the check at tag time, where
+`publish.yml` has already asserted tag == `pyproject.toml` version.
+
+The operational form of the same invariant: **publish the engine tag (`vX.Y.Z`) before any
+plugin tag that raises a floor to `X.Y.Z`.**
+
+Not implemented — a ~5-line check (grep every `skills/*/SKILL.md` floor, compare). Until it
+exists, this is prose the release procedure has to honour by hand; the plugin-release step
+in `.claude/skills/releasing-a-version/SKILL.md` carries the reminder. The product /
+`plugin.json` version is free to differ — it is only the release counter.
 
 ---
 
@@ -253,8 +266,8 @@ they don't get skipped:
 - [x] **Add `.claude-plugin/plugin.json`** (product version) so the repo is a plugin —
   present, alongside `.claude-plugin/marketplace.json`.
 - [x] **Declare CLI dependency + guard:** SKILL.md documents `mcpgen` as a prerequisite
-  (`uv add mcp-client-kit`) and runs an install check plus a `>= 0.1.0` version-floor guard at the
-  top of the procedure. Chosen over an exact `uvx "mcpgen==<engine>"` pin so local/editable
+  (`uv add mcp-client-kit`) and runs an install check plus a version-floor guard at the
+  top of the procedure — one floor per skill. Chosen over an exact `uvx "mcpgen==<engine>"` pin so local/editable
   dev installs work unchanged and there's no separate pin-equality CI check to maintain;
   the floor is bumped only when the skill starts requiring a newer CLI feature.
 - [ ] **TestPyPI dry run** — validate build + publish before the real index.

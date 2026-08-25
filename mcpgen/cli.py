@@ -1156,7 +1156,20 @@ def main(argv: list[str] | None = None) -> int:
     dc.set_defaults(func=_cmd_discover)
 
     ns = parser.parse_args(argv)
-    return ns.func(ns)
+    try:
+        return ns.func(ns)
+    except (_bridge.ReauthenticationRequired, _bridge.LoginWontHelp) as exc:
+        # Every command that touches a server can hit the auth taxonomy, but only
+        # `login` caught it — the rest died with a traceback on what is a routine
+        # operational condition ("the credential expired and the endpoint is down").
+        # Catching the two roots here covers their subclasses and every command added
+        # later, which is the failure mode of widening each `_cmd_*` except tuple by
+        # hand. Deliberately not `Exception`: a KeyError from a real bug must still
+        # traceback so it gets reported as one. The messages carry their own next step
+        # — "Run: mcpgen login X", "retry later" — so nothing is appended here.
+        # `_cmd_login`'s own handler still runs first and keeps its formatting.
+        print(f"[mcpgen] error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

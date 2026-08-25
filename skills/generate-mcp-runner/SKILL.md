@@ -75,6 +75,18 @@ block** — replace it with the actual tool call sequence you derive in steps 4�
 
 ## Procedure
 
+### 0. Check the CLI
+
+Requires `mcpgen >= 0.7.0` (install: see README). The `http_oauth.py` skeleton imports
+`LoginWontHelp`, which does not exist before 0.7.0, so an older engine produces a `run.py`
+that dies with `ImportError` on the first line that matters. Abort if missing or too old:
+
+```bash
+mcpgen --version >/dev/null 2>&1 || { echo "mcpgen not found — install: uv add mcp-client-kit"; exit 1; }
+ver=$(mcpgen --version | awk '{print $2}'); min=0.7.0
+[ "$(printf '%s\n%s\n' "$min" "$ver" | sort -V | head -1)" = "$min" ] || { echo "mcpgen $ver too old — need >= $min"; exit 1; }
+```
+
 ### 1. Locate artifacts
 
 Find for `<server>`:

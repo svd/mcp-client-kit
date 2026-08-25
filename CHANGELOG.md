@@ -40,26 +40,119 @@
   rotation response with no `access_token` — carry a live `access_token` and
   `refresh_token`. The error naming that failure is printed by `mcpgen login` and by the
   `generate-mcp-runner` template, i.e. into CI logs. Response bodies quoted in an error now
-  go through a redaction pass that drops `access_token`, `refresh_token`, and `id_token`
-  values in both JSON and form-encoded bodies, and the pydantic error — which quotes the
+  go through a redaction pass that drops `access_token`, `refresh_token`, `id_token`, and
+  `client_secret` values in both JSON and form-encoded bodies, at any nesting depth and
+  whatever casing or word separator the responder spelled them with — `accessToken` from a
+  serializer left on its defaults and `access-token` from a kebab-case house style are the
+  same credential as the RFC's spelling, and the responders that reach this code are exactly
+  the ones re-serialising through a convention of their own — Slack wraps the token
+  in `authed_user`, and a body a proxy truncated mid-response no longer parses as JSON at all
+  yet still carries one — and the pydantic error — which quotes the
   whole input back on a `missing` field — is reported by type rather than by message.
   Everything else in the body is kept: `error`, `error_description`, and block-page text are
   what make the message worth printing.
 
-- **The refresh request now sends `Accept: application/json`.** Servers that answer
-  form-encoded by default (GitHub's token endpoint among them) would otherwise present every
-  rejection — `invalid_grant` included — as a body with no OAuth error code in it, i.e. as
-  an unidentified proxy response, and a genuinely dead grant would never prompt for a login.
+  Redacting the message was not enough on its own, because the two raises on that path
+  chained the pydantic error with `from exc`, and a chain travels with the exception to
+  every caller. Only `mcpgen login` caught these types; on every other command the
+  interpreter printed the whole chain — including the quoted body — to stderr, which is the
+  CI log this redaction exists for. Both now raise `from None`. What that costs is the
+  per-field pydantic detail, and the redacted body already shows the offending non-secret
+  members; what it buys applies to library callers and the generated runner too, neither of
+  which any CLI-side catch could have covered. (pydantic truncates the quoted value, so what
+  used to escape was a prefix of the credential — a smaller leak, not a different one, and a
+  short secret escaped whole.)
+
+- **The same credential leak was open on the login path, where the SDK does the parsing.**
+  Closing it in `_pre_flight_refresh` covered the refresh only. `login()`'s post-login check
+  goes through the MCP SDK, which reports a token or registration response that fails
+  validation as `OAuthTokenError(f"Invalid token response: {pydantic_error}")` — and that
+  text quotes the rejected body back as a *Python repr*, single-quoted. Neither existing
+  pattern could see it: one needs a double quote, the other an `=`. `_describe()` put it
+  straight into `PostLoginCheckFailed`, and `cli.py` printed that to stderr, so a gateway
+  that camelCased its members turned a failed post-login check into a live refresh token in
+  the CI log. Registration is the same shape with a longer-lived secret — RFC 7591 responses
+  carry `client_secret`, which never expires on its own.
+
+  Redaction is now one helper over four spellings, shared by `_describe()` and
+  `_body_excerpt()` so they cannot drift, and both raise sites drop the chain. The fourth
+  pattern drops pydantic's `input_value=` frame whole rather than scrubbing it member by
+  member, because member-wise redaction is unreliable there by construction: pydantic
+  truncates the quoted repr in the middle, and the cut lands mid-*key* as readily as
+  mid-value — `{'accessToken': 'SECRET1'...efreshToken': 'SECRET2'}` is real output, where
+  the second key has lost the `r` that any pattern would match on and its value is intact.
+  Where the cut falls depends on the total length, which the server controls, so anything
+  key-anchored closes one offset and leaves the rest. What survives the frame is what was
+  ever diagnostic: the field name, the error type, `input_type`. That fourth pattern is
+  scoped to *our own* exception messages and does not run over response bodies — a body
+  never carries a frame this module produced, and an authorization server that puts
+  `str(validation_error)` in its own `error_description` would otherwise lose the rest of
+  that line to a pattern with nothing to do there.
+
+- **Only `mcpgen login` handled an auth failure; every other command printed a traceback.**
+  `codegen`, `probe`, `call`, `list` and `check` caught `(FileNotFoundError, ValueError)`,
+  and the auth taxonomy is neither — so an expired credential or an unreachable token
+  endpoint, both routine, ended in a stack trace. `main()` now catches the two roots,
+  `ReauthenticationRequired` and `LoginWontHelp`, prints the message and exits 1. Catching
+  the roots rather than widening each command's `except` covers the subclasses and whatever
+  command is added next. It stays narrow deliberately: a `KeyError` from a real defect must
+  still reach the interpreter, so it is reported as a bug rather than dressed up as an
+  operational condition. `login`'s own handler runs first and keeps its wording.
+
+- **A form-encoded rejection was never classified, so a dead grant on GitHub-style servers
+  never prompted for a login.** The refresh request now sends `Accept: application/json`,
+  which is what most servers need to answer in the shape §5.2 describes — but `Accept` is a
+  request, not a guarantee, and a server that answers form-encoded anyway (GitHub's token
+  endpoint does by default) still presented every rejection, `invalid_grant` included, as a
+  body with no OAuth error code in it: an unidentified proxy response, permanently
+  unrecoverable for a headless caller. The error code is now also read out of a body
+  *labelled* `application/x-www-form-urlencoded`. The label is the whole point: an HTML block
+  page containing the text `error=invalid_grant` is a body the authorization server did not
+  send, and scraping it would manufacture the speaker evidence the classification turns on.
+  An unlabelled form body therefore stays unclassified, which is what it did before, so the
+  fallback adds no new way to be wrong. A body that parses as JSON is never re-read as a
+  form, and a form body carrying `error` twice, or empty, is treated as carrying none —
+  picking a winner would be a guess about which half the server sent.
 
 - **A credential store that broke mid-login replaced the error the operator needed to
   see.** `login()`'s `except BaseException` handler re-reads storage to decide whether the
   flow got far enough to save a token; a corrupt `credentials.json` or a keyring backend
   that started failing raised from inside that handler, discarding the original transport
   error. An unreadable store is now treated as "nothing can be said about what was
-  produced": the original failure propagates, and the previous credential is not restored on
-  top of a store that cannot be read. The restore that follows it is guarded the same way —
+  produced": the original failure propagates, and the previous credential — removed from
+  disk when the flow began — is not written back, which means it is lost. That is the
+  accepted half of the trade, not an oversight: writing blind onto a store that cannot be
+  read risks clobbering whatever the unreadable bytes still hold, and when the choice is
+  between one credential and every other server's, the store wins. The restore that follows
+  it is guarded the same way —
   a store that refuses the *write* (a read-only filesystem, a keyring that has started
   refusing) would otherwise mask the original failure through the adjacent door.
+
+- **A corrupt credential store broke the very command that repairs it.** `mcpgen login`
+  reads the store before it writes, and that read was bare, so unparseable JSON — a write
+  interrupted by a SIGKILL, a hand-edit gone wrong — met the one command whose job is
+  producing a fresh entry with a raw `JSONDecodeError` and no route back but deleting the
+  file. On the `file` backend `login()` now moves the unreadable file aside as
+  `credentials.json.corrupt.<epoch-ns>`, says so on stderr, and starts from an empty store.
+  The bad bytes are kept because they hold the other servers' entries; falling through to an
+  empty store without them would let the next save erase credentials that were still
+  recoverable by hand. If the file cannot be moved aside either — a permission problem, a
+  lock — `login()` raises `LoginWontHelp` and stops, for the same reason: continuing would
+  save an empty store over the bytes the quarantine exists to keep. It is the bare base class
+  deliberately, since no subclass fits a store that was never read, and both the CLI and the
+  generated runner already catch the base — so it reaches the user as a message rather than a
+  traceback. All of this is scoped to `login()`: the other readers run with nobody at the
+  keyboard, and there "start fresh" is not theirs to decide. (A keyring blob that will not
+  parse is a different path: `_keyring_load` already falls back to the file store with a
+  warning, and nothing is quarantined.)
+
+  A store that parses into something *other* than an object — `[]`, `null`, a bare string,
+  the other plausible outcome of a hand-edit gone wrong — reached the same dead end one door
+  over: it survived the parse and died two lines later inside `data.pop(...)` as a raw
+  `TypeError`. Both credential readers now reject a non-object store where they read it,
+  with the same `JSONDecodeError` unparseable bytes already raise, so the quarantine covers
+  it unchanged and `get_tokens`/`get_client_info` fail with a sentence rather than an
+  `AttributeError`. Who *raises* widened; who *quarantines* did not.
 
 - **A wide exception group could still produce an unreadable "one-line" error.**
   `_describe()` capped each leaf but not their number, so an N-leaf `BaseExceptionGroup`

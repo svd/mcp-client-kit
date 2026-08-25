@@ -56,7 +56,7 @@ import webbrowser
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlparse
 
 import httpx
 from mcp import ClientSession
@@ -162,12 +162,32 @@ def _detect_keyring() -> str:
 # ── Raw keyring helpers (raise on error — no silent fallback) ────────────────
 
 
+def _require_store(parsed: object, doc: str) -> dict:
+    """*parsed* if it is a credential store, else raise as if the bytes had not parsed.
+
+    A store is a JSON *object* keyed by server name. `[]`, `null`, `42` and a bare string
+    all parse cleanly and are all equally not one — a hand-edit gone wrong reaches this
+    door as often as it reaches the truncated-bytes one. Without the check they travel one
+    more line and die inside `data.pop(...)` or `data.get(...)` as a raw `TypeError` /
+    `AttributeError`, which is the traceback-with-no-way-out that `login()`'s quarantine
+    exists to remove — arrived at through a different door.
+
+    `json.JSONDecodeError` and not a new type: it is the exception every reader of this
+    store already handles for "bytes on disk that are not a store", `login()`'s quarantine
+    catches it unchanged, and a caller outside this module catching it today keeps working.
+    The position is honest — the defect is the top-level value, at offset 0.
+    """
+    if not isinstance(parsed, dict):
+        raise json.JSONDecodeError(f"credential store is not a JSON object (got {type(parsed).__name__})", doc, 0)
+    return parsed
+
+
 def _keyring_read_raw() -> dict:
     """Read all credentials from the OS keyring. Raises on any failure."""
     import keyring as _kr  # lazy — tests can monkeypatch sys.modules["keyring"]
 
     raw = _kr.get_password(_KEYRING_SERVICE, _KEYRING_USER)
-    return json.loads(raw) if raw else {}
+    return _require_store(json.loads(raw), raw) if raw else {}
 
 
 def _keyring_write_raw(data: dict) -> None:
@@ -375,16 +395,24 @@ def _client_metadata(server_name: str, callback_uri: str, client_name: str | Non
 
 
 def _explain_registration_error(exc: OAuthRegistrationError) -> OAuthRegistrationError:
-    """Annotate `invalid_client_metadata` with its most likely cause.
+    """Annotate `invalid_client_metadata` with its most likely cause, credential removed.
 
     An AS that does not support public clients MUST reject our registration
     (RFC 7591 §2) rather than downgrade it. No such server is known, so rather than
     carry a speculative override flag we make the failure legible if one turns up.
+
+    Every registration error passes through here, which is why the redaction lives here
+    rather than at the raise site. The SDK reports a 2xx registration body that fails
+    validation as `OAuthRegistrationError(f"Invalid registration response: {pydantic}")`,
+    and an RFC 7591 registration response carries `client_secret` — the member that
+    outlives every token in `_SECRET_MEMBERS`. The pydantic text quotes it back as a repr,
+    which is the spelling `_SECRET_REPR_RE` exists for.
     """
-    if "invalid_client_metadata" not in str(exc):
-        return exc
+    text = _redact_secret_text(str(exc))
+    if "invalid_client_metadata" not in text:
+        return OAuthRegistrationError(text) if text != str(exc) else exc
     return OAuthRegistrationError(
-        f"{exc}\n\n"
+        f"{text}\n\n"
         "Likely cause: mcpgen registers as a public client "
         "(token_endpoint_auth_method=none), and this authorization server appears to "
         "require a client_secret. Please report this at "
@@ -516,7 +544,10 @@ class FileTokenStorage(TokenStorage):
                 f"[mcpgen] {self._path} had permissions {oct(mode)}; fixed to 0600.",
                 stacklevel=3,
             )
-        return json.loads(self._path.read_text())
+        # Explicit UTF-8: `_file_save` writes `json.dumps(...).encode()`, which is UTF-8, so
+        # a locale-dependent read would round-trip a non-ASCII server name wrong on Windows.
+        raw = self._path.read_text(encoding="utf-8")
+        return _require_store(json.loads(raw), raw)
 
     def _file_save(self, data: dict) -> None:
         parent = self._path.parent
@@ -570,7 +601,7 @@ class FileTokenStorage(TokenStorage):
         warnings within the same process lifetime.
         """
         warnings.warn(
-            f"[mcpgen] keyring unavailable ({reason}); falling back to hardened file at {self._path}.",
+            f"[mcpgen] keyring unusable ({reason}); falling back to hardened file at {self._path}.",
             stacklevel=3,
         )
         self._backend = "file"
@@ -851,12 +882,180 @@ def delete_cred(
     return True
 
 
-_SECRET_MEMBERS = frozenset({"access_token", "refresh_token", "id_token"})
-"""Token-response members that must never reach a log line. RFC 6749 §5.1 and §4.1.4."""
+_SECRET_MEMBERS = frozenset({"access_token", "refresh_token", "id_token", "client_secret"})
+"""Credential-bearing members that must never reach a log line: the token-response members
+of RFC 6749 §5.1 and §4.1.4, plus `client_secret` — a registration-response member (RFC 7591
+§3.2.1) that gateways also echo back out of a failed token request. It outlives every token
+in the set, since a dynamic client's secret does not expire. Redacting it costs no diagnostic
+value: what a reader needs from it is that it was *sent*, and `"<redacted>"` still says so.
 
-_SECRET_FORM_RE = re.compile(rf"\b({'|'.join(sorted(_SECRET_MEMBERS))})=[^&\s\"']*")
+Matching ignores case *and* the separator between words. §5.1 mandates the lowercase
+snake_case spelling, but it binds the *authorization server* — and the bodies that reach
+`_body_excerpt` are exactly the ones where something else answered: a WAF, an API gateway, a
+vendor wrapper re-serialising through its own naming convention. Holding a non-compliant
+responder to the compliant spelling is how the credential gets printed, and the single most
+common thing such a wrapper does to a member name is re-case it: a JSON serializer left on
+its defaults emits `accessToken`, and a kebab-case house style emits `access-token`. Folding
+case without folding the separator covers the least likely half of the same failure.
+
+Nothing outside a credential is plausibly named any casing or separator spelling of these
+four, so the fold costs no diagnostic. The near misses do not collide: `access_token_expires_in`
+normalises to a longer string and keeps its value."""
+
+_SECRET_MEMBERS_NORM = frozenset(m.replace("_", "") for m in _SECRET_MEMBERS)
+"""``_SECRET_MEMBERS`` with the separators removed, for key lookups after normalisation."""
+
+# `access[-_]?token|…` — one alternation, built once, shared by both regexes below so the
+# unparsed-body path can never fall a generation behind the structured one. The optional
+# separator class is what reaches `accessToken` and `access-token`; `re.I` does the rest.
+_SECRET_MEMBERS_RE_SRC = "|".join(m.replace("_", "[-_]?") for m in sorted(_SECRET_MEMBERS))
+
+_SECRET_FORM_RE = re.compile(rf"\b({_SECRET_MEMBERS_RE_SRC})=[^&\s\"']*", re.I)
 """The same members in a form-encoded body. GitHub's token endpoint answers that way by
 default, so the JSON path below is not the only one that can carry a live credential."""
+
+_SECRET_JSON_RE = re.compile(rf'"({_SECRET_MEMBERS_RE_SRC})\\?"\s*:\s*\\?"(?:[^"\\]|\\.)*\\?(?:"|\Z)', re.I)
+"""The same members in text the structured pass cannot reach, in two distinct senses.
+
+The obvious one is a body `httpx` refuses to parse: a response truncated mid-token by a
+proxy is still a body with a live credential in it, and it fails `resp.json()` precisely
+because it was cut short. The second is subtler and is not confined to malformed input —
+`_redact_secrets` matches on dict *keys*, so a body that parses perfectly but carries the
+token inside a *string* (`{"error_description": "{\\"access_token\\": \\"…\\"}"}`, a gateway
+echoing an upstream body) has no secret key to find, survives the structured pass untouched,
+and reaches this regex as the only remaining defense. Both regexes therefore run
+unconditionally, after the structured pass.
+
+The value ends at a closing quote *or at the end of the text*, because the worst case is the
+value that was cut mid-token: requiring the closing quote would let exactly the most-truncated
+body through. `(?:[^"\\]|\\.)*` steps over an escaped quote inside the value rather than
+stopping at it, and the three `\\?` allow the escaped-quote spelling of the same shape — the
+nested-in-a-string case above, plus a value truncated on a lone trailing backslash.
+
+The over-match is deliberate and worth naming: inside an escaped blob every quote is escaped,
+so the match runs from the secret to the next *unescaped* quote and takes any siblings after
+it, leaving the excerpt structurally unterminated there. Everything before the secret — the
+`error` code, the head of `error_description` — survives, which is what makes the excerpt
+worth printing, and the loss is bounded to the tail of a string that held a live credential.
+A lazier or length-bounded pattern would trade that for a leak, since whatever falls outside
+the shorter match is the rest of the token."""
+
+_SECRET_REPR_RE = re.compile(rf"'?\b({_SECRET_MEMBERS_RE_SRC})'?\s*[:=]\s*'(?:[^'\\]|\\.)*(?:'|\Z)", re.I)
+"""The same members in a *Python* repr, which is neither of the two shapes above.
+
+This is the spelling an exception message carries, not a response body. The MCP SDK raises
+`OAuthTokenError(f"Invalid token response: {e}")` and `OAuthRegistrationError(...)` over a
+pydantic `ValidationError`, and pydantic quotes the rejected `input_value` — a dict repr,
+single-quoted: `input_value={'accessToken': 'ya29…', 'refresh_token': '1//…'}`. Both regexes
+above miss it, `_SECRET_JSON_RE` because it needs a double quote and `_SECRET_FORM_RE`
+because it needs `=`, so before this pattern a login whose post-check failed printed the
+credential to stderr in full.
+
+`[:=]` covers the dict spelling and the keyword/attribute spelling (`access_token='ya29…'`)
+in one pattern. That second spelling is why this must run *before* `_SECRET_FORM_RE`:
+that pattern stops at the quote and would leave `access_token=<redacted>'SECRET'` — a
+substitution that reads as redacted and is not.
+
+What keeps it off prose is the value anchor: the member name must be followed by `:` or `=`
+and then an *opening single quote*. `error_description='access_token was rejected'` does not
+match — after the member comes a space — so a message that merely names one of these members
+survives intact. The residual over-match is named for the same reason `_SECRET_JSON_RE` names
+its own: `invalid 'access_token': 'expected a string'` is eaten, because it is indistinguishable
+in shape from a key carrying the credential. One quoted phrase is the bounded cost; a live
+token is the unbounded one. The `\\Z` terminator matters for a repr that arrives cut short;
+pydantic's own frames are redacted wholesale upstream by `_PYDANTIC_INPUT_VALUE_RE`, so what
+reaches this pattern truncated is a repr with no `input_value=` frame around it.
+
+Not matched: a value Python repr'd with double quotes because it contains an apostrophe
+(`{'access_token': "ya'29"}`). Tokens are base64url or JWT material and cannot contain `'`,
+so that spelling cannot carry one of these four members' real values."""
+
+
+_PYDANTIC_INPUT_VALUE_RE = re.compile(r"\binput_value=.*?(?=,\s*input_type=|$)", re.M)
+"""Pydantic's quoted-input frame, dropped whole rather than scrubbed member by member.
+
+Member-wise redaction is unreliable on this text *by construction*, and the reason is not
+exotic: pydantic truncates the quoted repr in the middle, with a literal `...`, and the cut
+lands mid-key as readily as mid-value. `{'accessToken': 'SECRET1'...efreshToken': 'SECRET2'}`
+is real output — the second key lost its `r`, so no member pattern can match it, and its
+value is intact. Where the cut lands is a function of the total repr length, which the
+*server* controls, so any key-anchored fix closes one offset and leaves the class open. A
+suffix match fails the same way: one character further and the survivor reads `oken':`.
+
+Keying on `input_value=` is what makes this independent of the cut. Pydantic emits the
+marker and terminates the frame with `, input_type=`, and it truncates the repr inside the
+frame, never the frame itself. The lazy `.*?` therefore does not care what brace soup the
+value contains — a nested dict, a list, a bare int, a plain string all end at the same
+lookahead. `$` under `re.M` bounds a message some upstream wrapper had already cut before it
+reached us; it is not there for `_DESCRIBE_LIMIT`, since both consumers redact before they
+cap.
+
+It also reaches a spelling no key pattern can: a *field-level* error on a secret field prints
+`input_value='ya29…'` with the field name on the line above and no key beside the value at all.
+
+The cost is the frame's non-secret siblings — `token_type`, `expires_in`, `scope`. That is
+affordable because every pydantic validation this module can reach is a token response or an
+RFC 7591 registration response: the two bodies it already declines to print raw. What carries
+the diagnostic survives — the field name above, `[type=missing]`, `input_type=dict`, the docs
+URL — which is the same line `_body_excerpt` draws between the credential and the reason.
+
+A value containing the literal `, input_type=` would end the match early; a token cannot,
+being base64url or JWT material, and the member patterns still run afterwards over whatever
+tail is left."""
+
+
+def _redact_secret_text(text: str, *, pydantic_frames: bool = True) -> str:
+    """*text* with every credential-shaped member removed, in all four spellings.
+
+    One helper so the two consumers — `_body_excerpt` for response bodies, `_describe` for
+    exception messages — cannot drift apart, and so a fifth spelling added later reaches
+    both. Order matters and is not alphabetical, twice over. The pydantic frame goes first,
+    so the member patterns only ever see what it left behind and act as a backstop rather
+    than contending for the same span. The repr pattern then precedes `_SECRET_FORM_RE`,
+    which would otherwise half-match the `key='value'` spelling and stop at the quote,
+    leaving the credential sitting next to the word `<redacted>`.
+
+    `pydantic_frames=False` for text that is not one of *our* exception messages. The frame
+    pattern's cost is argued on the corpus `_describe` sees — messages this module produced
+    from a token or registration response. A raw server body is a different corpus: it never
+    carries a frame this module made, so the pattern has no work to do there, and an
+    authorization server that puts `str(validation_error)` in its own `error_description`
+    would lose the rest of that line for nothing. The member patterns still cover the body,
+    which is what was ever protecting it.
+    """
+    if pydantic_frames:
+        text = _PYDANTIC_INPUT_VALUE_RE.sub("input_value=<redacted>", text)
+    text = _SECRET_REPR_RE.sub(r"'\1': '<redacted>'", text)
+    text = _SECRET_FORM_RE.sub(r"\1=<redacted>", text)
+    return _SECRET_JSON_RE.sub(r'"\1": "<redacted>"', text)
+
+
+def _norm_member(key: str) -> str:
+    """*key* folded to the spelling ``_SECRET_MEMBERS_NORM`` is keyed by.
+
+    Case and word separator both go, for the reason given at `_SECRET_MEMBERS`: the
+    responders that reach here are the ones re-serialising through their own naming
+    convention, and `accessToken` is what that convention most often produces.
+    """
+    return key.lower().replace("-", "").replace("_", "")
+
+
+def _redact_secrets(value: object) -> object:
+    """*value* with every ``_SECRET_MEMBERS`` member replaced, at any nesting depth.
+
+    Scanning only the top level would miss the wrapped shape, which is not hypothetical:
+    Slack answers `{"ok": true, "authed_user": {"access_token": …}}`, and that endpoint is
+    the one `_pre_flight_refresh` singles out for in-band failure handling. A top-level
+    scan finds no secret member there and hands the whole live token to the caller.
+    """
+    if isinstance(value, dict):
+        return {
+            k: "<redacted>" if isinstance(k, str) and _norm_member(k) in _SECRET_MEMBERS_NORM else _redact_secrets(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secrets(v) for v in value]
+    return value
 
 
 def _body_excerpt(resp: httpx.Response) -> str:
@@ -877,12 +1076,23 @@ def _body_excerpt(resp: httpx.Response) -> str:
     text = resp.text
     try:
         parsed = resp.json()
-    except Exception:  # noqa: BLE001 — a body that is not JSON is handled by the regex below
+    except Exception:  # noqa: BLE001 — a body that is not JSON is handled by the regexes below
         parsed = None
-    if isinstance(parsed, dict) and _SECRET_MEMBERS & parsed.keys():
-        text = json.dumps({k: ("<redacted>" if k in _SECRET_MEMBERS else v) for k, v in parsed.items()})
-    else:
-        text = _SECRET_FORM_RE.sub(r"\1=<redacted>", text)
+    if parsed is not None:
+        try:
+            scrubbed = _redact_secrets(parsed)
+            # Only re-serialise when something was actually removed: a clean body is worth
+            # more to the reader in the server's own formatting than in `json.dumps`'.
+            if scrubbed != parsed:
+                text = json.dumps(scrubbed)
+        except RecursionError:
+            # `_redact_secrets` costs two frames per level (the call and its comprehension),
+            # so it gives out at roughly half the nesting `json.loads` accepts — leaving a
+            # window where a body the parser took blows up the code *reporting* on it. The
+            # regexes below are iterative and do not care about depth, so falling through to
+            # them keeps the redaction rather than replacing the diagnostic with a traceback.
+            pass
+    text = _redact_secret_text(text, pydantic_frames=False)
     if len(text) > _DESCRIBE_LIMIT:
         return text[:_DESCRIBE_LIMIT] + "…"
     return text
@@ -891,7 +1101,7 @@ def _body_excerpt(resp: httpx.Response) -> str:
 def _oauth_error_code(resp: httpx.Response) -> str | None:
     """The RFC 6749 §5.2 ``error`` code in *resp*, or None if it does not carry one.
 
-    The spec-defined shape is a JSON object with a string ``error`` member, and it
+    §5.2 defines the shape as a JSON object with a string ``error`` member, and it
     identifies both the *speaker* and *what it objected to* — the only thing that
     separates a dead credential from a rejected request. A proxy or WAF standing in
     front of an authorization server usually answers with HTML, so a body naming one
@@ -901,15 +1111,59 @@ def _oauth_error_code(resp: httpx.Response) -> str | None:
     ``_DEAD_GRANT_ERRORS``, so it lands in the request-faulted branch and produces a
     slightly misleading message, never a wrong decision about the browser.
 
+    Real token endpoints answer ``application/x-www-form-urlencoded`` unless content
+    negotiation succeeds — GitHub's does by default — so a body *labelled* form-encoded
+    is read too. Asking for JSON (`Accept`, at the call site) is a request, not a
+    guarantee, and a server that ignores it was otherwise reporting every rejection,
+    `invalid_grant` included, as a body with no error code in it.
+
+    The label is required, and that is the whole difference between this fallback and
+    scraping every unparseable body for ``error=``. What the cascade needs from this
+    function is evidence about *who spoke*: an HTML block page carrying the text
+    `error=invalid_grant` is a body the authorization server did not send, and reading a
+    code out of it manufactures exactly the evidence the terminal branch of
+    `_pre_flight_refresh` reasons about not having. A form-encoded body that arrives
+    unlabelled therefore stays unclassified — which is the behaviour that was already
+    there, so the gate adds no false-positive surface of its own.
+
     The status cannot stand in for any of this. §5.2 requires the body on every 400
     and 401, so a 400 without one did not come from the authorization server, and a
     non-compliant server that reports a revoked grant with 403 still names it here.
     """
     try:
-        code = resp.json().get("error")
-    except Exception:  # noqa: BLE001 — any unparseable body simply is not one of these
+        parsed = resp.json()
+    except Exception:  # noqa: BLE001 — an unparseable body may still be the form-encoded shape
+        pass
+    else:
+        # A body that parsed as JSON is the server's statement, `error` member or not — and
+        # that includes JSON which is not an object at all. Never re-read it as a form: the
+        # two spellings cannot both be authoritative, and only one of them was sent.
+        code = parsed.get("error") if isinstance(parsed, dict) else None
+        return code if isinstance(code, str) else None
+
+    media_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+    if media_type != "application/x-www-form-urlencoded":
         return None
-    return code if isinstance(code, str) else None
+    try:
+        codes = [v for k, v in parse_qsl(resp.text) if k == "error"]
+    except Exception:  # noqa: BLE001 — a body that will not parse as a form is not one of these
+        return None
+    # Exactly one, or nothing. A compliant server sends `error` once; two of them mean a
+    # mangled or concatenated body, and picking a winner would be a guess about which
+    # half is the server's. `None` routes it to the terminal branch, which is the side of
+    # the asymmetry that costs a message rather than a browser prompt. An empty value is
+    # dropped by `parse_qsl` for the same reason: it matches neither code set anyway, and
+    # "no OAuth error body" is the more honest of the two messages it could produce.
+    if len(codes) != 1:
+        return None
+    # §5.2 defines the value over NQSCHAR, which excludes whitespace — so stripping can
+    # only recover a code a line-oriented intermediary padded, never manufacture one that
+    # was not sent. Without it a trailing newline is enough to turn `invalid_grant` into
+    # an unrecognised code, which is the request-faulted message rather than the browser
+    # prompt: the exact failure this fallback exists to close, back on one added byte.
+    # `or None` keeps an all-whitespace value on the "no OAuth error body" path instead
+    # of handing `""` to the branch that reports a rejected request.
+    return codes[0].strip() or None
 
 
 async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> None:
@@ -971,11 +1225,12 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     # user to the browser for an outage the browser cannot fix — and, in a batch,
     # once per item. The grant and the server that renews it fail independently.
     #
-    # `Accept: application/json` is not optional here. The classification below reads the
-    # RFC 6749 §5.2 error body to tell the authorization server apart from whatever stands
-    # in front of it, and a server that answers form-encoded by default — GitHub's token
-    # endpoint does — would otherwise present every rejection, `invalid_grant` included, as
-    # a body with no error code in it.
+    # `Accept: application/json` asks for the shape the classification below reads most
+    # directly — the RFC 6749 §5.2 error body that tells the authorization server apart from
+    # whatever stands in front of it. It is a request, not a guarantee: a server that answers
+    # form-encoded by default (GitHub's token endpoint does) is free to ignore it. What makes
+    # a rejection from such a server classifiable is the form-encoded fallback in
+    # `_oauth_error_code`; the header only spares most servers the trip through it.
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(token_endpoint, data=payload, headers={"Accept": "application/json"})
@@ -1001,21 +1256,40 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
             # endpoint answers `{"ok": false, "error": ...}` this way. Both can be a
             # dead grant, and neither is worth guessing about, so name the command
             # that settles it rather than leaving no way forward.
+            #
+            # Both raises below are `from None`, and that is a redaction measure, not a
+            # style choice. `exc` is the pydantic `ValidationError` from `OAuthToken(**…)`,
+            # which quotes the rejected `input_value` back — on this path, the token
+            # response. Redacting the *message* while chaining the exception that carries
+            # the body only moves the leak: the chain travels with the object to every
+            # caller, and the CLI commands that are not `login` do not catch these types,
+            # so the interpreter prints the whole chain to stderr — into CI logs, which is
+            # the audience this redaction exists for. `from None` suppresses the context on
+            # every consumer at once, including library callers and the generated runner,
+            # rather than relying on each one to catch.
+            #
+            # pydantic truncates that `input_value` repr, so what escapes is a prefix of
+            # the credential rather than all of it — which is a smaller leak, not a
+            # different kind, and a short secret still escapes whole.
+            #
+            # What the chain carried beyond the secret is the per-field error detail, and
+            # the redacted body below already shows the offending non-secret members —
+            # `_redact_secrets` drops only the credential-bearing ones. If the pydantic
+            # error codes are ever wanted, they belong in this message via
+            # `exc.errors(include_input=False)`, not back in the chain.
             if _oauth_error_code(resp) in _DEAD_GRANT_ERRORS:
                 raise ReauthenticationRequired(
                     f"The token endpoint for '{server_name}' reported a dead credential with a 200: "
                     f"{_body_excerpt(resp)}. Run: mcpgen login {server_name}"
-                ) from exc
-            # `type(exc).__name__`, not `_describe(exc)`: pydantic v2 puts the rejected
-            # `input_value` in its message, which on this path is the whole token response.
-            # The redacted body below says everything that text would have, minus the
-            # credential. (`from exc` still chains it — a printed traceback can show it,
-            # which is why the CLI prints the message and not the traceback.)
+                ) from None
+            # `type(exc).__name__`, not `_describe(exc)`: the same `input_value` reason as
+            # above, one layer in — the message would otherwise quote what the chain no
+            # longer does.
             raise TokenRefreshUnavailable(
                 f"The token endpoint for '{server_name}' returned 200 but not a token "
                 f"({type(exc).__name__}). Body: {_body_excerpt(resp)}. The refresh token is "
                 f"untouched; retry later, and if it persists run: mcpgen login {server_name}"
-            ) from exc
+            ) from None
         await storage.set_tokens(token)
         return
 
@@ -1699,13 +1973,21 @@ def _describe(exc: BaseException) -> str:
     bound — as the response-body truncation in ``_pre_flight_refresh``. The joined
     result is capped too: leaves are bounded but their *number* is not, so the
     per-leaf bound alone does not keep a wide group to one readable line.
+
+    Each leaf is also redacted, for a reason that is not hypothetical: the MCP SDK
+    reports a token or registration response that fails validation by interpolating the
+    pydantic error, which quotes the rejected body back as a Python repr. `login()` puts
+    the result of this function into `PostLoginCheckFailed`, and `cli.py` prints that to
+    stderr — so without the pass a gateway that camelCases its members turned a failed
+    post-login check into a credential in the CI log. Redaction runs per leaf and before
+    both caps, so a secret cannot survive by sitting past one.
     """
     if isinstance(exc, BaseExceptionGroup):
         joined = "; ".join(_describe(inner) for inner in exc.exceptions)
         if len(joined) > _DESCRIBE_TOTAL_LIMIT:
             joined = joined[:_DESCRIBE_TOTAL_LIMIT] + "…"
         return joined
-    text = str(exc)
+    text = _redact_secret_text(str(exc))
     if len(text) > _DESCRIBE_LIMIT:
         text = text[:_DESCRIBE_LIMIT] + "…"
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
@@ -1735,6 +2017,9 @@ async def login(
 
     Raises PostLoginCheckFailed when the OAuth flow succeeded but the post-login
     session failed: the token is saved and re-running login will not help.
+
+    Raises LoginWontHelp when the credential store cannot be parsed *and* cannot be
+    moved aside. The fix is a human moving that file, so no browser round is attempted.
     """
     _servers = servers(config_path=config_path)
     server_url = url or _servers.get(server_name)
@@ -1748,7 +2033,56 @@ async def login(
     # restore it so the caller is not locked out of a previously-working server.
     # Once a token *has* been exchanged the stash is stale by definition — see
     # the handler at the bottom of this function.
-    data = storage._load()
+    #
+    # A corrupt store must not stop this read: `mcpgen login` is the command whose
+    # whole job is producing a fresh valid entry, so failing it on unparseable JSON
+    # leaves hand-deleting the file as the only route back. Falling straight through
+    # to `{}` is not the answer either — the `_save` two lines down would then write
+    # that empty view over every other server's entry, some of which may still be
+    # recoverable by hand. So: move the bad file aside, keep it, and start clean.
+    # Scoped to `login()` on purpose. `_file_load` itself keeps raising, because the
+    # other readers (`_pre_flight_refresh`, the SDK's mid-flow reads) run with nobody
+    # at the keyboard, and "start fresh" is a decision only this command's caller made.
+    try:
+        data = storage._load()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # Both are ValueError, and both mean the same thing: bytes on disk that are not a
+        # store. UnicodeDecodeError comes from the `read_text` a line before `json.loads`,
+        # so catching only the decode error would let a file saved in another encoding
+        # through as a traceback. `_require_store` raises the first of the two for a file
+        # that parses into something other than an object — `[]`, `null`, a bare string —
+        # so that shape lands here rather than on `data.pop` two lines down.
+        # Deliberately narrower than OSError — an unreadable *path*
+        # (permissions, a directory in the way) is not a corrupt store and must propagate.
+        # Nanoseconds, not seconds: two corrupt-store logins inside the same second would
+        # otherwise `os.replace` the second quarantine over the first, destroying the bytes
+        # this exists to keep.
+        quarantine = storage._path.with_name(f"{storage._path.name}.corrupt.{time.time_ns()}")
+        try:
+            os.replace(storage._path, quarantine)
+        except OSError as move_failed:
+            # Continuing here would `_save({})` over the very bytes the quarantine exists
+            # to preserve, after printing a promise to preserve them. Stop instead: the
+            # file is still there, and the message says what to do with it.
+            # `LoginWontHelp` and not one of its subclasses: both would assert something
+            # untrue here. `PostLoginCheckFailed` claims a token is cached, and nothing was
+            # even read; `TokenRefreshUnavailable` claims the token endpoint answered, and
+            # it was never contacted. The base says the one thing that is true and the one
+            # thing a caller can act on — another browser round changes nothing, because the
+            # fix is a human moving a file. It also gets the message out of `cli.py` and the
+            # generated runner as a message rather than a traceback: both already catch the
+            # base, which is what that forward-looking clause was for.
+            raise LoginWontHelp(
+                f"{storage._path} is not a readable credential store ({exc}) and could not be moved aside "
+                f"({move_failed}). Move or delete it by hand, then run login again."
+            ) from exc
+        print(
+            f"[mcpgen] {storage._path} is not a readable credential store ({exc}); moved to {quarantine}. "
+            f"Other servers' entries are in that file if you need them.",
+            file=sys.stderr,
+            flush=True,
+        )
+        data = {}
     stashed = data.pop(server_name, None)
     storage._save(data)
 
@@ -1836,7 +2170,12 @@ async def login(
                         tools = await s.list_tools()
                         print(f"Login OK ({server_name}); {len(tools.tools)} tool(s) available")
             except OAuthRegistrationError as e:
-                raise _explain_registration_error(e) from e
+                # `from None`: `_explain_registration_error` redacts the text it returns,
+                # and chaining the original would put the unredacted `client_secret` back
+                # in front of anyone printing a traceback. This type is outside the
+                # `LoginWontHelp` taxonomy, so it escapes both `_cmd_login`'s catch and
+                # `main()`'s roots — a traceback is its normal rendering, not its unlucky one.
+                raise _explain_registration_error(e) from None
         finally:
             if callback_future is not None and not callback_future.done():
                 callback_future.set_result((None, None))
@@ -1922,11 +2261,19 @@ async def login(
         # list_tools(), and a 502 from the origin all land here. What they share is
         # that another browser round cannot fix them, which is the one thing the
         # caller has to act on.
+        # `from None`, for the same reason `_pre_flight_refresh`'s parse failures use it,
+        # and reached through a different door: the SDK reports a token response that fails
+        # validation as `OAuthTokenError(f"Invalid token response: {pydantic_error}")`, and
+        # that text quotes the rejected body. `_describe` above redacts what the message
+        # says; chaining the original would hand a library caller printing a traceback the
+        # same credential the message no longer carries. `__context__` is still set, so the
+        # original stays available to anything inspecting it programmatically — what goes is
+        # only the default rendering, which is the entire leak surface.
         raise PostLoginCheckFailed(
             f"Login succeeded ({server_name}) and the token was saved, but the check that follows "
             f"it failed: {_describe(exc)}. Logging in again will not change this."
             f"{unrenewable}"
-        ) from exc
+        ) from None
 
     print(f"Credentials saved to {creds_path}")
 
