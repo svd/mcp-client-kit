@@ -12,13 +12,13 @@
       "name": "mcp-client-kit",
       "displayName": "mcp-client-kit",
       "source": "./",
-      "version": "0.1.0",
-      "description": "Generate typed Python wrappers for any MCP server (skill: generate-mcp-wrappers).",
+      "version": "0.2.0",
+      "description": "Turn any MCP server into typed Python you own — one async def per tool, return types probed from real responses, drift caught in CI. Requires the mcpgen CLI (pip install mcp-client-kit).",
       "author": {
         "name": "Sviatoslav Sviridov",
         "email": "sviridov@gmail.com"
       },
-      "keywords": ["mcp", "codegen", "typed-wrappers", "python", "oauth"],
+      "keywords": ["mcp", "codegen", "python", "typed-wrappers", "oauth", "drift-detection"],
       "license": "MIT"
     }
   ]
