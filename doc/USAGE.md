@@ -431,6 +431,27 @@ How it works:
   absent), it falls back to a full browser login — the in-code equivalent of
   `mcpgen login <server>`. Credentials are persisted at
   `~/.mcpgen/credentials.json`.
+- **A login that does not take is reported, not repeated.** After `login()` returns,
+  `ensure_login` checks that the store actually holds a new, usable credential. If it
+  holds nothing new — a backend that took the write without persisting it, or an entry
+  another process cleared — or if the token cannot survive the 120s freshness margin every
+  other read applies, it raises `LoginWontHelp` instead of letting the next call prompt
+  again. A lifetime at or under that margin is always reported — the token is absent from
+  the instant it is written, and accepting it risks renewing into another one just like it;
+  a longer one that the post-login check merely spent is reported only when the entry has
+  no refresh token, `client_id` and `token_endpoint` to renew with —
+  otherwise the next call's pre-flight refresh handles it silently. Repeating an OAuth round
+  that already succeeded cannot fix either. A login that *raises* is untouched, so the
+  retry a cancelled consent screen or callback timeout invites still works, and a normal
+  expiry later on still logs in normally. `mcpgen login` and a direct `login()` call do
+  not run this check. On the `keyring` backend it also names the one split-store case
+  worth telling apart: a keychain `login()`'s own instance could not use — a write its ACL
+  denied, or a read that failed there and not here — makes it fall back to the file, so the
+  new token lands somewhere keyring-backend reads never look. The message points at the file and at the two real fixes — repair the keychain
+  item's access control, or read from the file with `--cred-backend file` /
+  `MCPGEN_CRED_BACKEND=file`, which picks up the token already sitting there. Not
+  `migrate-creds`: it merges source over target, so copying the keychain onto the file
+  would overwrite the fresh token with the stale one.
 - **Several servers at once** — `await ensure_login_all(["a", "b"])` runs the same
   refresh-or-login for each name in turn. Sequential on purpose: parallel logins would
   open several browser tabs at once and race for stdin in headless mode. Both functions
@@ -679,7 +700,7 @@ accepts values outside the declared enum, the appropriate fix is to update the s
 | `ReauthenticationRequired` | Run `mcpgen login <server>` |
 | `PostLoginCheckFailed` | The token was issued and saved, but the check after login failed. Read the cause in the message — logging in again changes nothing |
 | `TokenRefreshUnavailable` | The cached grant was not renewed, and the authorization server did not name the credential as the reason — a 5xx, a transport error, a `408`/`429`, a `temporarily_unavailable`/`server_error` code, a WAF block page, a `200` that is not a token, or a code faulting the request (`invalid_request`, `unsupported_grant_type`, `invalid_scope`). The message says which, and whether to retry or fix a configuration. It also names `mcpgen login <server>` wherever the cause is ambiguous enough that a fresh registration could still be the fix |
-| `LoginWontHelp` | The base class of the two above. Catch it in batch code to abort on the first failure a browser round cannot fix. Also raised directly, with no subclass, when the credential store cannot be parsed *and* cannot be moved aside — see the row below |
+| `LoginWontHelp` | The base class of the two above. Catch it in batch code to abort on the first failure a browser round cannot fix. Also raised directly, with no subclass, where neither subclass would be true: when the credential store cannot be parsed *and* cannot be moved aside (see the row below), and when a `login()` that returned left the store holding nothing new, or a credential that cannot outlive the freshness margin and cannot be renewed. Each of those messages names the store, or the lifetime and what is missing, and says why another browser round would change nothing |
 | `[mcpgen] error: …` on any command | Every command, not just `login`, reports an auth failure as this one-line message and exit `1` — no traceback. The text is the exception's own message, so the rows above say what to do about it. A traceback from `mcpgen` is a bug worth reporting, never an expired credential |
 | `credentials.json is not a readable credential store … moved to …` | `mcpgen login` quarantined an unparseable store (`file` backend only) and started clean. Log in again for each server you use; the `.corrupt.<epoch-ns>` file still holds the old entries if you want to salvage one by hand |
 | `… is not a readable credential store … and could not be moved aside` | The corrupt store could not be quarantined — a permission problem or a file lock. Move or delete `credentials.json` by hand, then run `mcpgen login` again |

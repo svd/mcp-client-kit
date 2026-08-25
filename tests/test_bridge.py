@@ -1563,6 +1563,34 @@ def test_login_kept_token_is_refreshable_without_a_new_login(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _login_that_writes(creds, expires_in=3600):
+    """Stand-in for `login()` that does what a real one does: leave a token behind.
+
+    `ensure_login` reads the store after `login()` returns, so a mock that writes
+    nothing is a login that did not take — which is a distinct case with its own tests.
+    Each call writes a different token, since an unchanged store reads the same way.
+    `expires_in=None` writes no `expires_at` at all, the shape `_serialize_tokens`
+    produces for a token endpoint that omits the lifetime.
+    """
+    counter = itertools.count(1)
+
+    def _write(name, path=None, **kwargs):
+        n = next(counter)
+        data = json.loads(creds.read_text()) if creds.exists() else {}
+        data.setdefault(name, {})["tokens"] = {
+            "access_token": f"tok{n}",
+            "refresh_token": f"rt{n}",
+            # `expires_in` alongside `expires_at`, as `_serialize_tokens` writes them: the
+            # lifetime the endpoint reported is what tells a too-short token apart from one
+            # whose slack the post-login check spent.
+            **({} if expires_in is None else {"expires_in": expires_in, "expires_at": int(time.time()) + expires_in}),
+        }
+        creds.write_text(json.dumps(data))
+        os.chmod(creds, 0o600)
+
+    return AsyncMock(side_effect=_write)
+
+
 def _refreshable_creds(tmp_path, token_endpoint="https://auth.example.com/token"):
     """A credential that is past expiry and has everything needed to renew itself."""
     creds = tmp_path / "credentials.json"
@@ -1966,6 +1994,530 @@ def test_ensure_login_all_stops_at_the_first_failure_a_browser_cannot_fix(tmp_pa
     asyncio.run(run())
 
 
+def test_ensure_login_raises_when_the_login_leaves_no_credential(tmp_path):
+    """A login that reports success and stores nothing must not be repeated.
+
+    This is the loop the check exists for: `login()` returns, the store is still
+    empty, so the next call finds no token and prompts again — forever. Checked on
+    the call that prompted, while the before-state is still known, because a later
+    call cannot tell "never stored" from an ordinary expiry.
+    """
+    creds = tmp_path / "credentials.json"
+
+    async def run():
+        with patch("mcpgen._bridge.login", AsyncMock()) as fake_login:  # writes nothing
+            with pytest.raises(_bridge.LoginWontHelp) as excinfo:
+                await _bridge.ensure_login("acme", creds)
+        assert fake_login.call_count == 1  # one prompt, not one per iteration
+        assert "acme" in str(excinfo.value)
+
+    asyncio.run(run())
+
+
+def test_ensure_login_raises_when_the_store_is_unchanged_by_the_login(tmp_path):
+    """A store that silently discards the write reads the same as one never written.
+
+    A backend that accepts the write without persisting it, or another process clearing
+    the entry, leaves the prior entry in place. The token is gone but a *stale* one
+    remains, so an emptiness check alone would miss it — the before/after comparison is
+    what catches this one.
+    """
+    creds = _refreshable_creds(tmp_path)
+    frozen = creds.read_text()
+
+    async def restore_after_login(name, path=None, **kwargs):
+        creds.write_text(frozen)  # whatever login wrote is reverted
+
+    async def run():
+        with (
+            patch(
+                "mcpgen._bridge.httpx.AsyncClient",
+                _token_endpoint_replying(400, json_body={"error": "invalid_grant"}),
+            ),
+            patch("mcpgen._bridge.login", restore_after_login),
+        ):
+            with pytest.raises(_bridge.LoginWontHelp, match="no new credential"):
+                await _bridge.ensure_login("acme", creds)
+
+    asyncio.run(run())
+
+
+def test_ensure_login_reports_a_nonsensical_lifetime_rather_than_crashing(tmp_path):
+    """A lifetime RFC 6749 §5.1 forbids still has to come out as a message.
+
+    `expires_in` is specified as a positive integer, so a negative one means a
+    non-conforming endpoint rather than a condition with its own fix. It lands in the
+    at-or-under-the-margin branch, which is the right verdict — the token is absent
+    before it is written — and the message quotes what was reported, which is the only
+    thing that tells the operator their server is the problem.
+    """
+    creds = tmp_path / "credentials.json"
+
+    async def run():
+        with patch("mcpgen._bridge.login", _login_that_writes(creds, expires_in=-3600)) as fake_login:
+            with pytest.raises(_bridge.LoginWontHelp, match="lifetime of -3600s"):
+                await _bridge.ensure_login("acme", creds)
+        assert fake_login.call_count == 1
+
+    asyncio.run(run())
+
+
+def test_ensure_login_raises_when_the_lifetime_is_inside_the_margin(tmp_path):
+    """A lifetime shorter than `_MARGIN` is unusable no matter what else is cached.
+
+    `get_tokens` and `_pre_flight_refresh` both call a token absent from
+    `expires_at - _MARGIN` onwards, so a token issued inside that window is gone from
+    the moment it is written — and so is every renewal of it, which is why a refresh
+    token (this fixture writes one) cannot rescue the case. Checking against bare
+    `expires_at` would let exactly this loop through.
+    """
+    creds = tmp_path / "credentials.json"
+
+    async def run():
+        writer = _login_that_writes(creds, expires_in=_bridge._MARGIN // 2)
+        with patch("mcpgen._bridge.login", writer) as fake_login:
+            with pytest.raises(_bridge.LoginWontHelp, match=f"lifetime of {_bridge._MARGIN // 2}s"):
+                await _bridge.ensure_login("acme", creds)
+        assert fake_login.call_count == 1
+
+    asyncio.run(run())
+
+
+def test_ensure_login_accepts_a_short_lifetime_that_can_be_refreshed(tmp_path):
+    """A lifetime past the margin plus the means to renew it is a working setup.
+
+    Short access tokens paired with refresh tokens are a recommended hardening
+    pattern, and the post-login check spends real time inside the lifetime it is
+    verifying — `initialize()` and `list_tools()` run between the write and this read.
+    Blocking on the margin alone would hard-fail such a server on the strength of how
+    long that check happened to take. The next call's pre-flight renews out-of-band
+    and the renewal clears the margin, so there is no loop to close here.
+    """
+    creds = tmp_path / "credentials.json"
+
+    def login_writing_a_refreshable_token(name, path=None, **kwargs):
+        creds.write_text(
+            json.dumps(
+                {
+                    name: {
+                        "tokens": {
+                            "access_token": "tok1",
+                            "refresh_token": "rt1",
+                            "expires_in": _bridge._MARGIN + 60,
+                            # The slack is already spent: the post-login check ran inside it.
+                            "expires_at": int(time.time()) + _bridge._MARGIN - 1,
+                        },
+                        "client_info": {"client_id": "acme_id"},
+                        "token_endpoint": "https://auth.example.com/token",
+                    }
+                }
+            )
+        )
+        os.chmod(creds, 0o600)
+
+    async def run():
+        with patch("mcpgen._bridge.login", AsyncMock(side_effect=login_writing_a_refreshable_token)) as fake_login:
+            await _bridge.ensure_login("acme", creds)
+        assert fake_login.call_count == 1
+
+    asyncio.run(run())
+
+
+def test_ensure_login_raises_when_a_spent_lifetime_cannot_be_refreshed(tmp_path):
+    """The same spent lifetime with nothing to renew it is the loop again.
+
+    `_pre_flight_refresh` needs a refresh_token, a client_id and a token_endpoint.
+    Missing any of them, the next call cannot renew and can only prompt — so this one
+    has to be reported even though the endpoint's own lifetime was generous.
+    """
+    creds = tmp_path / "credentials.json"
+
+    def login_writing_an_unrenewable_token(name, path=None, **kwargs):
+        creds.write_text(
+            json.dumps(
+                {
+                    name: {
+                        "tokens": {
+                            "access_token": "tok1",
+                            "refresh_token": "rt1",
+                            "expires_in": _bridge._MARGIN + 60,
+                            "expires_at": int(time.time()) + _bridge._MARGIN - 1,
+                        },
+                        # no client_info, no token_endpoint: nothing to refresh with
+                    }
+                }
+            )
+        )
+        os.chmod(creds, 0o600)
+
+    async def run():
+        with patch("mcpgen._bridge.login", AsyncMock(side_effect=login_writing_an_unrenewable_token)) as fake_login:
+            with pytest.raises(_bridge.LoginWontHelp, match="Nothing cached can renew it"):
+                await _bridge.ensure_login("acme", creds)
+        assert fake_login.call_count == 1
+
+    asyncio.run(run())
+
+
+def test_ensure_login_accepts_a_token_with_no_expiry(tmp_path):
+    """A token endpoint that omits `expires_in` leaves no `expires_at` to judge.
+
+    `_serialize_tokens` writes the field only when a lifetime came back, and the
+    freshness rule everywhere else treats its absence as "not expiring". The check
+    has to agree, or a conformant server that omits the optional member cannot be
+    logged into at all.
+    """
+    creds = tmp_path / "credentials.json"
+
+    async def run():
+        with patch("mcpgen._bridge.login", _login_that_writes(creds, expires_in=None)) as fake_login:
+            await _bridge.ensure_login("acme", creds)
+        assert fake_login.call_count == 1
+        assert "expires_at" not in _bridge._stored_tokens(_bridge.FileTokenStorage("acme", creds))
+
+    asyncio.run(run())
+
+
+def _keyring_that_reads_but_will_not_write(store):
+    """A keychain that answers reads, preloaded with *store*, and refuses writes.
+
+    The read half is what these tests turn on: `_keyring_load` never fails over on it, so
+    the instance stays on the keyring backend and reaches the split-store branch. The
+    refusing `set_password` states the configuration being modelled — a macOS keychain item
+    whose ACL permits reads and denies writes — but no test here drives a write; the
+    fallback it would trigger is pinned separately by
+    `test_keyring_backend_falls_back_to_file_when_unavailable`.
+    """
+    fake = _FakeKeyring()
+    fake._store[(_bridge._KEYRING_SERVICE, _bridge._KEYRING_USER)] = json.dumps(store)
+
+    def refuses(service, username, password):
+        raise RuntimeError("access denied by keychain ACL")
+
+    fake.set_password = refuses
+    return fake
+
+
+def test_verify_names_the_file_when_the_keychain_reads_but_will_not_write(tmp_path):
+    """A store split across two backends is a dead credential, and must say so.
+
+    `login()` builds its own storage, so a write-denied keychain flips *that* instance
+    to the file and lands the token there, while this instance — and every later one,
+    since `resolve_cred_backend` re-resolves and `_detect_keyring` never probes a write
+    — goes on reading the keychain. The verdict is unchanged and right: nothing will
+    ever read the new token, and another browser round repeats the split. The generic
+    message would send the operator looking for a token that was never lost.
+    """
+    creds = tmp_path / "credentials.json"
+    before = {"access_token": "old_tok"}
+    started = time.time()
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "new_tok"}}}))
+    os.chmod(creds, 0o600)
+    # Stamped rather than left to the write: mtime granularity is 1s or worse on some
+    # filesystems, which would truncate a during-login write to just before `started`.
+    os.utime(creds, (started + 10, started + 10))
+    fake_kr = _keyring_that_reads_but_will_not_write({"acme": {"tokens": before}})
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        storage = _bridge.FileTokenStorage("acme", creds, backend="keyring")
+        with pytest.raises(_bridge.LoginWontHelp) as excinfo:
+            _bridge._verify_login_took(storage, before, started)
+
+    message = str(excinfo.value)
+    assert "fell back to the file" in message
+    assert str(creds) in message, "the operator has to be told where the token actually is"
+
+
+def test_verify_ignores_a_file_that_predates_the_login(tmp_path):
+    """`migrate-creds file keyring` keeps the source file, and that is not a fallback write.
+
+    `purge` defaults to false, so a migrated user's `credentials.json` sits there holding
+    whatever it held before — which differs from the keychain entry exactly as a fallback
+    write would. Only the mtime tells them apart. Reporting a split store here would send
+    the operator to a credential months out of date.
+    """
+    creds = tmp_path / "credentials.json"
+    before = {"access_token": "old_tok"}
+    creds.write_text(json.dumps({"acme": {"tokens": {"access_token": "migrated_tok"}}}))
+    os.chmod(creds, 0o600)
+    fake_kr = _keyring_that_reads_but_will_not_write({"acme": {"tokens": before}})
+    started = time.time()
+    os.utime(creds, (started - 10, started - 10))  # last touched before the login began
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        storage = _bridge.FileTokenStorage("acme", creds, backend="keyring")
+        with pytest.raises(_bridge.LoginWontHelp, match="holds no new credential") as excinfo:
+            _bridge._verify_login_took(storage, before, started)
+
+    assert "fell back to the file" not in str(excinfo.value)
+
+
+def test_verify_falls_back_to_the_generic_message_when_the_file_has_nothing_either(tmp_path):
+    """The split-store diagnosis is silent unless it has something to report.
+
+    It reads a fallback chain it does not own. If `_keyring_save` ever stops failing
+    over to the file, this branch must cost wording rather than a verdict — so a file
+    holding nothing fresh falls straight through to the generic message.
+
+    The file is present and recent here on purpose: absent, the mtime gate answers first
+    and this pins the unreadable-file exit instead of the one it is named for.
+    """
+    creds = tmp_path / "credentials.json"
+    before = {"access_token": "old_tok"}
+    creds.write_text(json.dumps({"acme": {"tokens": before}}))
+    os.chmod(creds, 0o600)
+    fake_kr = _keyring_that_reads_but_will_not_write({"acme": {"tokens": before}})
+    started = time.time()
+    os.utime(creds, (started + 10, started + 10))
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        storage = _bridge.FileTokenStorage("acme", creds, backend="keyring")
+        with pytest.raises(_bridge.LoginWontHelp, match="holds no new credential") as excinfo:
+            _bridge._verify_login_took(storage, before, started)
+
+    assert "fell back to the file" not in str(excinfo.value)
+
+
+def test_verify_falls_back_to_the_generic_message_when_the_file_is_unreadable(tmp_path):
+    """An unreadable file is not a diagnosis — the split-store branch must stay silent.
+
+    The keyring backend need never have written the file at all, so `stat` raising is
+    the ordinary case rather than an error worth reporting. It has to reach the generic
+    verdict, not a traceback.
+    """
+    creds = tmp_path / "credentials.json"  # never created
+    before = {"access_token": "old_tok"}
+    fake_kr = _keyring_that_reads_but_will_not_write({"acme": {"tokens": before}})
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        storage = _bridge.FileTokenStorage("acme", creds, backend="keyring")
+        with pytest.raises(_bridge.LoginWontHelp, match="holds no new credential") as excinfo:
+            _bridge._verify_login_took(storage, before, time.time())
+
+    assert "fell back to the file" not in str(excinfo.value)
+
+
+def test_verify_does_not_claim_permanence_when_its_own_keychain_read_failed(tmp_path):
+    """A check that lost the keychain mid-call cannot speak for what login wrote.
+
+    `_warn_keyring_fallback` flips this instance to the file for the rest of its life, but
+    `login()` resolved the backend afresh and may have written the keychain successfully —
+    which this instance can no longer see. The verdict stands, since nothing here can read
+    the credential, but "logging in again would repeat a round that already succeeded"
+    would be a false claim of permanence: a retry in a new process re-resolves to keyring.
+    """
+    creds = tmp_path / "credentials.json"
+    before = {"access_token": "old_tok"}
+
+    class _KeyringThatFailsReads:
+        def get_password(self, service, username):
+            raise RuntimeError("keychain is locked")
+
+        def set_password(self, service, username, password):
+            raise RuntimeError("keychain is locked")
+
+    with patch.dict("sys.modules", {"keyring": _KeyringThatFailsReads()}):
+        storage = _bridge.FileTokenStorage("acme", creds, backend="keyring")
+        with pytest.warns(UserWarning, match="keyring unusable"):
+            with pytest.raises(_bridge.LoginWontHelp, match="holds no new credential") as excinfo:
+                _bridge._verify_login_took(storage, before, time.time())
+
+    message = str(excinfo.value)
+    assert "unusable during this call" in message
+    assert "repeat a round that already succeeded" not in message, "the check cannot know that here"
+    assert storage._lock_backend == "keyring" and storage._backend == "file", "the flip is what it detected"
+
+
+def test_verify_says_nothing_about_a_keychain_on_the_file_backend(tmp_path):
+    """The split-store branch is keyring-only; a file-backend store names the file."""
+    creds = tmp_path / "credentials.json"
+    before = {"access_token": "old_tok"}
+    creds.write_text(json.dumps({"acme": {"tokens": before}}))
+    os.chmod(creds, 0o600)
+
+    storage = _bridge.FileTokenStorage("acme", creds, backend="file")
+    with pytest.raises(_bridge.LoginWontHelp, match="holds no new credential") as excinfo:
+        _bridge._verify_login_took(storage, before, time.time())
+
+    message = str(excinfo.value)
+    assert "keychain" not in message
+    assert str(creds) in message
+
+
+def test_a_sub_margin_refresh_response_is_stale_the_moment_it_is_stored(tmp_path):
+    """A refresh lands its own lifetime, which the margin can swallow whole.
+
+    The post-login check never sees this: the store right after a login holds the
+    *exchange* token, and what a later refresh response will report is not in it. So a
+    server whose exchange lifetimes clear the margin and whose refresh lifetimes do not
+    renews into a token every reader calls absent, and `ensure_login` reads that as
+    first-time and prompts — once per refresh interval, and accepted as such: the
+    margin-dead write is the pre-flight's, made between logins, so no post-login check can
+    reach it, and judging it after the pre-flight's own store would misfire on a server
+    legitimately answering with a short remainder near a fixed absolute expiry. Pinned as
+    the mechanism, which is what that trade rests on rather than any verdict here.
+    """
+    creds = _refreshable_creds(tmp_path)
+    short = {"access_token": "renewed", "token_type": "Bearer", "expires_in": _bridge._MARGIN // 2}
+
+    async def run():
+        storage = _bridge.FileTokenStorage("acme", creds)
+        with patch("mcpgen._bridge.httpx.AsyncClient", _token_endpoint_replying(200, json_body=short)):
+            await _bridge._pre_flight_refresh("acme", storage)
+        assert _bridge._stored_tokens(storage)["access_token"] == "renewed", "the refresh did land"
+        assert await storage.get_tokens() is None, "and every reader calls it absent anyway"
+
+    asyncio.run(run())
+
+
+def test_ensure_login_accepts_a_login_that_stores_a_usable_token(tmp_path):
+    """The healthy path stays silent — the check must not fire on a normal login."""
+    creds = tmp_path / "credentials.json"
+
+    async def run():
+        with patch("mcpgen._bridge.login", _login_that_writes(creds)) as fake_login:
+            await _bridge.ensure_login("acme", creds)
+        assert fake_login.call_count == 1
+        assert _bridge._stored_tokens(_bridge.FileTokenStorage("acme", creds))["access_token"] == "tok1"
+
+    asyncio.run(run())
+
+
+def test_ensure_login_can_log_in_again_after_a_later_expiry(tmp_path):
+    """A process outliving its own grant must still be able to log in again.
+
+    The reason this check is not remembered across calls: a revoked grant and a login
+    that never took present identically later on — a token is present and the server
+    refuses it. A process that logs in, runs for a while and then has its grant die
+    has to get the browser round it genuinely needs.
+    """
+    creds = tmp_path / "credentials.json"
+
+    async def run():
+        with patch("mcpgen._bridge.login", _login_that_writes(creds)) as fake_login:
+            await _bridge.ensure_login("acme", creds)
+            # Time passes: the token expires and the grant behind it is revoked.
+            stored = json.loads(creds.read_text())
+            stored["acme"]["tokens"]["expires_at"] = 1
+            stored["acme"]["client_info"] = {"client_id": "acme_id"}
+            stored["acme"]["token_endpoint"] = "https://auth.example.com/token"
+            creds.write_text(json.dumps(stored))
+            with patch(
+                "mcpgen._bridge.httpx.AsyncClient",
+                _token_endpoint_replying(400, json_body={"error": "invalid_grant"}),
+            ):
+                await _bridge.ensure_login("acme", creds)
+        assert fake_login.call_count == 2
+
+    asyncio.run(run())
+
+
+def test_ensure_login_all_logs_in_every_server(tmp_path):
+    """A first run of N servers gets N logins — the check is per call, not a budget."""
+    creds = tmp_path / "credentials.json"
+
+    async def run():
+        with patch("mcpgen._bridge.login", _login_that_writes(creds)) as fake_login:
+            await _bridge.ensure_login_all(["acme", "beta", "gamma"], creds)
+        assert fake_login.call_count == 3
+
+    asyncio.run(run())
+
+
+def test_ensure_login_propagates_a_transient_login_failure_unchanged(tmp_path):
+    """A cancelled or timed-out login is not the store's fault and keeps its own type.
+
+    `login()` re-raises a cancelled consent screen, a callback timeout and an unpasted
+    URL unchanged, and every one of those messages invites a retry. The post-login
+    check runs only when `login()` returned, so it neither reclassifies these as
+    LoginWontHelp nor stands in the way of the retry.
+    """
+    creds = tmp_path / "credentials.json"
+    writer = _login_that_writes(creds)
+    attempts = []
+
+    async def flaky_login(name, path=None, **kwargs):
+        attempts.append(name)
+        if len(attempts) == 1:
+            raise TimeoutError("No OAuth callback received within 300s.")
+        await writer(name, path, **kwargs)
+
+    async def run():
+        with patch("mcpgen._bridge.login", flaky_login):
+            with pytest.raises(TimeoutError):
+                await _bridge.ensure_login("acme", creds)
+            await _bridge.ensure_login("acme", creds)  # the retry the message invites
+        assert attempts == ["acme", "acme"]
+
+    asyncio.run(run())
+
+
+class _SessionThatWorks:
+    """`ClientSession` stand-in whose `initialize()` and `list_tools()` both succeed.
+
+    The only stand-in in this file that lets `login()` run to completion. Every other
+    login test fails the session deliberately, which stops short of the post-token
+    stretch where a hoisted post-login check would sit.
+    """
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def initialize(self):
+        return None
+
+    async def list_tools(self):
+        return SimpleNamespace(tools=[])
+
+
+@asynccontextmanager
+async def _fake_http_ok(*args, **kwargs):
+    yield (None, None, None)
+
+
+def test_login_itself_does_not_run_the_post_login_check(tmp_path):
+    """`mcpgen login` reports what happened; it does not police the store.
+
+    The check belongs to `ensure_login`, which is the automatic path and the one that
+    can loop. Hoisting it into `login()` — the obvious simplification, since that is
+    where the browser opens — would make an explicit `mcpgen login` fail on a store it
+    was asked to write and had no say over.
+
+    The provider here writes no token, which is exactly the condition `_verify_login_took`
+    raises on, and the session runs all the way through `list_tools()`, so the whole
+    post-token stretch a hoisted check would live in is executed. `login()` must still
+    return cleanly. A test that stops earlier — at server resolution, say — passes
+    whether the check is there or not.
+    """
+    creds = tmp_path / "credentials.json"
+
+    def provider_that_writes_no_token(**kwargs):
+        return SimpleNamespace(
+            context=SimpleNamespace(oauth_metadata=None),
+            _get_token_endpoint=lambda: "https://auth.example.com/token",
+        )
+
+    async def run():
+        with (
+            patch("mcpgen._bridge._local_callback_server", _fake_callback_server_factory()),
+            patch("mcpgen._bridge._open_http", _fake_http_ok),
+            patch("mcpgen._bridge.ClientSession", _SessionThatWorks),
+            patch("mcpgen._bridge.OAuthClientProvider", provider_that_writes_no_token),
+        ):
+            await _bridge.login("acme", creds_path=creds, url="https://acme.example.com/mcp")
+
+    asyncio.run(run())
+    assert _bridge._stored_tokens(_bridge.FileTokenStorage("acme", creds)) == {}, (
+        "the premise: the store holds no token, which is what ensure_login would reject"
+    )
+
+
 @pytest.mark.parametrize("error_code", ["invalid_grant", "invalid_client", "unauthorized_client"])
 def test_ensure_login_re_registers_when_the_registration_is_what_failed(tmp_path, error_code):
     """A condition re-registration can repair must not need a human to notice it.
@@ -1983,7 +2535,7 @@ def test_ensure_login_re_registers_when_the_registration_is_what_failed(tmp_path
     async def run():
         with (
             patch("mcpgen._bridge.httpx.AsyncClient", _token_endpoint_replying(400, json_body={"error": error_code})),
-            patch("mcpgen._bridge.login", AsyncMock()) as fake_login,
+            patch("mcpgen._bridge.login", _login_that_writes(creds)) as fake_login,
         ):
             await _bridge.ensure_login("acme", creds)
         assert fake_login.call_count == 1
@@ -3772,7 +4324,7 @@ def test_ensure_login_all_runs_servers_in_order_with_kwargs(tmp_path):
 def test_ensure_login_threads_headless_into_login(tmp_path):
     """ensure_login() with no cached token must pass headless through to login()."""
     creds = tmp_path / "credentials.json"
-    login_mock = AsyncMock()
+    login_mock = _login_that_writes(creds)
 
     async def run():
         with patch("mcpgen._bridge.login", login_mock):
@@ -4032,7 +4584,7 @@ def test_ensure_login_all_threads_callback_timeout(tmp_path):
 
 def test_ensure_login_threads_callback_timeout_into_login(tmp_path):
     creds = tmp_path / "credentials.json"
-    login_mock = AsyncMock()
+    login_mock = _login_that_writes(creds)
 
     async def run():
         with patch("mcpgen._bridge.login", login_mock):
