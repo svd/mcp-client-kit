@@ -306,6 +306,6 @@ notes = "Linear MCP over native streamable-HTTP OAuth (DCR, no pre-registered cl
 [[server]]
 name = "playwright"
 transport = "stdio"
-launch = "npx -y @playwright/mcp@0.0.79 --headless --isolated"
+launch = "npx -y @playwright/mcp@0.0.79 --headless --isolated --caps vision,pdf,devtools --init-page servers/playwright-init.ts --output-dir eval/playwright/.playwright-mcp"
 auth = "none"
 notes = "Playwright browser-automation MCP — the ecosystem's most-searched server. Chosen for its large, awkward tool surface (accessibility-tree snapshots, ref-based element targeting)."
