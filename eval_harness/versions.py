@@ -100,16 +100,30 @@ def skill_ref(marketplaces_path: Path | None = None) -> str | None:
     return _git_describe(directory)
 
 
+def contract_home(directory: Path) -> str:
+    """Render a path with the home directory collapsed to ``~``.
+
+    result.json is git-tracked, so an absolute path would commit the operator's
+    username into the repo. ``~`` keeps the value readable and machine-neutral
+    while still identifying which checkout produced the run.
+    """
+    try:
+        return str(Path("~") / directory.relative_to(Path.home()))
+    except ValueError:
+        return str(directory)
+
+
 def runtime_versions(marketplaces_path: Path | None = None) -> dict[str, str | None]:
     """Engine and skill versions for this run.
 
     All three keys are always present (None when undetectable) so consumers can
     read them without guarding. Deliberately carries no timestamp: result.json is
-    git-tracked, and a clock value would churn every diff.
+    git-tracked, and a clock value would churn every diff. ``skill_path`` is
+    home-contracted for the same reason -- see :func:`contract_home`.
     """
     directory = plugin_dir(marketplaces_path)
     return {
         "engine": engine_version(),
         "skill_ref": skill_ref(marketplaces_path),
-        "skill_path": str(directory) if directory is not None else None,
+        "skill_path": contract_home(directory) if directory is not None else None,
     }

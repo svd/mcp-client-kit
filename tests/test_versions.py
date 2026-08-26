@@ -192,3 +192,33 @@ def test_runtime_versions_has_no_timestamp(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.delenv("EVAL_SKILL_REF", raising=False)
     result = runtime_versions(marketplaces_path=tmp_path / "nope.json")
     assert set(result) == {"engine", "skill_ref", "skill_path"}
+
+
+def test_runtime_versions_contracts_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """skill_path collapses the home prefix — result.json must not carry a username."""
+    monkeypatch.delenv("EVAL_SKILL_REF", raising=False)
+    monkeypatch.setattr(versions.metadata, "version", lambda name: "0.7.0")
+    home = tmp_path / "home"
+    (home / "src").mkdir(parents=True)
+    repo = make_tagged_repo(home / "src", "v0.7.0")
+    monkeypatch.setattr(versions.Path, "home", classmethod(lambda cls: home))
+    path = write_marketplaces(tmp_path, {"installLocation": str(repo)})
+
+    result = runtime_versions(marketplaces_path=path)
+
+    assert result["skill_path"] == str(Path("~") / repo.relative_to(home))
+    assert str(home) not in result["skill_path"]
+
+
+def test_contract_home_leaves_outside_paths_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checkout outside home has no ~ prefix to apply — keep it absolute."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(versions.Path, "home", classmethod(lambda cls: home))
+    outside = tmp_path / "opt" / "kit"
+
+    assert versions.contract_home(outside) == str(outside)

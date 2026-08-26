@@ -2,6 +2,14 @@
 *.probe-raw.json
 *.shapes.json.parts/
 
+# Unscrubbed probe args — the pre-scrub twin of <server>.shapes.json. Local-only:
+# carries real paths from the machine that ran the probe, so it is neither
+# portable nor safe to publish. verify.py reads it opportunistically.
+*.verify.json
+
+# Raw session-analyzer output — superseded by the committed session-overview.md
+session-analyzer.md
+
 # Python
 __pycache__/
 *.py[cod]

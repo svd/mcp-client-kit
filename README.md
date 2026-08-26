@@ -12,8 +12,11 @@ A framework for running reproducible evaluations of the `mcp-client-kit` `genera
 | `<server>.shapes.json` | Shape-spec sidecar (PII-scrubbed) |
 | `run.py` | Transport-aware sample runner script |
 | `session-overview.md` | Merged narrative explaining how the skill executed |
-| `session-analyzer.md` | Raw session-analyzer output |
 | `result.json` | Verifier output (feeds the aggregate report) |
+
+A run also writes two local-only files that are gitignored: `session-analyzer.md` (raw
+analyzer output, superseded by `session-overview.md`) and `<server>.verify.json`
+(unscrubbed probe args carrying real paths from the machine that ran the probe).
 
 ## Quick start
 
@@ -129,7 +132,6 @@ eval/
     <server>.shapes.json
     run.py
     session-overview.md
-    session-analyzer.md
     result.json
 agents/
   server-eval-agent.md  # prompt template for per-server skill agent

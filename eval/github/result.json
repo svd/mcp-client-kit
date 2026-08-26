@@ -1,0 +1,30 @@
+{
+  "server": "github",
+  "transport": "http",
+  "auth": "bearer:GITHUB_PAT",
+  "checks": {
+    "ast": "pass",
+    "signatures": "skip",
+    "idempotency": "pass",
+    "pii": "pass",
+    "roundtrip": "pass"
+  },
+  "check_details": {
+    "ast": "",
+    "signatures": "probe_inconclusive: 3 tool(s) returned quota/auth errors \u2014 shapes unknown: get_team_members, list_issue_types, list_repository_collaborators",
+    "idempotency": "offline determinism check (real tool schemas from github.mcpgen.json)",
+    "pii": "",
+    "roundtrip": "live call to 'get_commit' returned typed result"
+  },
+  "modes_hit": [
+    "A",
+    "B",
+    "C"
+  ],
+  "verdict": "partial",
+  "versions": {
+    "engine": "0.8.0.dev1",
+    "skill_ref": "v0.0.4-63-gec447d2-dirty",
+    "skill_path": "~/src/mcp-client-kit"
+  }
+}

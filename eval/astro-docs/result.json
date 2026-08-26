@@ -1,0 +1,28 @@
+{
+  "server": "astro-docs",
+  "transport": "http",
+  "auth": "none",
+  "checks": {
+    "ast": "pass",
+    "signatures": "pass",
+    "idempotency": "pass",
+    "pii": "pass",
+    "roundtrip": "pass"
+  },
+  "check_details": {
+    "ast": "",
+    "signatures": "",
+    "idempotency": "offline determinism check (real tool schemas from astro-docs.mcpgen.json)",
+    "pii": "",
+    "roundtrip": "live call to 'search_astro_docs' returned typed result"
+  },
+  "modes_hit": [
+    "C"
+  ],
+  "verdict": "pass",
+  "versions": {
+    "engine": "0.8.0.dev1",
+    "skill_ref": "v0.0.4-63-gec447d2-dirty",
+    "skill_path": "~/src/mcp-client-kit"
+  }
+}

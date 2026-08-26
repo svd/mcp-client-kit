@@ -1,0 +1,28 @@
+{
+  "server": "cloudflare-docs",
+  "transport": "http",
+  "auth": "none",
+  "checks": {
+    "ast": "pass",
+    "signatures": "pass",
+    "idempotency": "pass",
+    "pii": "pass",
+    "roundtrip": "skip"
+  },
+  "check_details": {
+    "ast": "",
+    "signatures": "",
+    "idempotency": "offline determinism check (real tool schemas from cloudflare-docs.mcpgen.json)",
+    "pii": "",
+    "roundtrip": "no_shaped_tool_by_design"
+  },
+  "modes_hit": [
+    "A"
+  ],
+  "verdict": "pass",
+  "versions": {
+    "engine": "0.8.0.dev1",
+    "skill_ref": "v0.0.4-63-gec447d2-dirty",
+    "skill_path": "~/src/mcp-client-kit"
+  }
+}
