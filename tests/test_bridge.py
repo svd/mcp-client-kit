@@ -22,7 +22,7 @@ import threading
 import time
 import traceback
 import warnings
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1648,6 +1648,9 @@ def _token_endpoint_replying(status_code, body="", json_body=None, record=None, 
             return json.loads(text)
 
     class _FakeClient:
+        def __init__(self, **kwargs):
+            pass  # the real client is constructed with keyword arguments
+
         async def __aenter__(self):
             return self
 
@@ -2692,6 +2695,9 @@ def test_pre_flight_refresh_classifies_a_transport_error(tmp_path):
     original = httpx.ConnectError("[Errno 8] nodename nor servname provided")
 
     class _FakeClient:
+        def __init__(self, **kwargs):
+            pass  # the real client is constructed with keyword arguments
+
         async def __aenter__(self):
             return self
 
@@ -2722,6 +2728,9 @@ def test_pre_flight_refresh_classifies_an_unusable_token_endpoint(tmp_path):
     assert not isinstance(original, httpx.HTTPError), "the premise of this test"
 
     class _FakeClient:
+        def __init__(self, **kwargs):
+            pass  # the real client is constructed with keyword arguments
+
         async def __aenter__(self):
             return self
 
@@ -6098,6 +6107,9 @@ def _refresh_racing(creds, during_post):
     """
 
     class _FakeClient:
+        def __init__(self, **kwargs):
+            pass  # the real client is constructed with keyword arguments
+
         async def __aenter__(self):
             return self
 
@@ -6235,6 +6247,9 @@ def test_pre_flight_refresh_keeps_the_refresh_token_when_the_response_omits_it(t
     os.chmod(creds, 0o600)
 
     class _FakeClient:
+        def __init__(self, **kwargs):
+            pass  # the real client is constructed with keyword arguments
+
         async def __aenter__(self):
             return self
 
@@ -6272,3 +6287,149 @@ def test_store_lock_degrades_on_a_path_with_no_sidecar_name(tmp_path, capsys):
         reached.append(True)
     assert reached == [True]
     assert "proceeding without cross-process locking" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# User-Agent — mcpgen names itself on every request, hand-built ones included
+# ---------------------------------------------------------------------------
+
+
+class _HandBuiltAuth(httpx.Auth):
+    """An auth flow shaped like the MCP SDK's: it yields requests it built itself.
+
+    `mcp.client.auth.oauth2.async_auth_flow` constructs `httpx.Request(...)` objects for
+    metadata discovery and dynamic registration and yields them. This reproduces exactly
+    that shape, which is the behaviour the User-Agent hook exists for.
+    """
+
+    def auth_flow(self, request):
+        yield httpx.Request("GET", "https://example.com/.well-known/oauth-authorization-server")
+        yield request
+
+
+def _recording_transport(seen):
+    """A MockTransport that appends every outgoing request's headers to *seen*."""
+
+    def handler(request):
+        seen.append(request.headers)
+        return httpx.Response(200, json={})
+
+    return httpx.MockTransport(handler)
+
+
+def _open_http_over_mock_transport(seen, *, headers=None, auth=None):
+    """Drive `_open_http` with its httpx client wired to a recording transport.
+
+    The stand-in for `create_mcp_http_client` forwards the same arguments the real one
+    does, so what `_open_http` configures on the client is what gets exercised — only the
+    network underneath is replaced.
+    """
+
+    def fake_factory(headers=None, timeout=None, auth=None):
+        return httpx.AsyncClient(headers=headers, auth=auth, transport=_recording_transport(seen))
+
+    captured = {}
+
+    @asynccontextmanager
+    async def fake_streams(url, http_client=None):
+        captured["client"] = http_client
+        yield ("r", "w", lambda: None)
+
+    async def run():
+        with (
+            patch("mcpgen._bridge.create_mcp_http_client", fake_factory),
+            patch("mcpgen._bridge.streamable_http_client", fake_streams),
+        ):
+            async with _bridge._open_http("https://example.com/mcp", headers=headers, auth=auth):
+                await captured["client"].get("https://example.com/mcp")
+
+    asyncio.run(run())
+
+
+def test_open_http_names_mcpgen_on_requests_the_auth_flow_hands_httpx():
+    """The requests that get blocked are the ones the OAuth flow builds itself.
+
+    httpx does not merge client default headers into requests yielded from an auth flow,
+    so metadata discovery and dynamic registration go out with no User-Agent at all and a
+    Cloudflare WAF answers them 403 — while the client's own requests, which do get
+    httpx's default UA, succeed. A request event hook is the one place that fires on both.
+    """
+    seen = []
+    _open_http_over_mock_transport(seen, auth=_HandBuiltAuth())
+    discovery, normal = seen[0], seen[-1]
+    assert discovery["user-agent"].startswith("mcpgen/"), "the hand-built request is the blocked one"
+    assert normal["user-agent"].startswith("mcpgen/"), "and the client's own requests name mcpgen too"
+
+
+def test_open_http_keeps_caller_headers_off_the_auth_flow_requests():
+    """Caller headers reach the client's own requests and no further.
+
+    This is why passing a User-Agent through `headers=` does not fix the 403: the
+    authorization headers a caller sets are client defaults, and httpx leaves the
+    auth flow's hand-built requests alone. If this ever stops holding, the hook is
+    redundant and this test says so.
+    """
+    seen = []
+    _open_http_over_mock_transport(seen, headers={"Authorization": "Bearer t"}, auth=_HandBuiltAuth())
+    discovery, normal = seen[0], seen[-1]
+    assert "authorization" not in discovery
+    assert normal["authorization"] == "Bearer t", "caller headers must survive on the client path"
+
+
+@pytest.mark.parametrize("key", ["User-Agent", "user-agent", "USER-AGENT"])
+def test_open_http_lets_a_caller_supplied_user_agent_win(key):
+    """A User-Agent the caller configured is the identity they asked for.
+
+    It has to win on the auth-flow requests too, where it would otherwise never arrive:
+    the hook, not the client headers, is what puts a UA on those. Any spelling counts —
+    `_static_headers_session` passes a header block straight out of hand-written server
+    config, where a lowercase key is a natural way to write it.
+    """
+    seen = []
+    _open_http_over_mock_transport(seen, headers={key: "custom/1.0"}, auth=_HandBuiltAuth())
+    assert [h["user-agent"] for h in seen] == ["custom/1.0", "custom/1.0"]
+    # Raw, not the case-folded mapping: RFC 9110 §5.5 makes User-Agent a singleton field,
+    # and a request carrying it twice is the kind of anomaly a bot filter scores against —
+    # which is the whole failure this hook exists to avoid.
+    for headers in seen:
+        assert len([k for k, _ in headers.raw if k.lower() == b"user-agent"]) == 1
+
+
+def test_open_http_sends_one_user_agent_when_the_caller_spells_it_twice():
+    """A header block naming the same field twice must still leave one on the wire.
+
+    Two spellings of one key are a config typo, not two headers: httpx keeps both and
+    sends both, and the identity the client shows would then differ from the one the
+    hook stamps on the auth-flow requests.
+    """
+    seen = []
+    headers = {"USER-AGENT": "first/1.0", "user-agent": "second/2.0"}
+    _open_http_over_mock_transport(seen, headers=headers, auth=_HandBuiltAuth())
+    for sent in seen:
+        assert len([k for k, _ in sent.raw if k.lower() == b"user-agent"]) == 1
+    assert len(set(sent["user-agent"] for sent in seen)) == 1, "one identity across both paths"
+
+
+def test_pre_flight_refresh_names_mcpgen_to_the_token_endpoint(tmp_path):
+    """The manual refresh client presents the same identity as the rest of mcpgen.
+
+    Left to itself this one sends `python-httpx/<version>`, which names the library
+    rather than the caller: not currently blocked anywhere, but not an identity a
+    server operator can act on either.
+    """
+    seen = []
+    creds = _refreshable_creds(tmp_path)
+
+    real_client = httpx.AsyncClient  # bound before the patch; `patch` swaps the shared attribute
+
+    def fake_client(**kwargs):
+        return real_client(**kwargs, transport=_recording_transport(seen))
+
+    async def run():
+        storage = _bridge.FileTokenStorage("acme", creds)
+        with patch("mcpgen._bridge.httpx.AsyncClient", fake_client):
+            await _bridge._pre_flight_refresh("acme", storage)
+
+    with suppress(_bridge.TokenRefreshUnavailable):
+        asyncio.run(run())  # the empty 200 body is not a token; the request is what matters
+    assert seen[0]["user-agent"].startswith("mcpgen/")

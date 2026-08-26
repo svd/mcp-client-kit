@@ -42,8 +42,9 @@ import threading
 import time
 import warnings
 import webbrowser
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlparse
@@ -1592,7 +1593,9 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     # form-encoded regardless (GitHub's does) is handled by the form-encoded fallback in
     # `_oauth_error_code`.
     try:
-        async with httpx.AsyncClient() as client:
+        # No auth flow runs on this client, so its default headers are enough to carry the
+        # User-Agent — httpx would otherwise name itself here and nothing would name mcpgen.
+        async with httpx.AsyncClient(headers={"User-Agent": _user_agent()}) as client:
             resp = await client.post(token_endpoint, data=payload, headers={"Accept": "application/json"})
     except Exception as exc:  # noqa: BLE001 — the Raises contract above admits exactly two types
         # Not `httpx.HTTPError`: `InvalidURL` and `CookieConflict` derive from `Exception`
@@ -1700,6 +1703,44 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     )
 
 
+def package_version() -> str:
+    """The installed mcp-client-kit version, or ``"unknown"`` outside an installed tree."""
+    from importlib.metadata import version as _pkg_version
+
+    try:
+        return _pkg_version("mcp-client-kit")
+    except Exception:  # noqa: BLE001 — an uninstalled tree still has to run
+        return "unknown"
+
+
+@lru_cache(maxsize=1)
+def _user_agent() -> str:
+    """The identity mcpgen presents to a server that has none from the caller.
+
+    Cached because `importlib.metadata` re-walks ``sys.path`` on every lookup and the
+    answer is fixed for the process. A test that fakes the version must `cache_clear()`.
+    """
+    return f"mcpgen/{package_version()} (python-httpx)"
+
+
+def _user_agent_hook(user_agent: str) -> Callable[[httpx.Request], Awaitable[None]]:
+    """A request event hook that names *user_agent* on requests carrying no UA of their own.
+
+    Load-bearing for OAuth against a bot-protected host: ``mcp.client.auth.oauth2``
+    hand-builds its ``httpx.Request`` objects and yields them from the auth flow, and httpx
+    does not merge client default headers into requests yielded that way. So metadata
+    discovery and dynamic registration go out with no User-Agent at all, and a Cloudflare
+    WAF answers those 403 while the client's own requests — which do carry the client
+    headers — succeed. A request event hook is the one place that fires on both, which is
+    why the client's ``headers=`` cannot do this job alone.
+    """
+
+    async def _ensure_user_agent(request: httpx.Request) -> None:
+        request.headers.setdefault("user-agent", user_agent)
+
+    return _ensure_user_agent
+
+
 @asynccontextmanager
 async def _open_http(url: str, *, headers: dict[str, str] | None = None, auth: httpx.Auth | None = None):
     """Open a StreamableHTTP transport, yielding (read, write, get_session_id).
@@ -1708,7 +1749,26 @@ async def _open_http(url: str, *, headers: dict[str, str] | None = None, auth: h
     removed ``streamablehttp_client``) with an MCP-default httpx client so
     callers can still inject headers or an auth handler.
     """
+    # A User-Agent the caller set is the identity they asked for, and it has to reach the
+    # auth-flow requests too — where only the hook can put it. The caller's spelling is
+    # dropped in favour of the canonical one rather than merged alongside it: the header
+    # block comes out of hand-written server config, where `user-agent` is a natural way
+    # to write it, and keeping both keys would put the field on the wire twice. RFC 9110
+    # §5.5 makes User-Agent a singleton, and a doubled one is the sort of anomaly the bot
+    # filters this hook exists for score against.
+    caller = headers or {}
+    caller_key = next((k for k in caller if k.lower() == "user-agent"), None)
+    user_agent = caller[caller_key] if caller_key else _user_agent()
+    headers = {"User-Agent": user_agent, **{k: v for k, v in caller.items() if k.lower() != "user-agent"}}
     async with create_mcp_http_client(headers=headers, auth=auth) as client:
+        # The OAuth handshake runs on this client, so this is where the User-Agent hook
+        # has to go — the headers above never reach the requests the flow hand-builds.
+        # `create_mcp_http_client` takes no `event_hooks`, hence the assignment after
+        # construction; it keeps whatever hooks the client already carries.
+        client.event_hooks = {
+            **client.event_hooks,
+            "request": [*client.event_hooks.get("request", []), _user_agent_hook(user_agent)],
+        }
         async with streamable_http_client(url, http_client=client) as streams:
             yield streams
 

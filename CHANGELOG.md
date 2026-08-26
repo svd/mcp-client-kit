@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`mcpgen login` could not authenticate against a server behind bot protection.**
+  The OAuth handshake sent no `User-Agent` at all: `mcp.client.auth.oauth2` hand-builds
+  its `httpx.Request` objects and yields them from the auth flow, and httpx does not merge
+  client default headers into requests yielded that way — so metadata discovery and dynamic
+  client registration went out bare and a Cloudflare filter answered them `403 Access
+  Denied`, while the client's own requests succeeded. mcpgen now names itself
+  (`mcpgen/<version> (python-httpx)`) through a request event hook, which is the one place
+  that fires on both kinds of request, and on the token-refresh client's headers. A
+  `User-Agent` supplied in a server's configured headers still wins.
+
 - **A caller logging in on demand for a credential that never takes prompted every time.**
   `login()` reports success when the authorization server issued a token, which says nothing
   about whether the store kept it or the result is usable. Two failures follow from that and
