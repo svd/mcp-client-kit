@@ -1,10 +1,12 @@
 # Report templates — triaging-eval-outputs
 
 Use these skeletons for Step 5 of the triaging workflow. Fill in discovered items; delete empty buckets.
+Both filenames end in the run date (`date +%F`), so each triage run adds a pair rather than
+overwriting the last one.
 
 ---
 
-## Template A: `doc/FIXES-mcp-client-kit.md`
+## Template A: `doc/FIXES-mcp-client-kit-<YYYY-MM-DD>.md`
 
 ```markdown
 # Fix report — mcp-client-kit (`generate-mcp-wrappers` skill + `mcpgen` CLI)
@@ -60,7 +62,7 @@ Each item includes verbatim error output and affected server names.
 
 ---
 
-## Template B: `doc/FIXES-eval-kit.md`
+## Template B: `doc/FIXES-eval-kit-<YYYY-MM-DD>.md`
 
 ```markdown
 # Fix report — eval-kit harness

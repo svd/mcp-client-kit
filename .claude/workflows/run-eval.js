@@ -356,7 +356,7 @@ reasons, report rendering) must be read out of \`eval_harness/\` source before y
 cited as \`file:line\`. If you cannot cite it, do not write it — a stale harness limitation
 carried over from an earlier run has repeatedly become the report's top "next step" after the
 code was already fixed. Prefer server-side observations; leave harness gaps to
-doc/FIXES-eval-kit.md.
+the dated doc/FIXES-eval-kit-<YYYY-MM-DD>.md reports.
 
 Write a cross-server synthesis to eval/_synthesis.md covering:
 1. **Overall verdict** (1–2 sentences): how well the generate-mcp-wrappers skill performed across all servers

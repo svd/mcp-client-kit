@@ -47,17 +47,29 @@ friction ≥2 servers, **P2** = low-priority note. Assign each to one owner (rub
 Cross-cutting items appear in both reports with distinct, non-redundant framing.
 
 **Step 5 — Emit two reports**
-- `doc/FIXES-mcp-client-kit.md` — generator owner. **Self-contained**: no eval-repo paths,
-  verbatim error strings, repro steps.
-- `doc/FIXES-eval-kit.md` — harness owner. Every P0 item cites `file:line`. Every item
-  names ≥1 affected server.
+
+Both filenames carry the run date: `doc/FIXES-<owner>-<YYYY-MM-DD>.md`. Get the date from
+`date +%F` — never from memory, and never reuse the date of an existing report. Each run
+emits new files; earlier dated reports are left untouched, so the directory accumulates one
+pair per triage run.
+
+- `doc/FIXES-mcp-client-kit-<YYYY-MM-DD>.md` — generator owner. **Self-contained**: no
+  eval-repo paths, verbatim error strings, repro steps.
+- `doc/FIXES-eval-kit-<YYYY-MM-DD>.md` — harness owner. Every P0 item cites `file:line`.
+  Every item names ≥1 affected server.
+
+Before writing, `ls doc/FIXES-*.md` and read the most recent prior pair. Items it lists that
+still reproduce are re-reported (they are not resolved by having been reported once); items
+that no longer reproduce are simply absent — do not carry them forward, and do not add a
+"previously reported" status column. The dated files are the history.
 
 Use skeletons in `report-templates.md` (this directory).
 
 **Step 6 — Verify**
 - Spot-check `file:line` citations against source.
 - Every P0 item has a verbatim error string (not paraphrased).
-- `doc/FIXES-mcp-client-kit.md` has no eval-repo-only path references.
+- `doc/FIXES-mcp-client-kit-<date>.md` has no eval-repo-only path references.
+- Both filenames carry today's date and no same-date report was overwritten.
 
 ## Owner boundary rubric
 
@@ -81,5 +93,6 @@ Use skeletons in `report-templates.md` (this directory).
 
 ## Worked example
 
-`doc/FIXES-mcp-client-kit.md` and `doc/FIXES-eval-kit.md` (produced 2026-06-16, 13-server run)
-are the canonical reference for what correctly-formed output looks like.
+The newest `doc/FIXES-mcp-client-kit-<date>.md` / `doc/FIXES-eval-kit-<date>.md` pair is the
+canonical reference for what correctly-formed output looks like. As of 2026-08-26 that is the
+`2026-08-26` pair (4-server openzeppelin + firecrawl run).
