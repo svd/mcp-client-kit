@@ -1,0 +1,46 @@
+{
+  "get_content": {
+    "unwrap": ["Items"],
+    "return_container": "list",
+    "return_model": "ContentItem",
+    "input_overrides": {},
+    "fields": {
+      "Site": "str",
+      "Type": "str",
+      "Id": "str",
+      "Data": "dict",
+      "OriginalRequest": "str"
+    },
+    "source": "live",
+    "probed_args": [
+      { "query": "SO_Q54987361, SO_A54987732" },
+      { "query": "SO_Q11227809" }
+    ]
+  },
+  "so_search": {
+    "unwrap": ["items"],
+    "return_container": "list",
+    "return_model": "SearchQuestionItem",
+    "input_overrides": {},
+    "fields": {
+      "question_id": "int",
+      "title": "str",
+      "link": "str",
+      "body_markdown": "str",
+      "score": "int",
+      "view_count": "int",
+      "answer_count": "int",
+      "is_answered": "bool",
+      "creation_date": "int",
+      "accepted_answer_id": "int",
+      "tags": "list",
+      "owner": "dict",
+      "answers": "list"
+    },
+    "source": "live",
+    "probed_args": [
+      { "query": "python asyncio gather exception handling" },
+      { "query": "rust borrow checker lifetime elision" }
+    ]
+  }
+}

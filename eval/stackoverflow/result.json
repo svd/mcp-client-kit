@@ -1,0 +1,28 @@
+{
+  "server": "stackoverflow",
+  "transport": "http",
+  "auth": "oauth",
+  "checks": {
+    "ast": "pass",
+    "signatures": "pass",
+    "idempotency": "pass",
+    "pii": "pass",
+    "roundtrip": "skip"
+  },
+  "check_details": {
+    "ast": "",
+    "signatures": "",
+    "idempotency": "offline determinism check (real tool schemas from stackoverflow.mcpgen.json)",
+    "pii": "",
+    "roundtrip": "oauth_not_supported_in_verifier"
+  },
+  "modes_hit": [
+    "C"
+  ],
+  "verdict": "pass",
+  "versions": {
+    "engine": "0.9.0.dev1",
+    "skill_ref": "v0.0.4-67-g80a9a67",
+    "skill_path": "~/src/mcp-client-kit"
+  }
+}
