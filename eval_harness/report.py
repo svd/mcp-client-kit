@@ -73,12 +73,12 @@ def verdict_cell(verdict: str) -> str:
 # ---------------------------------------------------------------------------
 
 _MODE_LEGEND = """\
-**Mode A** = all-Any stub from `tools/list` alone.
-**Mode B** = single-record TypedDict with `_dig` unwrap.
-**Mode C** = list TypedDict with `_dig_list` unwrap.
-**Mode D** = discriminator `@overload` emission.
-**Path E** = skeleton tool added; re-gen byte-identical (idempotency).
-**Path F** = recursive / nested response structure (design note, not yet a runtime feature).\
+> * **Mode A** = all-Any stub from `tools/list` alone.
+> * **Mode B** = single-record TypedDict with `_dig` unwrap.
+> * **Mode C** = list TypedDict with `_dig_list` unwrap.
+> * **Mode D** = discriminator `@overload` emission.
+> * **Path E** = skeleton tool added; re-gen byte-identical (idempotency).
+> * **Path F** = recursive / nested response structure (design note, not yet a runtime feature).\
 """
 
 _TABLE_HEADER = """\
