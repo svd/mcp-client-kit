@@ -195,24 +195,34 @@ notes = "Semgrep MCP endpoint. Security-scan findings: arrays of heterogeneous r
 #   https://mcp.stackoverflow.com      -> 401 Unauthorized, WWW-Authenticate: Bearer
 #   https://mcp.stackoverflow.com/mcp  -> 404 Not Found
 #   https://mcp.stackoverflow.com/sse  -> 404 Not Found
-# It is OAuth-gated (Tier C). Direct streamable-HTTP OAuth via `mcpgen login` fails at
-# dynamic client registration (Stack Exchange edge returns a 403 block page), so we use the
-# vendor-documented path instead: the `mcp-remote` npx bridge, which runs the browser OAuth
-# flow itself and exposes the server over stdio. auth = "none" because the bridge owns the
-# token (cached in ~/.mcp-auth), not mcpgen.
+# It is OAuth-gated (Tier C), and it publishes no oauth-protected-resource metadata, so the
+# SDK falls back to the default /register and /authorize paths. Dynamic client registration
+# works; no pre-registered client or secret is needed.
 #
-# Root cause of the 403: the mcp SDK builds every OAuth-flow request by hand and sends no
-# User-Agent header, so Cloudflare bot protection blocks the well-known discovery GETs and
-# the /register POST. Confirmed present in mcp 1.27.2 and 2.1.1. Upstream:
-#   https://github.com/modelcontextprotocol/python-sdk/issues/1664
-# Once mcp-client-kit ships the UA request hook, revert this entry to native HTTP OAuth:
-#   transport = "http", auth = "oauth", launch = "https://mcp.stackoverflow.com"
+# This entry needs engine >= 0.8.0. Native OAuth against this server used to fail at dynamic
+# client registration with a 403 Cloudflare block page: the mcp SDK builds every OAuth-flow
+# request by hand and sends no User-Agent, which Cloudflare bot protection rejects (present in
+# mcp 1.27.2 and 2.1.1; upstream
+# https://github.com/modelcontextprotocol/python-sdk/issues/1664). mcp-client-kit 0.8.0 added a
+# request hook that names mcpgen in a User-Agent on requests carrying none, which unblocks it.
 [[server]]
 name = "stackoverflow"
-transport = "stdio"
-launch = "npx -y mcp-remote https://mcp.stackoverflow.com"
-auth = "none"
-notes = "Stack Overflow MCP endpoint via the vendor-documented mcp-remote stdio bridge (OAuth handled by the bridge). Q&A payloads with optional fields — nullability probing."
+transport = "http"
+launch = "https://mcp.stackoverflow.com"
+auth = "oauth"
+notes = "Stack Overflow MCP endpoint over native streamable-HTTP OAuth (DCR, no pre-registered client). Q&A payloads with optional fields — nullability probing."
+
+# Fallback, kept as a worked example of routing an MCP server through a stdio bridge: the
+# vendor-documented `mcp-remote` npx proxy runs the browser OAuth flow itself and caches its
+# token in ~/.mcp-auth, so the entry declares auth = "none" — the bridge owns the credential,
+# not mcpgen. Use this shape for any server whose auth mcpgen cannot drive directly, or to
+# eval against an engine older than 0.8.0.
+# [[server]]
+# name = "stackoverflow"
+# transport = "stdio"
+# launch = "npx -y mcp-remote https://mcp.stackoverflow.com"
+# auth = "none"
+# notes = "Stack Overflow MCP endpoint via the vendor-documented mcp-remote stdio bridge (OAuth handled by the bridge)."
 
 # --- cloudflare-docs ---
 # Cloudflare Docs public MCP endpoint. No auth.
