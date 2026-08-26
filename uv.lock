@@ -538,26 +538,16 @@ cli = [
 
 [[package]]
 name = "mcp-client-kit"
-version = "0.9.0.dev1"
-source = { editable = "../mcp-client-kit" }
+version = "0.8.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "keyring" },
     { name = "mcp", extra = ["cli"] },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.28" },
-    { name = "keyring", specifier = ">=24" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.27,<2" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "mypy", specifier = ">=1.11" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "ruff", specifier = ">=0.6" },
+sdist = { url = "https://files.pythonhosted.org/packages/52/98/045093370a283773b3877734d06feaa5a5c0cce731d08512c9d02567be4e/mcp_client_kit-0.8.0.tar.gz", hash = "sha256:fce0132894dc09b8c7c8cb5c4226bc7f1b2e7427d84c41bdb283f7eaf6cc32bb", size = 354755, upload-time = "2026-08-26T06:31:15.231Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/64/35cc6dc0e6334d91f0f82b45106795fd2fa4afb215464daea84010023818/mcp_client_kit-0.8.0-py3-none-any.whl", hash = "sha256:2c8634d681fb21be0b3df19fbe17d66942318c736cfefcad7caf2280940bbd85", size = 84736, upload-time = "2026-08-26T06:31:13.847Z" },
 ]
 
 [[package]]
@@ -576,7 +566,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "mcp-client-kit", editable = "../mcp-client-kit" }]
+requires-dist = [{ name = "mcp-client-kit", specifier = "==0.8.0" }]
 
 [package.metadata.requires-dev]
 dev = [
