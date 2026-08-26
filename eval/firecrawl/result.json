@@ -1,0 +1,30 @@
+{
+  "server": "firecrawl",
+  "transport": "http",
+  "auth": "bearer:FIRECRAWL_API_KEY",
+  "checks": {
+    "ast": "pass",
+    "signatures": "skip",
+    "idempotency": "pass",
+    "pii": "pass",
+    "roundtrip": "pass"
+  },
+  "check_details": {
+    "ast": "",
+    "signatures": "probe_inconclusive: 3 tool(s) returned quota/auth errors \u2014 shapes unknown: firecrawl_monitor_check, firecrawl_monitor_checks, firecrawl_monitor_get",
+    "idempotency": "offline determinism check (real tool schemas from firecrawl.mcpgen.json)",
+    "pii": "",
+    "roundtrip": "live call to 'firecrawl_agent_status' returned typed result"
+  },
+  "modes_hit": [
+    "A",
+    "B",
+    "C"
+  ],
+  "verdict": "partial",
+  "versions": {
+    "engine": "0.8.0",
+    "skill_ref": "v0.8.0",
+    "skill_path": "~/src/mcp-client-kit-v0.8.0"
+  }
+}

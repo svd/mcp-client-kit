@@ -1,0 +1,38 @@
+{
+  "stylus-erc1155": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyToken"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 2041
+  },
+  "stylus-erc20": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyToken"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 2557
+  },
+  "stylus-erc721": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyToken"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 2378
+  }
+}

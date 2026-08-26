@@ -1,0 +1,78 @@
+{
+  "stellar-account": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyAccount"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 2183
+  },
+  "stellar-fungible": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyToken",
+      "symbol": "MTK"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 607
+  },
+  "stellar-governor": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyGovernor"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 2058
+  },
+  "stellar-non-fungible": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyNFT",
+      "symbol": "MNFT"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 702
+  },
+  "stellar-stablecoin": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyStablecoin",
+      "symbol": "MSC"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 627
+  },
+  "stellar-vault": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyVault",
+      "symbol": "MVLT"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 916
+  }
+}

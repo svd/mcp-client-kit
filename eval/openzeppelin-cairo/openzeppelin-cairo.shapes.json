@@ -1,0 +1,119 @@
+{
+  "cairo-account": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": [
+      {
+        "name": "MyAccount",
+        "type": "stark"
+      },
+      {
+        "name": "MyAccount",
+        "type": "eth"
+      }
+    ],
+    "_observed_shape": "str",
+    "_observed_bytes": 2578
+  },
+  "cairo-custom": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyContract"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 1733
+  },
+  "cairo-erc1155": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyMultiToken",
+      "baseUri": "https://example.com/token/{id}.json"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 2996
+  },
+  "cairo-erc20": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyToken",
+      "symbol": "MTK",
+      "decimals": "18",
+      "mintable": true
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 2599
+  },
+  "cairo-erc721": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyNFT",
+      "symbol": "MNFT",
+      "baseUri": "https://example.com/nft/"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 2531
+  },
+  "cairo-governor": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyGovernor",
+      "delay": "1 day",
+      "period": "1 week",
+      "votes": "erc20votes"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 5936
+  },
+  "cairo-multisig": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyMultisig",
+      "quorum": "2"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 1806
+  },
+  "cairo-vesting": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "name": "MyVesting",
+      "startDate": "2026-03-15T14:30",
+      "duration": "1 year",
+      "cliffDuration": "90 days",
+      "schedule": "linear"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 1661
+  }
+}

@@ -1,0 +1,275 @@
+{
+  "firecrawl_agent_status": {
+    "unwrap": [],
+    "return_model": "AgentJobStatus",
+    "input_overrides": {},
+    "fields": {
+      "success": "bool",
+      "status": "str",
+      "data": "dict",
+      "model": "str",
+      "expiresAt": "str",
+      "creditsUsed": "int"
+    },
+    "source": "live",
+    "probed_args": {
+      "id": "00000000-0000-4000-8000-000000000000"
+    },
+    "probe_args_scrubbed": true
+  },
+  "firecrawl_check_crawl_status": {
+    "unwrap": [],
+    "return_model": "CrawlStatus",
+    "input_overrides": {},
+    "fields": {
+      "id": "str",
+      "status": "str",
+      "completed": "int",
+      "total": "int",
+      "creditsUsed": "int",
+      "expiresAt": "str",
+      "next": "Any | None",
+      "data": "list"
+    },
+    "source": "live",
+    "probed_args": {
+      "id": "00000000-0000-4000-8000-000000000000"
+    },
+    "probe_args_scrubbed": true
+  },
+  "firecrawl_developer_search": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "python asyncio TaskGroup cancellation",
+      "k": 3
+    },
+    "_observed_shape": "str"
+  },
+  "firecrawl_map": {
+    "unwrap": [
+      "links"
+    ],
+    "return_model": "MapLink",
+    "input_overrides": {},
+    "fields": {
+      "url": "str",
+      "title": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "url": "https://example.com",
+      "limit": 5
+    },
+    "return_container": "list"
+  },
+  "firecrawl_monitor_check": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "id": "00000000-0000-4000-8000-000000000000",
+      "checkId": "00000000-0000-4000-8000-000000000000"
+    },
+    "_observed_shape": "str",
+    "_probe_status": "inconclusive"
+  },
+  "firecrawl_monitor_checks": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "id": "00000000-0000-4000-8000-000000000000"
+    },
+    "_observed_shape": "str",
+    "_probe_status": "inconclusive"
+  },
+  "firecrawl_monitor_get": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "id": "00000000-0000-4000-8000-000000000000"
+    },
+    "_observed_shape": "str",
+    "_probe_status": "inconclusive"
+  },
+  "firecrawl_monitor_list": {
+    "unwrap": [],
+    "return_model": "MonitorList",
+    "input_overrides": {},
+    "fields": {
+      "success": "bool",
+      "data": "list"
+    },
+    "source": "live",
+    "probed_args": {}
+  },
+  "firecrawl_parse": {
+    "unwrap": [],
+    "return_model": "ParseUploadTicket",
+    "input_overrides": {},
+    "fields": {
+      "success": "bool",
+      "mode": "str",
+      "message": "str",
+      "upload": "dict",
+      "nextToolCall": "dict",
+      "notes": "list"
+    },
+    "source": "live",
+    "probed_args": {
+      "filePath": "<example-local-file>.html",
+      "formats": [
+        "markdown",
+        "links",
+        "summary"
+      ]
+    },
+    "probe_args_scrubbed": true
+  },
+  "firecrawl_research_inspect_paper": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "paperId": "arxiv:2503.23278"
+    },
+    "_observed_shape": "str"
+  },
+  "firecrawl_research_read_paper": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "paperId": "arxiv:2503.23278",
+      "question": "What are the MCP lifecycle phases?",
+      "k": 3
+    },
+    "_observed_shape": "str"
+  },
+  "firecrawl_research_related_papers": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "seed_ids": [
+        "arxiv:2503.23278"
+      ],
+      "intent": "Find related work on MCP security",
+      "mode": "similar"
+    },
+    "_observed_shape": "str"
+  },
+  "firecrawl_research_search_github": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "model context protocol server",
+      "k": 3
+    },
+    "_observed_shape": "str"
+  },
+  "firecrawl_research_search_papers": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "CRISPR gene editing safety",
+      "k": 3
+    },
+    "_observed_shape": "str"
+  },
+  "firecrawl_scrape": {
+    "unwrap": [],
+    "return_model": "ScrapeResult",
+    "input_overrides": {},
+    "fields": {
+      "markdown": "str",
+      "html": "str",
+      "rawHtml": "str",
+      "summary": "str",
+      "links": "list",
+      "metadata": "dict"
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "url": "https://example.com",
+        "formats": [
+          "markdown"
+        ]
+      },
+      {
+        "url": "https://example.com",
+        "formats": [
+          "html",
+          "links",
+          "summary"
+        ]
+      }
+    ]
+  },
+  "firecrawl_search": {
+    "unwrap": [
+      "data"
+    ],
+    "return_model": "SearchResults",
+    "input_overrides": {},
+    "fields": {
+      "web": "list",
+      "news": "list",
+      "images": "list"
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "query": "model context protocol",
+        "limit": 3,
+        "sources": [
+          {
+            "type": "web"
+          }
+        ]
+      },
+      {
+        "query": "model context protocol",
+        "limit": 3,
+        "sources": [
+          {
+            "type": "news"
+          }
+        ]
+      },
+      {
+        "query": "model context protocol",
+        "limit": 3,
+        "sources": [
+          {
+            "type": "images"
+          }
+        ]
+      }
+    ]
+  }
+}

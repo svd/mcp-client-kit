@@ -1,0 +1,28 @@
+{
+  "server": "openzeppelin-stylus",
+  "transport": "http",
+  "auth": "none",
+  "checks": {
+    "ast": "pass",
+    "signatures": "pass",
+    "idempotency": "pass",
+    "pii": "pass",
+    "roundtrip": "skip"
+  },
+  "check_details": {
+    "ast": "",
+    "signatures": "",
+    "idempotency": "offline determinism check (real tool schemas from openzeppelin-stylus.mcpgen.json)",
+    "pii": "",
+    "roundtrip": "no_shaped_tool_by_design"
+  },
+  "modes_hit": [
+    "A"
+  ],
+  "verdict": "pass",
+  "versions": {
+    "engine": "0.8.0",
+    "skill_ref": "v0.8.0",
+    "skill_path": "~/src/mcp-client-kit-v0.8.0"
+  }
+}
