@@ -252,3 +252,60 @@ transport = "http"
 launch = "https://mcp.openzeppelin.com/contracts/solidity/mcp"
 auth = "none"
 notes = "OpenZeppelin Solidity contracts MCP endpoint. One of four near-identical variants (solidity/cairo/stellar/stylus) — drift-detection material."
+
+# ============================================================================
+# Tier C candidates (remote, OAuth 2.1)
+# Source: ../mcp-client-kit-marketing/EVAL_SERVER_CANDIDATES.md §3 "Tier C"
+# Each needs an interactive browser OAuth flow (and a live account) before eval.
+# ============================================================================
+
+# --- notion ---
+# EVAL_SERVER_CANDIDATES.md publishes https://mcp.notion.com/sse; verified 2026-08-26 both
+# paths answer, so the streamable-HTTP /mcp endpoint is used:
+#   https://mcp.notion.com/mcp -> 401, WWW-Authenticate: Bearer,
+#     resource_metadata=https://mcp.notion.com/.well-known/oauth-protected-resource/mcp
+#   AS metadata advertises registration_endpoint https://mcp.notion.com/register
+#     (dynamic client registration — no pre-registered client or secret needed),
+#     scopes_supported = ["default"].
+# Behind Cloudflare, so it needs engine >= 0.8.0 for the User-Agent request hook
+# (same block that stopped stackoverflow — see that entry).
+[[server]]
+name = "notion"
+transport = "http"
+launch = "https://mcp.notion.com/mcp"
+auth = "oauth"
+notes = "Notion MCP (Beta) over native streamable-HTTP OAuth (DCR, no pre-registered client). Chosen for its block model, which is recursive and discriminated by `type` — overload material for the shape-spec."
+
+# --- linear ---
+# EVAL_SERVER_CANDIDATES.md publishes https://mcp.linear.app/sse; verified 2026-08-26 that
+# path is gone and only streamable HTTP answers:
+#   https://mcp.linear.app/sse -> 404 Not Found
+#   https://mcp.linear.app/mcp -> 401, WWW-Authenticate: Bearer,
+#     resource_metadata=https://mcp.linear.app/.well-known/oauth-protected-resource/mcp
+#   AS metadata advertises registration_endpoint https://mcp.linear.app/register (DCR),
+#     scopes_supported = ["read", "write", "openid", "email"].
+# Behind Cloudflare — same engine >= 0.8.0 requirement as notion.
+[[server]]
+name = "linear"
+transport = "http"
+launch = "https://mcp.linear.app/mcp"
+auth = "oauth"
+notes = "Linear MCP over native streamable-HTTP OAuth (DCR, no pre-registered client). Chosen as a small, GraphQL-backed surface that is readable end-to-end."
+
+# ============================================================================
+# Tier D candidates (stdio, high popularity, local process)
+# Source: ../mcp-client-kit-marketing/EVAL_SERVER_CANDIDATES.md §3 "Tier D"
+# ============================================================================
+
+# --- playwright ---
+# Microsoft Playwright MCP. No auth. Requires npx (Node.js); the first run downloads a
+# browser binary, so allow extra time on a cold cache.
+# Pinned per the `launch` convention above (latest as of 2026-08-26: 0.0.79).
+# `--headless` keeps the run non-interactive; `--isolated` uses a throwaway profile so
+# repeated evals do not contend for a locked user-data-dir.
+[[server]]
+name = "playwright"
+transport = "stdio"
+launch = "npx -y @playwright/mcp@0.0.79 --headless --isolated"
+auth = "none"
+notes = "Playwright browser-automation MCP — the ecosystem's most-searched server. Chosen for its large, awkward tool surface (accessibility-tree snapshots, ref-based element targeting)."
