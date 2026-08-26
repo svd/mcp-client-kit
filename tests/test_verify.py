@@ -208,6 +208,40 @@ def test_check_pii_fail_long_id(tmp_path: Path) -> None:
     assert result.status == "fail", f"Expected fail, got {result.status!r}: {result.detail}"
 
 
+def test_check_pii_pass_placeholder_uuid(tmp_path: Path) -> None:
+    """Synthetic repeated-digit UUIDs are scrub output, not PII, so status='pass'."""
+    shapes = {
+        "get_issue": {
+            "return_model": "Issue",
+            "probed_args": {
+                "id": "11111111-2222-4333-8444-555555555559",
+                "teamId": "11111111-2222-3333-4444-555555555555",
+                "url": "https://example.com/issue/66666666-7777-8888-9999-000000000000",
+            },
+        },
+    }
+    shapes_path = tmp_path / "server.shapes.json"
+    shapes_path.write_text(json.dumps(shapes), encoding="utf-8")
+
+    result = check_pii(shapes_path)
+    assert result.status == "pass", f"Expected pass, got {result.status!r}: {result.detail}"
+
+
+def test_check_pii_fail_real_uuid(tmp_path: Path) -> None:
+    """A real UUID in probed_args still causes status='fail'."""
+    shapes = {
+        "get_issue": {
+            "return_model": "Issue",
+            "probed_args": {"id": "3f2a91c4-7b6d-4e8f-9a1b-c5d0e7f28a63"},
+        },
+    }
+    shapes_path = tmp_path / "server.shapes.json"
+    shapes_path.write_text(json.dumps(shapes), encoding="utf-8")
+
+    result = check_pii(shapes_path)
+    assert result.status == "fail", f"Expected fail, got {result.status!r}: {result.detail}"
+
+
 # ---------------------------------------------------------------------------
 # Check 5: Roundtrip — sidecar lookup
 # ---------------------------------------------------------------------------

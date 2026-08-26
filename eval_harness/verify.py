@@ -257,6 +257,41 @@ def _is_placeholder(value: str) -> bool:
     return "<" in value and ">" in value
 
 
+def _is_placeholder_uuid(value: str) -> bool:
+    """Return True for a synthetic UUID such as 11111111-2222-4333-8444-555555555559.
+
+    Servers that validate their id arguments reject `<example-id>`, so the scrub
+    step substitutes syntactically valid UUIDs built from a repeated hex digit per
+    group. Allowances: groups 3 and 4 may lead with a forced version/variant nibble,
+    and the last group may end with a digit that distinguishes sibling placeholders.
+    Real ids are never that uniform.
+    """
+    groups = value.lower().split("-")
+    if len(groups) != 5:
+        return False
+    for i, group in enumerate(groups):
+        body = group[1:] if i in (2, 3) else group[:-1] if i == 4 else group
+        if len(set(body)) > 1:
+            return False
+    return True
+
+
+def _find_pii(value: str) -> str | None:
+    """Return the first PII-like substring in value, or None if it holds none.
+
+    Placeholder UUIDs are blanked out before the scan: their digit runs would
+    otherwise trip the long-number pattern even though the UUID pattern excuses them.
+    """
+    scrubbed = _RE_UUID.sub(
+        lambda m: " " if _is_placeholder_uuid(m.group()) else m.group(), value
+    )
+    for pattern in (_RE_EMAIL, _RE_LONG_NUM, _RE_UUID, _RE_HOME_PATH):
+        m = pattern.search(scrubbed)
+        if m:
+            return m.group()
+    return None
+
+
 def _scan_for_pii(
     tool_name: str,
     obj: Any,
@@ -267,12 +302,10 @@ def _scan_for_pii(
     if isinstance(obj, str):
         if _is_placeholder(obj):
             return
-        for pattern in (_RE_EMAIL, _RE_LONG_NUM, _RE_UUID, _RE_HOME_PATH):
-            m = pattern.search(obj)
-            if m:
-                preview = obj[:80] + ("..." if len(obj) > 80 else "")
-                findings.append((tool_name, path, preview))
-                return  # one finding per value is enough
+        if _find_pii(obj) is not None:
+            preview = obj[:80] + ("..." if len(obj) > 80 else "")
+            findings.append((tool_name, path, preview))
+            return  # one finding per value is enough
     elif isinstance(obj, dict):
         for k, v in obj.items():
             _scan_for_pii(tool_name, v, f"{path}.{k}" if path else k, findings)
