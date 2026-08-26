@@ -253,6 +253,47 @@ launch = "https://mcp.openzeppelin.com/contracts/solidity/mcp"
 auth = "none"
 notes = "OpenZeppelin Solidity contracts MCP endpoint. One of four near-identical variants (solidity/cairo/stellar/stylus) — drift-detection material."
 
+# --- openzeppelin-cairo / -stellar / -stylus ---
+# The three sibling variants of openzeppelin-solidity. Verified 2026-08-26: all three
+# answer `initialize` with 200 and no auth. Added as a set on purpose — four near-identical
+# surfaces are the cheapest available `mcpgen check` drift-detection material in the matrix.
+[[server]]
+name = "openzeppelin-cairo"
+transport = "http"
+launch = "https://mcp.openzeppelin.com/contracts/cairo/mcp"
+auth = "none"
+notes = "OpenZeppelin Cairo contracts MCP endpoint. Sibling variant of openzeppelin-solidity; the set exists to test drift detection across near-identical surfaces."
+
+[[server]]
+name = "openzeppelin-stellar"
+transport = "http"
+launch = "https://mcp.openzeppelin.com/contracts/stellar/mcp"
+auth = "none"
+notes = "OpenZeppelin Stellar contracts MCP endpoint. Sibling variant of openzeppelin-solidity; the set exists to test drift detection across near-identical surfaces."
+
+[[server]]
+name = "openzeppelin-stylus"
+transport = "http"
+launch = "https://mcp.openzeppelin.com/contracts/stylus/mcp"
+auth = "none"
+notes = "OpenZeppelin Stylus contracts MCP endpoint. Sibling variant of openzeppelin-solidity; the set exists to test drift detection across near-identical surfaces."
+
+# --- firecrawl ---
+# EVAL_SERVER_CANDIDATES.md lists this as Tier B (vendor API key), but verified 2026-08-26:
+#   POST https://mcp.firecrawl.dev/v2/mcp -> 200, no credentials required.
+#   serverInfo firecrawl-fastmcp 3.24.1; instructions state the unauthenticated endpoint
+#   exposes Search, Scrape and Parse under usage limits, and that an OAuth connection or
+#   `Authorization: Bearer <api key>` additionally exposes account and research tools.
+# Entered as bearer auth for the full surface: set FIRECRAWL_API_KEY before eval. Dropping
+# the header still works (anonymous tier: Search, Scrape, Parse under usage limits), so a
+# missing key degrades the tool surface rather than failing the handshake.
+[[server]]
+name = "firecrawl"
+transport = "http"
+launch = "https://mcp.firecrawl.dev/v2/mcp"
+auth = "bearer:FIRECRAWL_API_KEY"
+notes = "Firecrawl MCP endpoint. Chosen as the canonical case where a scrape tool's inputSchema says nothing about the output payload. The bearer key unlocks the account and research tools on top of the anonymous Search/Scrape/Parse tier."
+
 # ============================================================================
 # Tier C candidates (remote, OAuth 2.1)
 # Source: ../mcp-client-kit-marketing/EVAL_SERVER_CANDIDATES.md §3 "Tier C"
