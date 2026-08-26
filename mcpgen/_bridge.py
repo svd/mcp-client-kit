@@ -42,8 +42,9 @@ import threading
 import time
 import warnings
 import webbrowser
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlparse
@@ -1340,6 +1341,194 @@ def _oauth_error_code(resp: httpx.Response) -> str | None:
     return codes[0].strip() or None
 
 
+def _stored_tokens(storage: FileTokenStorage) -> dict:
+    """The token mapping currently in *storage*, or ``{}``.
+
+    Keyed off ``storage._key`` rather than a name passed alongside: the storage already
+    holds the server it was built for, and a caller supplying a different one would read
+    the wrong entry without saying so.
+    """
+    return (storage._load().get(storage._key) or {}).get("tokens") or {}
+
+
+def _verify_login_took(storage: FileTokenStorage, before: dict, started: float) -> None:
+    """Check that a returned ``login()`` actually left a usable credential behind.
+
+    *started* is the wall clock immediately before ``login()``, used only to tell a write
+    this login made from one that was already there.
+
+    ``login()`` reports success when the authorization server issued a token, which says
+    nothing about whether the store kept it or the result is usable. Both failures leave
+    a caller that logs in on demand prompting forever: the browser round keeps succeeding
+    and the condition that triggered it keeps being true.
+
+    Checked here, on the call that just prompted, rather than remembered across calls. A
+    later call cannot tell these apart from an ordinary expiry — a revoked grant and a
+    login that never took both present as "a token is present and the server refuses it"
+    — so the distinction has to be drawn while the before-state is still known.
+
+    Usable means what the rest of the file means by it: ``get_tokens`` and
+    ``_pre_flight_refresh`` both treat a token as absent from ``expires_at - _MARGIN``
+    onwards, so a credential landing inside that window is one the very next call sends
+    back to the browser. Comparing against bare ``expires_at`` here would wave through
+    exactly the loop this check exists to close.
+
+    Landing inside that window is not by itself a loop, though, and the three cases split
+    on the lifetime the token endpoint reported:
+
+    * ``expires_in <= _MARGIN`` — the token is absent from the instant it is written.
+      Reported whatever else is cached. A refresh *could* in principle renew into a longer
+      lifetime, since the refresh response carries its own ``expires_in``, but a server
+      handing out sub-margin tokens on code exchange has given no reason to expect its
+      refresh responses differ — and accepting on that hope reopens the unbounded prompt
+      loop for the server where they do not: renew, still inside the margin, ``get_tokens``
+      answers ``None``, browser again, every call.
+    * ``expires_in > _MARGIN``, nothing cached to refresh with — the post-login check ate
+      the slack, and with no refresh token, ``client_id`` or ``token_endpoint`` the next
+      call can only prompt. Also a loop.
+    * ``expires_in > _MARGIN`` and refreshable — the next call's pre-flight renews
+      out-of-band into a token that clears the margin. This works, and blocking it would
+      hard-fail a short-lifetime-plus-refresh-token server, which is a recommended OAuth
+      hardening pattern rather than a defect.
+
+    The two loop cases raise ``LoginWontHelp``, as does a store that holds nothing new:
+    repeating an OAuth round that already worked cannot fix any of them. ``from None`` suppresses
+    the ``ReauthenticationRequired`` the re-auth caller is handling when it raises — that
+    cause describes the *stale* credential, not the new one being rejected here. The
+    first-time caller has no active exception, where it is a harmless no-op.
+    """
+    entry = storage._load().get(storage._key) or {}
+    after = entry.get("tokens") or {}
+    if not after or after == before:
+        # Read `_backend` after the load, not before: `_keyring_load` falls back to the file
+        # on a read failure and flips the attribute as it goes, so a name taken earlier can
+        # describe a store the value did not come from.
+        if storage._backend == "keyring":
+            _raise_if_login_fell_back_to_file(storage, before, after, started)
+        store = "the OS keychain" if storage._backend == "keyring" else str(storage._path)
+        # `_lock_backend` keeps the backend this instance resolved to, so the two differing
+        # means the keychain failed a read mid-call and this instance dropped to the file.
+        # `login()` resolves afresh, so it may have written the keychain after all, and the
+        # verdict is then about a store nothing else will read — say so rather than assert
+        # permanence a retry in a new process would contradict.
+        flipped = storage._lock_backend == "keyring" and storage._backend == "file"
+        closing = (
+            "The OS keychain was unusable during this call and this check dropped to the "
+            "file, so a retry may find the credential where this could not look."
+            if flipped
+            else "Logging in again would repeat a round that already succeeded."
+        )
+        raise LoginWontHelp(
+            f"Login for {storage._key} completed, but {store} holds no new credential "
+            f"afterwards. The token was issued and then not kept — a store that accepted the "
+            f"write without persisting it, or another process clearing the entry. {closing}"
+        ) from None
+
+    expires_at = after.get("expires_at")
+    if expires_at is None or time.time() < expires_at - _MARGIN:
+        return
+
+    # `_serialize_tokens` writes the two together, so a stored `expires_at` normally comes
+    # with the lifetime the token endpoint reported. Absent, the margin is all there is to
+    # go on, which is the refreshable question below rather than a verdict of its own.
+    expires_in = after.get("expires_in")
+    refreshable = _can_pre_flight_refresh(entry, after)
+    if expires_in is not None and int(expires_in) <= _MARGIN:
+        # Decided here rather than hedged in the text: a retry costs a browser round when
+        # the entry cannot renew, which is the round the first half of the message just
+        # called pointless.
+        next_step = (
+            "The credential was stored and can refresh, so the next call renews it "
+            "out-of-band and may land on a longer lifetime — retry before logging in again."
+            if refreshable
+            else "Nothing cached can renew it either, so only a server that issues longer lifetimes will help."
+        )
+        raise LoginWontHelp(
+            f"Login for {storage._key} completed, but the token endpoint reported a lifetime of "
+            f"{int(expires_in)}s, inside the {_MARGIN}s margin every reader here applies — the "
+            f"token counts as absent from the moment it is written, so another login would only "
+            f"repeat this. {next_step}"
+        ) from None
+
+    if refreshable:
+        return  # the next call's pre-flight renews out-of-band, clear of the margin
+
+    lifetime = f"the {int(expires_in)}s lifetime" if expires_in is not None else "the lifetime"
+    raise LoginWontHelp(
+        f"Login for {storage._key} completed, but {lifetime} it issued is already spent — the "
+        f"post-login check ran inside it, and a token counts as absent {_MARGIN}s before its "
+        f"expiry. Nothing cached can renew it: a pre-flight refresh needs a refresh_token, a "
+        f"client_id and a token_endpoint, and this entry is missing at least one. Every call "
+        f"could only prompt again."
+    ) from None
+
+
+def _raise_if_login_fell_back_to_file(storage: FileTokenStorage, before: dict, after: dict, started: float) -> None:
+    """Name a split store when this instance reads the keychain and login could not write it.
+
+    Both keychain states are needed and they are not interchangeable. *before* is what the
+    file must differ from to count as a fallback write; *after* is what the keychain holds
+    now, which is what the message describes. They diverge when the keychain accepted
+    login's stash-pop and then refused the token save, leaving it empty while *before* is
+    not — where describing it from *before* would name an entry that is no longer there.
+
+    ``login()`` builds its own ``FileTokenStorage``. A keychain it cannot write — an ACL
+    denying writes, or a read that failed on its instance and not on this one — flips *that*
+    instance to the file backend mid-login, so the new token
+    lands in ``credentials.json`` while this instance — and every later instance, since
+    ``resolve_cred_backend`` re-resolves and ``_detect_keyring`` never probes a write —
+    goes on reading the keychain. The credential exists and nothing will ever read it.
+
+    So the verdict is unchanged and correct: another browser round repeats the same
+    divergence. Only the diagnosis differs, and it has to, because the generic message
+    says the token was not kept, which here is false in a way that sends the operator
+    looking in the wrong place.
+
+    Silent unless the file was written during this login, so drift in ``_keyring_save``'s
+    fallback costs wording rather than a verdict. The mtime is what separates a fallback
+    write from the ordinary residue of ``mcpgen migrate-creds file keyring``, which keeps
+    the source file (``purge`` defaults to false) — that leftover differs from the keychain
+    entry as reliably as a fallback write does, and calling it one would send the operator
+    to a credential months out of date.
+    """
+    try:
+        if storage._path.stat().st_mtime < started:
+            return
+        file_after = (storage._file_load().get(storage._key) or {}).get("tokens") or {}
+    except Exception:
+        return  # an unreadable file is not a diagnosis; fall through to the generic message
+    if not file_after or file_after == before:
+        return
+    held = "still holds the old entry" if after else "holds no entry"
+    raise LoginWontHelp(
+        f"Login for {storage._key} completed, but the OS keychain {held} while the new token "
+        f"went to {storage._path}: login could not write the keychain and fell back to the "
+        f"file — which the keyring backend never reads. Logging in again would repeat "
+        f"exactly that. Repair the keychain "
+        f"item's access control, or read from the file instead with `--cred-backend file` "
+        f"or MCPGEN_CRED_BACKEND=file, which picks up the token already there. Not "
+        f"`migrate-creds`: it merges source over target, so copying the keychain onto the "
+        f"file would overwrite that token with the stale one."
+    ) from None
+
+
+def _can_pre_flight_refresh(entry: dict, tokens: dict) -> bool:
+    """Whether ``_pre_flight_refresh`` has everything it needs to renew *entry*.
+
+    The three guards below it raise ``ReauthenticationRequired`` — a browser prompt —
+    one per missing field, and it keeps those separate messages rather than calling this,
+    since a caller who cannot refresh wants to know *which* piece is missing. This states
+    the same condition for a caller that only needs the answer, and has to stay in step
+    with them: a fourth requirement added there and not here would let
+    ``_verify_login_took`` accept a credential that then prompts on every call.
+    """
+    return bool(
+        tokens.get("refresh_token")
+        and (entry.get("client_info") or {}).get("client_id")
+        and entry.get("token_endpoint")
+    )
+
+
 async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> None:
     """Refresh access token if near/past expiry via plain httpx (no MCP SDK).
 
@@ -1404,7 +1593,9 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     # form-encoded regardless (GitHub's does) is handled by the form-encoded fallback in
     # `_oauth_error_code`.
     try:
-        async with httpx.AsyncClient() as client:
+        # No auth flow runs on this client, so its default headers are enough to carry the
+        # User-Agent — httpx would otherwise name itself here and nothing would name mcpgen.
+        async with httpx.AsyncClient(headers={"User-Agent": _user_agent()}) as client:
             resp = await client.post(token_endpoint, data=payload, headers={"Accept": "application/json"})
     except Exception as exc:  # noqa: BLE001 — the Raises contract above admits exactly two types
         # Not `httpx.HTTPError`: `InvalidURL` and `CookieConflict` derive from `Exception`
@@ -1512,6 +1703,44 @@ async def _pre_flight_refresh(server_name: str, storage: FileTokenStorage) -> No
     )
 
 
+def package_version() -> str:
+    """The installed mcp-client-kit version, or ``"unknown"`` outside an installed tree."""
+    from importlib.metadata import version as _pkg_version
+
+    try:
+        return _pkg_version("mcp-client-kit")
+    except Exception:  # noqa: BLE001 — an uninstalled tree still has to run
+        return "unknown"
+
+
+@lru_cache(maxsize=1)
+def _user_agent() -> str:
+    """The identity mcpgen presents to a server that has none from the caller.
+
+    Cached because `importlib.metadata` re-walks ``sys.path`` on every lookup and the
+    answer is fixed for the process. A test that fakes the version must `cache_clear()`.
+    """
+    return f"mcpgen/{package_version()} (python-httpx)"
+
+
+def _user_agent_hook(user_agent: str) -> Callable[[httpx.Request], Awaitable[None]]:
+    """A request event hook that names *user_agent* on requests carrying no UA of their own.
+
+    Load-bearing for OAuth against a bot-protected host: ``mcp.client.auth.oauth2``
+    hand-builds its ``httpx.Request`` objects and yields them from the auth flow, and httpx
+    does not merge client default headers into requests yielded that way. So metadata
+    discovery and dynamic registration go out with no User-Agent at all, and a Cloudflare
+    WAF answers those 403 while the client's own requests — which do carry the client
+    headers — succeed. A request event hook is the one place that fires on both, which is
+    why the client's ``headers=`` cannot do this job alone.
+    """
+
+    async def _ensure_user_agent(request: httpx.Request) -> None:
+        request.headers.setdefault("user-agent", user_agent)
+
+    return _ensure_user_agent
+
+
 @asynccontextmanager
 async def _open_http(url: str, *, headers: dict[str, str] | None = None, auth: httpx.Auth | None = None):
     """Open a StreamableHTTP transport, yielding (read, write, get_session_id).
@@ -1520,7 +1749,26 @@ async def _open_http(url: str, *, headers: dict[str, str] | None = None, auth: h
     removed ``streamablehttp_client``) with an MCP-default httpx client so
     callers can still inject headers or an auth handler.
     """
+    # A User-Agent the caller set is the identity they asked for, and it has to reach the
+    # auth-flow requests too — where only the hook can put it. The caller's spelling is
+    # dropped in favour of the canonical one rather than merged alongside it: the header
+    # block comes out of hand-written server config, where `user-agent` is a natural way
+    # to write it, and keeping both keys would put the field on the wire twice. RFC 9110
+    # §5.5 makes User-Agent a singleton, and a doubled one is the sort of anomaly the bot
+    # filters this hook exists for score against.
+    caller = headers or {}
+    caller_key = next((k for k in caller if k.lower() == "user-agent"), None)
+    user_agent = caller[caller_key] if caller_key else _user_agent()
+    headers = {"User-Agent": user_agent, **{k: v for k, v in caller.items() if k.lower() != "user-agent"}}
     async with create_mcp_http_client(headers=headers, auth=auth) as client:
+        # The OAuth handshake runs on this client, so this is where the User-Agent hook
+        # has to go — the headers above never reach the requests the flow hand-builds.
+        # `create_mcp_http_client` takes no `event_hooks`, hence the assignment after
+        # construction; it keeps whatever hooks the client already carries.
+        client.event_hooks = {
+            **client.event_hooks,
+            "request": [*client.event_hooks.get("request", []), _user_agent_hook(user_agent)],
+        }
         async with streamable_http_client(url, http_client=client) as streams:
             yield streams
 
@@ -2464,6 +2712,7 @@ async def ensure_login(
     try:
         await _pre_flight_refresh(server_name, storage)
     except ReauthenticationRequired:
+        before, started = _stored_tokens(storage), time.time()
         await login(
             server_name,
             creds_path,
@@ -2474,8 +2723,13 @@ async def ensure_login(
             headless=headless,
             callback_timeout=callback_timeout,
         )
+        # Only reached when login() returned: a cancelled consent screen, a callback
+        # timeout and an unpasted URL propagate from the call above, and none of those
+        # says the store is at fault or should cost the caller its retry.
+        _verify_login_took(storage, before, started)
         return
     if await storage.get_tokens() is None:  # first-time: no token cached at all
+        before, started = _stored_tokens(storage), time.time()
         await login(
             server_name,
             creds_path,
@@ -2486,6 +2740,7 @@ async def ensure_login(
             headless=headless,
             callback_timeout=callback_timeout,
         )
+        _verify_login_took(storage, before, started)
 
 
 async def ensure_login_all(

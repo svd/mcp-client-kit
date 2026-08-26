@@ -1,6 +1,74 @@
 # Changelog
 
-## [Unreleased] — 0.8.0
+## [Unreleased] — 0.9.0
+
+## [0.8.0] — 2026-08-26
+
+### Fixed
+
+- **`mcpgen login` could not authenticate against a server behind bot protection.**
+  The OAuth handshake sent no `User-Agent` at all: `mcp.client.auth.oauth2` hand-builds
+  its `httpx.Request` objects and yields them from the auth flow, and httpx does not merge
+  client default headers into requests yielded that way — so metadata discovery and dynamic
+  client registration went out bare and a Cloudflare filter answered them `403 Access
+  Denied`, while the client's own requests succeeded. mcpgen now names itself
+  (`mcpgen/<version> (python-httpx)`) through a request event hook, which is the one place
+  that fires on both kinds of request, and on the token-refresh client's headers. A
+  `User-Agent` supplied in a server's configured headers still wins.
+
+- **A caller logging in on demand for a credential that never takes prompted every time.**
+  `login()` reports success when the authorization server issued a token, which says nothing
+  about whether the store kept it or the result is usable. Two failures follow from that and
+  both loop: a store that holds nothing new afterwards — a backend that accepts the write
+  without persisting it, an entry another process keeps clearing — and a token whose
+  lifetime is too short to survive the freshness margin every read applies, which the next
+  call treats as absent. Each browser round keeps succeeding and the condition that
+  triggered it keeps being true. `ensure_login` now checks the store on the call that
+  prompted and raises `LoginWontHelp` for either, so the loop stops at one prompt.
+
+  On the `keyring` backend the "nothing new" message distinguishes a split store. A keychain
+  `login()`'s own storage instance could not use — a write its ACL denied, or a read that
+  failed there and not in the caller — flips that instance to the file mid-login, so the
+  token lands in `credentials.json` while every keyring
+  backed read — this instance and every later one, since `resolve_cred_backend` re-resolves
+  and `_detect_keyring` never probes a write — still consults the keychain. The verdict is
+  the same, because nothing will ever read that token and another browser round repeats the
+  split; the message names the file and the two fixes rather than claiming the token was
+  not kept.
+
+  The same message stops short of claiming permanence when the *caller's* keychain read is
+  what failed: this instance then drops to the file for the rest of its life while `login()`
+  may have written the keychain successfully, so it reports that a retry can find what this
+  check could not look at.
+
+  The freshness test is the file's own: `get_tokens` and `_pre_flight_refresh` treat a
+  token as absent from `expires_at - _MARGIN` onwards, so the check does too. `expires_at`
+  is computed from the local clock at the moment of the write, never sent by the
+  authorization server, so a credential failing this test is never a clock to correct.
+
+  Inside that margin the verdict splits on the lifetime the token endpoint reported, which
+  `_serialize_tokens` stores alongside the deadline. A lifetime at or under `_MARGIN` is
+  reported whatever else is cached: the token is absent from the instant it is written, and
+  a server handing those out on code exchange gives no reason to expect its refresh
+  responses differ — where they do not, accepting would renew into another margin-dead
+  token and open the browser on every call. A longer lifetime that the post-login check
+  merely spent is reported only when nothing cached can renew it;
+  where a refresh token, `client_id` and `token_endpoint` are all present, the next call's
+  pre-flight renews out-of-band and the setup works, so it is accepted. Short access tokens
+  paired with refresh tokens are a recommended hardening pattern, and blocking them on how
+  long `initialize()` and `list_tools()` happened to take would be a false alarm.
+
+  Checked on that call rather than remembered across calls, because later on the two are
+  indistinguishable from an ordinary expiry: a revoked grant and a login that never took
+  both present as "a token is present and the server refuses it". Comparing the store
+  against its own before-state is only possible while that state is still known. A process
+  that outlives its grant therefore still logs in again whenever it genuinely needs to.
+
+  A login that *raises* is untouched — a cancelled consent screen, a callback timeout and an
+  unpasted URL keep their own types and their retry. `mcpgen login` and a direct `login()`
+  call do not run the check: it belongs to the automatic path, which is the one that can
+  loop, and an explicit login should report what happened rather than police a store it had
+  no say over.
 
 ## [0.7.0] — 2026-08-25
 

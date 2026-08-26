@@ -938,15 +938,8 @@ def _add_conn_args(p: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from importlib.metadata import version as _pkg_version
-
-    try:
-        _version = _pkg_version("mcp-client-kit")
-    except Exception:
-        _version = "unknown"
-
     parser = argparse.ArgumentParser(prog="mcpgen")
-    parser.add_argument("--version", action="version", version=f"mcpgen {_version}")
+    parser.add_argument("--version", action="version", version=f"mcpgen {_bridge.package_version()}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     cg = sub.add_parser("codegen", help="generate typed wrappers for a server")
