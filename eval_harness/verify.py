@@ -117,7 +117,8 @@ def check_signatures(server_py: Path, shapes_json: Path) -> CheckResult:
         n = len(inconclusive)
         return skip_(
             "signatures",
-            f"probe_inconclusive: {n} tool(s) returned quota/auth errors — shapes unknown: {names}",
+            f"probe_inconclusive: {n} tool(s) had no observable success payload "
+            f"— shapes unknown: {names}",
         )
 
     failures: list[str] = []
@@ -346,6 +347,78 @@ def _is_mutating(tool_name: str) -> bool:
     return any(verb in name_lower for verb in _MUTATING_VERBS)
 
 
+# ── Live-call retry ──────────────────────────────────────────────────────────
+
+# A transient vendor hiccup is not a statement about the generated wrapper, but
+# a bare `fail_` here reads in EVAL_REPORT.md as "the wrapper does not
+# round-trip". Retry the narrow set of causes that are demonstrably the
+# vendor's, and nothing else: a 404, a 403 or a TypeError is a real finding and
+# must fail on the first attempt.
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF = (2.0, 5.0)  # seconds before attempt 2, then before attempt 3
+_CALL_TIMEOUT = 30  # per attempt, not total
+_RETRYABLE_STATUS = frozenset({408, 429, 502, 503, 504})
+_STATUS_IN_MESSAGE = re.compile(r"\b(408|429|502|503|504)\b")
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """True when the exception names a transport fault or a retryable status."""
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        # An exception that carries a status has already answered the question.
+        return status in _RETRYABLE_STATUS
+    # MCP servers commonly re-raise a vendor failure as a plain RuntimeError
+    # whose only record of the status is the message text.
+    return bool(_STATUS_IN_MESSAGE.search(str(exc)))
+
+
+def _call_once(fn: Any, caller: Any, probed_args: dict[str, Any]) -> Any:
+    """Run one live call, bounded by _CALL_TIMEOUT, from sync or async context."""
+    import asyncio  # noqa: PLC0415
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        import concurrent.futures  # noqa: PLC0415
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, fn(caller, **probed_args))
+            return future.result(timeout=_CALL_TIMEOUT)
+    # Both paths must be bounded, or a hung server hangs the whole verifier.
+    return asyncio.run(asyncio.wait_for(fn(caller, **probed_args), _CALL_TIMEOUT))
+
+
+def _call_with_retry(
+    fn: Any, caller: Any, probed_args: dict[str, Any]
+) -> tuple[Any, int]:
+    """Return (result, attempt_number). Raises the last exception if all fail.
+
+    Only exceptions are retried, so a well-formed result — including an
+    error-shaped one — is returned to the shape validation below and never
+    re-called.
+    """
+    import time  # noqa: PLC0415
+
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        try:
+            return _call_once(fn, caller, probed_args), attempt
+        except Exception as e:  # noqa: BLE001, PERF203
+            if attempt == _RETRY_ATTEMPTS or not _is_retryable(e):
+                # The caller reports how many live calls were actually made;
+                # deriving it from the final exception alone would undercount
+                # a run whose first attempt was transient and whose second
+                # was not.
+                e._eval_attempts = attempt  # noqa: SLF001
+                raise
+            time.sleep(_RETRY_BACKOFF[attempt - 1])
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def check_roundtrip(
     spec: ServerSpec, server_dir: Path, shapes_json: Path
 ) -> CheckResult:
@@ -360,7 +433,7 @@ def check_roundtrip(
     candidate_shape: dict[str, Any] | None = None
     for tool_name, shape in shapes.items():
         # An inconclusive probe invalidates every reading of that shape, including
-        # a return_model inferred from a quota/auth error body, so it must never be
+        # a return_model inferred from an error body, so it must never be
         # replayed live. Note this check is deliberately narrower than the one in
         # check_signatures: that check validates EVERY shape against the module, so
         # a single unknown shape sinks it; roundtrip only needs ONE trustworthy tool,
@@ -390,8 +463,8 @@ def check_roundtrip(
             names = ", ".join(inconclusive)
             return skip_(
                 "roundtrip",
-                f"probe_inconclusive: {n} tool(s) returned quota/auth errors — "
-                f"shapes unknown: {names}",
+                f"probe_inconclusive: {n} tool(s) had no observable success "
+                f"payload — shapes unknown: {names}",
             )
         if any(shape.get("return_model") is not None for shape in shapes.values()):
             return skip_("roundtrip", "only_mutating_shaped_tools")
@@ -513,27 +586,13 @@ def check_roundtrip(
     expected_fields: dict[str, Any] = candidate_shape.get("fields", {})
 
     try:
-        import asyncio  # noqa: PLC0415
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop is not None and loop.is_running():
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, fn(caller, **probed_args))
-                result = future.result(timeout=30)
-        else:
-            result = asyncio.run(fn(caller, **probed_args))
+        result, attempts = _call_with_retry(fn, caller, probed_args)
     except Exception as e:  # noqa: BLE001
         tb = traceback.format_exc()
         return fail_(
             "roundtrip",
             f"live call raised {type(e).__name__}: {e}",
-            extra={"traceback": tb},
+            extra={"traceback": tb, "attempts": getattr(e, "_eval_attempts", 1)},
         )
 
     # Validate result shape
@@ -566,7 +625,11 @@ def check_roundtrip(
                     f"result dict has none of the expected fields {list(expected_fields.keys())!r}",
                 )
 
-    return pass_("roundtrip", f"live call to '{candidate_name}' returned typed result")
+    detail = f"live call to '{candidate_name}' returned typed result"
+    if attempts > 1:
+        # Keep the flakiness visible without letting it change the verdict.
+        detail += f" (succeeded on attempt {attempts})"
+    return pass_("roundtrip", detail)
 
 
 # ── Modes detection ───────────────────────────────────────────────────────────

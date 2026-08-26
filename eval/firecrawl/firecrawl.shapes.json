@@ -1,41 +1,27 @@
 {
   "firecrawl_agent_status": {
     "unwrap": [],
-    "return_model": "AgentJobStatus",
+    "return_model": null,
     "input_overrides": {},
-    "fields": {
-      "success": "bool",
-      "status": "str",
-      "data": "dict",
-      "model": "str",
-      "expiresAt": "str",
-      "creditsUsed": "int"
-    },
+    "fields": {},
     "source": "live",
     "probed_args": {
       "id": "00000000-0000-4000-8000-000000000000"
     },
-    "probe_args_scrubbed": true
+    "_observed_shape": "str",
+    "_probe_status": "inconclusive"
   },
   "firecrawl_check_crawl_status": {
     "unwrap": [],
-    "return_model": "CrawlStatus",
+    "return_model": null,
     "input_overrides": {},
-    "fields": {
-      "id": "str",
-      "status": "str",
-      "completed": "int",
-      "total": "int",
-      "creditsUsed": "int",
-      "expiresAt": "str",
-      "next": "Any | None",
-      "data": "list"
-    },
+    "fields": {},
     "source": "live",
     "probed_args": {
       "id": "00000000-0000-4000-8000-000000000000"
     },
-    "probe_args_scrubbed": true
+    "_observed_shape": "str",
+    "_probe_status": "inconclusive"
   },
   "firecrawl_developer_search": {
     "unwrap": [],

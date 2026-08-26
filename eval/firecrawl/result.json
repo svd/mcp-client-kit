@@ -11,10 +11,10 @@
   },
   "check_details": {
     "ast": "",
-    "signatures": "probe_inconclusive: 3 tool(s) returned quota/auth errors \u2014 shapes unknown: firecrawl_monitor_check, firecrawl_monitor_checks, firecrawl_monitor_get",
+    "signatures": "probe_inconclusive: 5 tool(s) had no observable success payload \u2014 shapes unknown: firecrawl_agent_status, firecrawl_check_crawl_status, firecrawl_monitor_check, firecrawl_monitor_checks, firecrawl_monitor_get",
     "idempotency": "offline determinism check (real tool schemas from firecrawl.mcpgen.json)",
     "pii": "",
-    "roundtrip": "live call to 'firecrawl_agent_status' returned typed result"
+    "roundtrip": "live call to 'firecrawl_map' returned typed result"
   },
   "modes_hit": [
     "A",

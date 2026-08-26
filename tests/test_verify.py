@@ -690,3 +690,168 @@ def test_verify_server_missing_shapes_is_a_gap_not_a_pass(tmp_path: Path) -> Non
     result = verify_server(spec, base_dir=tmp_path)
     assert result["checks"]["roundtrip"] == "skip"
     assert result["verdict"] == "partial", result["verdict"]
+
+
+def test_probe_inconclusive_detail_states_no_cause() -> None:
+    """_probe_status carries no cause, so neither check may name one.
+
+    The marker is a single opaque flag: a 404 "no such object", an expired
+    token and an exhausted quota all reach it identically. Naming one is a
+    diagnosis the run did not observe, and it is committed into result.json.
+    """
+    import inspect
+
+    from eval_harness import verify as verify_mod
+
+    source = inspect.getsource(verify_mod)
+    for line in source.splitlines():
+        if "probe_inconclusive:" not in line:
+            continue
+        lowered = line.lower()
+        assert "quota" not in lowered and "auth" not in lowered, (
+            f"probe_inconclusive detail names an unobserved cause: {line.strip()}"
+        )
+
+
+# ── Roundtrip retry ──────────────────────────────────────────────────────────
+
+
+class _Boom(RuntimeError):
+    """A vendor failure re-raised with a status only in its message."""
+
+
+def _stub_fn(script: list[object]):
+    """Build an async wrapper-shaped callable that plays `script` in order."""
+    calls: list[int] = []
+
+    async def fn(_caller: object, **_kwargs: object) -> object:
+        calls.append(1)
+        item = script[len(calls) - 1]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    return fn, calls
+
+
+def test_retry_recovers_from_transient_5xx(monkeypatch) -> None:
+    """Two 503s then a result is a pass, not a wrapper defect."""
+    from eval_harness import verify as v
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    fn, calls = _stub_fn(
+        [
+            _Boom("Request failed with status code 503"),
+            _Boom("Request failed with status code 503"),
+            {"ok": True},
+        ]
+    )
+    result, attempts = v._call_with_retry(fn, object(), {})
+    assert result == {"ok": True}
+    assert attempts == 3
+    assert len(calls) == 3
+
+
+def test_retry_does_not_widen_to_non_transient_errors(monkeypatch) -> None:
+    """A 404 is a real finding: fail on the first attempt, no retry."""
+    from eval_harness import verify as v
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    fn, calls = _stub_fn([_Boom("Request failed with status code 404")])
+    with pytest.raises(_Boom):
+        v._call_with_retry(fn, object(), {})
+    assert len(calls) == 1, "a 404 must not be retried"
+
+
+def test_retry_gives_up_after_three_attempts(monkeypatch) -> None:
+    """A persistently rate-limited host still fails — bounded, not forever."""
+    from eval_harness import verify as v
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    fn, calls = _stub_fn([_Boom("429 Too Many Requests")] * 5)
+    with pytest.raises(_Boom):
+        v._call_with_retry(fn, object(), {})
+    assert len(calls) == 3
+
+
+def test_retry_never_re_calls_on_an_error_shaped_result(monkeypatch) -> None:
+    """A returned value — even an isError payload — is never retried."""
+    from eval_harness import verify as v
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    fn, calls = _stub_fn([{"isError": True, "content": "503 upstream"}])
+    result, attempts = v._call_with_retry(fn, object(), {})
+    assert result == {"isError": True, "content": "503 upstream"}
+    assert attempts == 1
+    assert len(calls) == 1, "an error-shaped result is a finding, not a hiccup"
+
+
+def test_retry_covers_per_attempt_timeouts(monkeypatch) -> None:
+    """A bounded attempt that times out may be transient — retry it once."""
+    from eval_harness import verify as v
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    fn, calls = _stub_fn([TimeoutError("attempt exceeded 30s"), {"ok": True}])
+    result, attempts = v._call_with_retry(fn, object(), {})
+    assert result == {"ok": True}
+    assert attempts == 2
+    assert len(calls) == 2
+
+
+def test_retryable_classification_prefers_a_carried_status() -> None:
+    """An exception carrying a status has answered the question itself."""
+    from eval_harness import verify as v
+
+    class _Resp:
+        status_code = 404
+
+    class _HTTPError(RuntimeError):
+        response = _Resp()
+
+    # The message mentions 503, but the carried status is authoritative.
+    assert not v._is_retryable(_HTTPError("gateway said 503 earlier"))
+
+
+def test_retry_records_the_attempt_count_it_actually_reached(monkeypatch) -> None:
+    """A transient first attempt followed by a real error counts as two calls.
+
+    Deriving the count from the final exception would report 1 and hide the
+    fact that the host was already misbehaving.
+    """
+    from eval_harness import verify as v
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    fn, calls = _stub_fn(
+        [_Boom("503 Service Unavailable"), _Boom("Request failed with status code 404")]
+    )
+    with pytest.raises(_Boom) as excinfo:
+        v._call_with_retry(fn, object(), {})
+    assert len(calls) == 2
+    assert getattr(excinfo.value, "_eval_attempts", None) == 2
+
+
+def test_retry_records_full_exhaustion(monkeypatch) -> None:
+    """All three attempts spent is reported as three, not one."""
+    from eval_harness import verify as v
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    fn, _calls = _stub_fn([_Boom("429 Too Many Requests")] * 3)
+    with pytest.raises(_Boom) as excinfo:
+        v._call_with_retry(fn, object(), {})
+    assert getattr(excinfo.value, "_eval_attempts", None) == 3
+
+
+def test_sync_path_call_is_time_bounded(monkeypatch) -> None:
+    """The non-threadpool path must be bounded too, or a hang is unbounded."""
+    import asyncio
+
+    from eval_harness import verify as v
+
+    monkeypatch.setattr(v, "_CALL_TIMEOUT", 0.05)
+
+    async def hangs(_caller: object, **_kwargs: object) -> object:
+        await asyncio.sleep(10)
+        return {"never": True}
+
+    with pytest.raises(TimeoutError):
+        v._call_once(hangs, object(), {})

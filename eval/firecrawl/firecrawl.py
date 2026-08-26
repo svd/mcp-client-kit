@@ -15,26 +15,6 @@ SERVER = 'firecrawl'
 
 
 
-class AgentJobStatus(TypedDict, total=False):
-    success: bool
-    status: str
-    data: dict
-    model: str
-    expiresAt: str
-    creditsUsed: int
-
-
-class CrawlStatus(TypedDict, total=False):
-    id: str
-    status: str
-    completed: int
-    total: int
-    creditsUsed: int
-    expiresAt: str
-    next: Any | None
-    data: list
-
-
 class MapLink(TypedDict, total=False):
     url: str
     title: str
@@ -144,7 +124,7 @@ async def firecrawl_agent(caller: McpCaller, *, prompt: str, urls: list[str] | N
 firecrawl_agent.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'prompt': {'type': 'string', 'minLength': 1, 'maxLength': 10000}, 'urls': {'type': 'array', 'items': {'type': 'string', 'format': 'uri'}}, 'schema': {'type': 'object', 'propertyNames': {'type': 'string'}, 'additionalProperties': False}}, 'required': ['prompt'], 'additionalProperties': False}
 
 
-async def firecrawl_agent_status(caller: McpCaller, *, id: str) -> AgentJobStatus:
+async def firecrawl_agent_status(caller: McpCaller, *, id: str) -> Any:
     """Retrieve progress or final results for a `firecrawl_agent` job ID. A `processing` response is non-terminal and does not contain the final research result. Check again after 15–30 seconds until the status is `completed` or `failed`; complex jobs can take several minutes. If the job cannot finish within the task's available time, use `firecrawl_search` and `firecrawl_scrape` to complete the requested output.
 
     Returns job status, progress information, and result data when completed.
@@ -153,19 +133,19 @@ async def firecrawl_agent_status(caller: McpCaller, *, id: str) -> AgentJobStatu
         id:
     """
     args: dict[str, Any] = {"id": id}
-    return cast("AgentJobStatus", await caller.call(SERVER, "firecrawl_agent_status", args))
+    return await caller.call(SERVER, "firecrawl_agent_status", args)
 
 firecrawl_agent_status.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'id': {'type': 'string'}}, 'required': ['id'], 'additionalProperties': False}
 
 
-async def firecrawl_check_crawl_status(caller: McpCaller, *, id: str) -> CrawlStatus:
+async def firecrawl_check_crawl_status(caller: McpCaller, *, id: str) -> Any:
     """Retrieve the current status, progress, and available results for an existing crawl ID. This only reads Firecrawl job state and does not start or modify the crawl.
 
     Args:
         id:
     """
     args: dict[str, Any] = {"id": id}
-    return cast("CrawlStatus", await caller.call(SERVER, "firecrawl_check_crawl_status", args))
+    return await caller.call(SERVER, "firecrawl_check_crawl_status", args)
 
 firecrawl_check_crawl_status.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'id': {'type': 'string'}}, 'required': ['id'], 'additionalProperties': False}
 

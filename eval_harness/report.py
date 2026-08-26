@@ -81,9 +81,21 @@ _MODE_LEGEND = """\
 > * **Path F** = recursive / nested response structure (design note, not yet a runtime feature).\
 """
 
-_TABLE_HEADER = """\
-| Server | Transport | Auth | Mode A | Mode B | Mode C | Mode D | Path E | Path F | Verdict |
-|---|---|---|---|---|---|---|---|---|---|"""
+_TABLE_HEADER = (
+    "| Server | Engine | Transport | Auth | Mode A | Mode B | Mode C | Mode D "
+    "| Path E | Path F | Verdict |\n"
+    "|---|---|---|---|---|---|---|---|---|---|---|"
+)
+
+
+def _engine_cell(result: dict[str, Any]) -> str:
+    """The engine that produced this row's verdict.
+
+    Rendered per row because the aggregate counts below the table otherwise mix
+    releases: two rows on different engines are two different products.
+    """
+    engine = (result.get("versions") or {}).get("engine")
+    return engine or "unknown"
 
 
 def _path_cell(result: dict[str, Any], key: str) -> str:
@@ -103,7 +115,7 @@ def render_matrix(results: list[dict[str, Any]]) -> str:
         path_e = _path_cell(r, "path_e")
         path_f = _path_cell(r, "path_f")
         row = (
-            f"| {server} | {transport} | {auth} "
+            f"| {server} | {_engine_cell(r)} | {transport} | {auth} "
             f"| {mode_cell(modes, 'A')} | {mode_cell(modes, 'B')} "
             f"| {mode_cell(modes, 'C')} | {mode_cell(modes, 'D')} "
             f"| {path_e} | {path_f} | {verdict} |"
@@ -162,9 +174,10 @@ def _humanize_skip(detail: str) -> tuple[str, str, str] | None:
 
     # Prefix-matched codes (dynamic f-string messages)
     if detail.startswith("probe_inconclusive"):
-        # Emitted by both `signatures` and `roundtrip`: probes came back as quota
-        # or auth errors, so no claim about the server's shapes is supported.
-        return ("⏭", "gap", "probes blocked by quota/auth errors — shapes unknown")
+        # Emitted by both `signatures` and `roundtrip`. The marker records only
+        # that no probe returned a success payload — the cause (quota, auth, a
+        # missing object, a server-side 5xx) is not carried, so it is not named.
+        return ("⏭", "gap", "probes returned no success payload — shapes unknown")
     if detail.startswith("missing_cred_"):
         var = detail[len("missing_cred_") :]
         return ("⊘", "N/A", f"credential {var} not set")
@@ -290,7 +303,12 @@ def render_version_line(results: list[dict[str, Any]]) -> str:
                 engines.items(), key=lambda item: (item[0] is None, item[0] or "")
             )
         ]
-        return "⚠️ mixed engine versions: " + "; ".join(parts)
+        return (
+            "⚠️ mixed engine versions: "
+            + "; ".join(parts)
+            + " — the aggregate counts below span releases; "
+            "run `/rerun-eval-at-version` to re-level the corpus"
+        )
 
     engine = next(iter(engines), None) if engines else None
     ref = next(iter(refs), None) if refs else None

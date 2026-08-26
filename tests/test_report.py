@@ -328,14 +328,26 @@ def test_humanize_skip_probed_args_unexpected_type() -> None:
 
 
 def test_humanize_skip_probe_inconclusive() -> None:
-    """A quota/auth-blocked probe is a coverage gap, not a neutral N/A."""
+    """An inconclusive probe is a coverage gap, not a neutral N/A."""
     humanized = _humanize_skip(
-        "probe_inconclusive: 2 tool(s) returned quota/auth errors — shapes unknown: a, b"
+        "probe_inconclusive: 2 tool(s) had no observable success payload "
+        "\u2014 shapes unknown: a, b"
     )
     assert humanized is not None
-    icon, label, prose = humanized
+    _icon, label, prose = humanized
     assert label != "N/A", "an unestablished shape must not read as 'not applicable'"
-    assert "quota" in prose or "auth" in prose
+    assert "shapes unknown" in prose
+
+
+def test_humanize_skip_probe_inconclusive_names_no_cause() -> None:
+    """The marker carries no cause, so the prose must not invent one."""
+    humanized = _humanize_skip("probe_inconclusive: 1 tool(s) ...")
+    assert humanized is not None
+    _icon, _label, prose = humanized
+    for invented in ("quota", "auth"):
+        assert invented not in prose.lower(), (
+            f"prose asserts {invented!r}, a cause _probe_status cannot support"
+        )
 
 
 def test_humanize_skip_shapes_json_empty() -> None:
@@ -369,3 +381,50 @@ def test_detail_section_reports_error_instead_of_unknown_rows() -> None:
     )
     assert "no generated file found" in section
     assert "❓ unknown" not in section
+
+
+# ---------------------------------------------------------------------------
+# per-row engine stamp
+# ---------------------------------------------------------------------------
+
+
+def _row_for(server: str, engine: str | None) -> dict:
+    result = dict(SAMPLE_RESULT)
+    result["server"] = server
+    if engine is not None:
+        result["versions"] = {"engine": engine, "skill_ref": "v0.8.0"}
+    return result
+
+
+def test_matrix_carries_a_per_row_engine_stamp() -> None:
+    """A verdict is only comparable against the engine that produced it."""
+    output = render_matrix([_row_for("alpha", "0.8.0"), _row_for("beta", "0.9.0.dev1")])
+    header, _sep, *rows = output.splitlines()
+    assert "Engine" in header
+    alpha = next(r for r in rows if "alpha" in r)
+    beta = next(r for r in rows if "beta" in r)
+    assert "0.8.0" in alpha and "0.9.0.dev1" not in alpha
+    assert "0.9.0.dev1" in beta
+
+
+def test_matrix_row_width_matches_header() -> None:
+    """Adding a column must not desync any row from the header."""
+    output = render_matrix([_row_for("alpha", "0.8.0"), _row_for("beta", None)])
+    widths = {len(line.split("|")) for line in output.splitlines()}
+    assert len(widths) == 1, f"ragged table: {widths}"
+
+
+def test_matrix_renders_a_missing_engine_stamp_as_unknown() -> None:
+    """An unstamped row is unknown, never silently the majority version."""
+    output = render_matrix([_row_for("alpha", "0.8.0"), _row_for("beta", None)])
+    beta = next(r for r in output.splitlines() if "beta" in r)
+    assert "unknown" in beta
+
+
+def test_mixed_version_banner_names_the_remedy() -> None:
+    """The banner must say how to re-level the corpus, not just that it is split."""
+    line = render_version_line(
+        [_row_for("alpha", "0.8.0"), _row_for("beta", "0.9.0.dev1")]
+    )
+    assert "mixed engine versions" in line
+    assert "/rerun-eval-at-version" in line

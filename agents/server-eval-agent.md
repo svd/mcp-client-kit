@@ -79,7 +79,7 @@ Three eval-harness–specific rules the skill fallback does not cover:
 - **Runner generation is not your job.** `eval/{{SERVER_NAME}}/run.py` is written by the harness's
   own verify stage after you finish, via `mcp-client-kit:generate-mcp-runner`. Do not generate it,
   and do not report its absence as a skipped step or a finding.
-- **Quota/auth error responses:** if every non-empty tool response is a quota/auth error string (e.g. "Monthly quota exceeded", "Unauthorized"), add `"_probe_status": "inconclusive"` to each affected shape entry in the shapes JSON. `verify.py` reads this field — do NOT leave it as plain `"_observed_shape": "str"`, which is indistinguishable from a genuine text-returning tool.
+- **No observable success payload:** if every non-empty response from a tool is an error rather than a result — a quota message, an auth failure, a 404 for an object that does not exist, a vendor 5xx — add `"_probe_status": "inconclusive"` to that shape entry in the shapes JSON. The cause does not matter and is not recorded; what matters is that the shape was never observed. `verify.py` reads this field — do NOT leave it as plain `"_observed_shape": "str"`, which is indistinguishable from a genuine text-returning tool.
 
 ### Write session-overview.md
 
