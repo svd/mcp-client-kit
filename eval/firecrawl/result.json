@@ -14,7 +14,7 @@
     "signatures": "",
     "idempotency": "offline determinism check (real tool schemas from firecrawl.mcpgen.json)",
     "pii": "",
-    "roundtrip": "live call to 'firecrawl_scrape' returned typed result"
+    "roundtrip": "live call to 'firecrawl_map' returned typed result"
   },
   "modes_hit": [
     "A",
@@ -24,7 +24,7 @@
   "verdict": "pass",
   "versions": {
     "engine": "0.9.0.dev1",
-    "skill_ref": "v0.0.4-159-g8cc836b",
+    "skill_ref": "v0.0.4-160-gc4ed669-dirty",
     "skill_path": "~/src/mcp-client-kit"
   }
 }

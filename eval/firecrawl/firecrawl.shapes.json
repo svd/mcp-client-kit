@@ -1,28 +1,21 @@
 {
-  "firecrawl_scrape": {
+  "firecrawl_developer_search": {
     "unwrap": [],
-    "return_model": "ScrapeResult",
+    "return_model": null,
     "input_overrides": {},
-    "fields": {
-      "markdown": "str"
-    },
+    "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "url": "https://example.com"
-      },
-      {
-        "url": "https://en.wikipedia.org/wiki/Web_scraping"
-      }
-    ],
-    "_note": "Record is top-level: {markdown, metadata}. `metadata` is an open per-page bag (og:*, robots, generator vary by site) with only scrapeId/sourceURL/url/statusCode/proxyUsed/cacheState/creditsUsed stable, so it is left unmodelled rather than typed from two pages. `markdown` is present only for the default formats=['markdown']; other `formats` values swap in html/links/screenshot keys, hence total=False.",
-    "_discriminator_note": "Pass 2 on `url` (3 sites) and `proxy` (basic/auto/enhanced) produced identical top-level shapes — inconclusive, not disproven."
+    "probed_args": {
+      "query": "python asyncio TaskGroup cancellation semantics"
+    },
+    "_observed_shape": "str",
+    "_json_unwrap": false,
+    "_note": "Tool returns markdown prose, not JSON; raw payload checked with `mcpgen call --out` -> NOT_JSON. `-> Any` (str) is the honest type."
   },
   "firecrawl_map": {
     "unwrap": [
       "links"
     ],
-    "return_container": "list",
     "return_model": "MapLink",
     "input_overrides": {},
     "fields": {
@@ -31,25 +24,20 @@
     },
     "source": "live",
     "probed_args": {
-      "url": "https://example.com"
+      "url": "https://modelcontextprotocol.io",
+      "limit": 10
     },
-    "_discriminator_note": "Pass 2 on `sitemap` (include/skip/only) gave identical element shapes; `only` returned an empty list for example.com (no sitemap), which is a data artifact, not a shape difference. Inconclusive, not disproven."
-  },
-  "firecrawl_search": {
-    "unwrap": [],
-    "return_model": "SearchResult",
-    "input_overrides": {},
-    "fields": {
-      "success": "bool",
-      "creditsUsed": "int",
-      "id": "str"
+    "_observed_shape": {
+      "links": [
+        {
+          "url": "str",
+          "title": "str"
+        },
+        "...x10"
+      ]
     },
-    "source": "live",
-    "probed_args": {
-      "query": "model context protocol",
-      "limit": 3
-    },
-    "_note": "CONFIRMED polymorphism on the array param `sources` (not scalar, so the step-2e advisory never flagged it): sources=web returns data.web[{url,title,description,position}]; sources=news returns data.news[{title,url,snippet,date,imageUrl,position}]. `data` is therefore left unmodelled and only the stable envelope scalars are typed — a generic base model (step 4 option 2). Unwrapping to data.web would silently return [] for a news or images search."
+    "return_container": "list",
+    "_note": "Vendor envelope: the record list sits under `links`."
   },
   "firecrawl_monitor_list": {
     "unwrap": [],
@@ -60,38 +48,51 @@
       "data": "list"
     },
     "source": "live",
-    "probed_args": {
-      "limit": 5
+    "probed_args": {},
+    "_observed_shape": {
+      "success": "bool",
+      "data": [
+        "<empty>"
+      ]
     },
-    "_note": "The eval account holds no monitors, so `data` came back []. The element model is unobservable at probe time; `data: list` is the hand-added empty-list placeholder. Re-probe after creating a monitor to type the element."
+    "_note": "The authenticated account owns no monitors, so `data` came back `[]` and the monitor record shape is unobservable. `data` kept as the hand-added `list` marker; re-probe after creating a monitor to type its elements."
   },
   "firecrawl_parse": {
     "unwrap": [],
     "return_model": "ParseResult",
     "input_overrides": {},
     "fields": {
+      "success": "bool"
+    },
+    "source": "live",
+    "probed_args": {
+      "filePath": "/tmp/sample.pdf",
+      "formats": [
+        "markdown"
+      ]
+    },
+    "_observed_shape": {
       "success": "bool",
       "mode": "str",
-      "message": "str"
+      "message": "str",
+      "upload": {
+        "uploadUrl": "str",
+        "uploadRef": "str",
+        "expiresAt": "str",
+        "maxSizeBytes": "int",
+        "method": "str",
+        "command": "str",
+        "fields": "dict (signed GCS POST policy)"
+      },
+      "nextToolCall": {
+        "name": "str",
+        "arguments": "dict"
+      },
+      "notes": [
+        "str"
+      ]
     },
-    "source": "live",
-    "probed_args": {
-      "filePath": "<local-file-path>"
-    },
-    "probe_args_scrubbed": true,
-    "_note": "A local `filePath` does not return parsed content: it returns a presigned-upload handshake — {success, mode, message, upload{uploadUrl, uploadRef, fields{...}, expiresAt, maxSizeBytes}, nextToolCall{name, arguments{uploadRef}}, notes[]} — instructing the caller to upload out of band and re-call with `uploadRef`. `mode` is the response discriminator; the parsed-content mode was NOT observed, because reaching it needs a raw HTTP upload, which the skill forbids. Only the fields common to both modes are typed (step 4 option 2, generic base model). A .md file is rejected outright: 'Unsupported upload type'."
-  },
-  "firecrawl_research_search_papers": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "query": "attention is all you need transformer",
-      "k": 3
-    },
-    "_note": "Returns Markdown prose, not JSON. Raw payload checked: NOT_JSON. `str` return is correct, not a probe failure."
+    "_note": "Two-phase tool on the hosted endpoint: `filePath` returns signed upload instructions (phase one, observed above), `uploadRef` returns parsed document content (phase two, NOT observed \u2014 completing it needs a raw HTTP upload, which the skill guards forbid). Only `success` is common to both phases, so it is resolved as a minimal generic base model (option 2) rather than typing the phase-one envelope as if it were the result."
   },
   "firecrawl_research_inspect_paper": {
     "unwrap": [],
@@ -100,9 +101,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "paperId": "arxiv:1706.03762"
+      "paperId": "pmid:34515826"
     },
-    "_note": "Markdown prose (raw payload checked: NOT_JSON). Pass 2 on `paperId` across arxiv:1706.03762, arxiv:2501.06425 and 10.1038/nature14539 returned `str` every time — inconclusive, but nothing to shape either way."
+    "_observed_shape": "str",
+    "_json_unwrap": false,
+    "_note": "Tool returns markdown prose, not JSON; raw payload checked with `mcpgen call --out` -> NOT_JSON. `-> Any` (str) is the honest type."
   },
   "firecrawl_research_read_paper": {
     "unwrap": [],
@@ -111,11 +114,12 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "paperId": "arxiv:1706.03762",
-      "question": "What is multi-head attention?",
-      "k": 3
+      "paperId": "pmid:34515826",
+      "question": "What reduces off-target effects of base editors?"
     },
-    "_note": "Markdown prose passages. Same family as the other research tools; left as `str`."
+    "_observed_shape": "str",
+    "_json_unwrap": false,
+    "_note": "Tool returns markdown prose, not JSON; raw payload checked with `mcpgen call --out` -> NOT_JSON. `-> Any` (str) is the honest type. Probed paper had no indexed full text; the response was the prose sentinel '(no full-text passages available for this paper)' \u2014 a valid result, not an error."
   },
   "firecrawl_research_related_papers": {
     "unwrap": [],
@@ -125,12 +129,13 @@
     "source": "live",
     "probed_args": {
       "seed_ids": [
-        "arxiv:1706.03762"
+        "pmid:34515826"
       ],
-      "intent": "Find follow-up work on efficient attention",
-      "k": 3
+      "intent": "Find papers on reducing base editor off-target activity"
     },
-    "_note": "Markdown prose. Left as `str`."
+    "_observed_shape": "str",
+    "_json_unwrap": false,
+    "_note": "Tool returns markdown prose, not JSON; raw payload checked with `mcpgen call --out` -> NOT_JSON. `-> Any` (str) is the honest type."
   },
   "firecrawl_research_search_github": {
     "unwrap": [],
@@ -139,21 +144,143 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "model context protocol server",
-      "k": 3
+      "query": "httpx connection pool leak"
     },
-    "_note": "Markdown prose (raw payload checked: NOT_JSON). Left as `str`."
+    "_observed_shape": "str",
+    "_json_unwrap": false,
+    "_note": "Tool returns markdown prose, not JSON; raw payload checked with `mcpgen call --out` -> NOT_JSON. `-> Any` (str) is the honest type."
   },
-  "firecrawl_developer_search": {
+  "firecrawl_research_search_papers": {
     "unwrap": [],
     "return_model": null,
     "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "python asyncio TaskGroup cancellation",
-      "k": 3
+      "query": "CRISPR base editing off-target effects"
     },
-    "_note": "Markdown prose (raw payload checked: NOT_JSON). Left as `str`."
+    "_observed_shape": "str",
+    "_json_unwrap": false,
+    "_note": "Tool returns markdown prose, not JSON; raw payload checked with `mcpgen call --out` -> NOT_JSON. `-> Any` (str) is the honest type."
+  },
+  "firecrawl_scrape": {
+    "unwrap": [],
+    "return_model": "ScrapeDocument",
+    "input_overrides": {},
+    "fields": {
+      "markdown": "str",
+      "html": "str",
+      "summary": "str"
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "url": "https://example.com"
+      },
+      {
+        "url": "https://example.com",
+        "formats": [
+          "markdown",
+          "html",
+          "links",
+          "summary"
+        ]
+      }
+    ],
+    "_observed_shape": {
+      "markdown": "str",
+      "html": "str",
+      "summary": "str",
+      "links": [
+        "str"
+      ],
+      "metadata": {
+        "title": "str",
+        "sourceURL": "str",
+        "url": "str",
+        "statusCode": "int",
+        "contentType": "str",
+        "creditsUsed": "int",
+        "concurrencyLimited": "bool"
+      }
+    },
+    "_note": "`formats` is a real discriminator invisible to the list advisory (array-typed): the response gains one key per requested format. Probed formats=<default> and formats=[markdown,html,links,summary]; the union is a total=False base model. `links` (list[str]) and `metadata` (nested dict) are left out of `fields` per the top-level-scalars rule; screenshot/json/branding/audio formats were not probed."
+  },
+  "firecrawl_search": {
+    "unwrap": [
+      "data"
+    ],
+    "return_model": "SearchResults",
+    "input_overrides": {},
+    "fields": {
+      "web": "list",
+      "news": "list",
+      "images": "list"
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "query": "model context protocol specification",
+        "limit": 3
+      },
+      {
+        "query": "asyncio TaskGroup cancellation",
+        "limit": 3,
+        "categories": [
+          "developer"
+        ]
+      },
+      {
+        "query": "openai news",
+        "limit": 3,
+        "sources": [
+          {
+            "type": "news"
+          }
+        ]
+      },
+      {
+        "query": "golden retriever",
+        "limit": 3,
+        "sources": [
+          {
+            "type": "images"
+          }
+        ]
+      }
+    ],
+    "_observed_shape": {
+      "data": {
+        "web": [
+          {
+            "url": "str",
+            "title": "str",
+            "description": "str",
+            "position": "int",
+            "category": "str (developer only)"
+          }
+        ],
+        "news": [
+          {
+            "title": "str",
+            "url": "str",
+            "date": "str",
+            "imageUrl": "str",
+            "position": "int"
+          }
+        ],
+        "images": [
+          {
+            "title": "str",
+            "imageUrl": "str",
+            "imageWidth": "int",
+            "imageHeight": "int",
+            "url": "str",
+            "position": "int"
+          }
+        ]
+      }
+    },
+    "_note": "Confirmed discriminator: `sources` / `categories` (both array-typed, so invisible to the list advisory \u2014 found by the description sweep). Four variants probed: default -> data.web, categories=[developer] -> data.web with an extra `category` key (the description claims `data.developer`; the server does not do that), sources=[news] -> data.news, sources=[images] -> data.images. Resolved as a generic base model (option 2) over the unwrapped `data` envelope; each bucket is present-or-absent, its item model varies by variant, so items stay untyped."
   }
 }
