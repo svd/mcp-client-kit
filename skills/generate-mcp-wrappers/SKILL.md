@@ -384,9 +384,26 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    two probes does not save the first — `merge` only ever sees the surviving part. Probe
    one, run step 3b, then probe the other and merge again; each merge folds its result
    into `<shapes-path>` before the next probe can overwrite the part.
-   **Quota / rate-limit / auth errors during probing.** If a probe returns an HTTP
-   429/401/403, a JSON `"error"` key, or a payload that is *itself* an error message
-   (the whole text is the failure, not prose that happens to mention one) — phrases
+
+   **Read the raw payload before classifying any failure — when there is one.** `probe`
+   records structure, not content: a text payload collapses to the bare shape `"str"` and
+   the words are gone. The error phrases below match against text `probe` never kept, so
+   whenever a probe yields `"str"` or an error-shaped object, capture the payload before
+   judging it:
+
+   ```bash
+   <mcpgen> call <server> <tool> --args '<same args>' --out <server>.<tool>.probe-raw.json
+   ```
+
+   A probe that writes no part file has nothing to capture — whether it died with a
+   traceback or exited on a single `[…] error:` line; `call` fails the same way and
+   writes no `--out` file either. Classify those from the error text alone: the next two
+   blocks say how.
+
+   **Quota / rate-limit / auth errors during probing.** An HTTP 429 arrives as a status
+   with no body, so it is recognized from the error line, not a payload. Otherwise: if
+   the captured payload carries a JSON `"error"` key, or is text that is *itself* an
+   error message (the whole text is the failure, not prose that mentions one) — phrases
    like `"quota exceeded"`, `"rate limit"`, `"try again later"`, `"unauthorized"`,
    `"forbidden"`, `"invalid api key"`, `"not authenticated"` — treat it as a probe
    failure. Require the phrase to be the error itself (status code, error-shaped JSON,
@@ -395,17 +412,103 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    "authentication" is not an auth error — read the surrounding content before
    concluding a probe failed.
 
-   When a probe genuinely fails this way:
-   - Set `_observed_shape: "str"` — the error payload is a `str`, which is honest.
-   - Leave `return_model: null`.
-   - Note in `session-overview.md` that the shape is an error string, not a success
-     payload; record whether the failure was a quota/rate-limit or an auth error, and
-     note what credential (env var, API key) must be set before re-running to capture
-     the real success shape.
-   - Do **not** retry more than once.
+   When a probe genuinely fails this way, the two cases are recorded differently:
+   - **The call returned, carrying an error payload.** Record the shape it actually
+     has: a bare error string observes as `"str"`, while an error-shaped JSON object is
+     parsed by the client and observes as a dict. Either way leave `return_model: null`
+     — the generated `-> Any` is correct and callers handle the error at runtime.
+   - **The transport or protocol failed.** There is no payload and therefore no shape:
+     record the tool as **unprobed** with the reason. Do not invent
+     `_observed_shape: "str"` for a call that never returned. Three markers put a failure
+     here rather than in the challenge class below:
+     - an `httpx.HTTPStatusError` reporting 429 **on the tool call**. A 429 quoted
+       inside an `[mcpgen] error:` credential line is a throttled token refresh, not
+       this — the credential rule below governs it;
+     - any `[mcpgen] error:` line naming a credential or token endpoint. Most mention
+       `mcpgen login` (in either case) after wording that varies — `OAuth re-auth
+       needed for …`, `Token refresh failed (400, invalid_grant) …`, `No refresh_token
+       for …` —
+       and some carry no such tail at all, so match on the subject, not the sentence.
+       These are **server-wide**: they are raised in the OAuth pre-flight, before any
+       tool call, so every remaining tool fails identically and there is no point
+       probing on. Two of them are transient rather than permanent — a line saying
+       `retry later` or `retry when the authorization server is back` means the token
+       endpoint was reachable but unhelpful. Wait once (the `Retry-After` if one is
+       named, else 60 s) and re-issue the server's probing **from the top**; if it
+       fails the same way, stop and record every unprobed tool with the credential note.
+       Anything else here is permanent: stop now and record them the same way;
+     - an `httpx.HTTPStatusError` reporting **401**. Only the OAuth transport intercepts
+       401 and turns it into the message above; `--bearer`, static-header, and raw-URL
+       transports install no OAuth provider, so there a stale token surfaces as a bare
+       401 — the commonest static-credential expiry.
+   - Either way, note in `session-overview.md` which case it was, whether the failure
+     was a quota/rate-limit or an auth error, and what credential (env var, API key)
+     must be set before re-running to capture the real success shape.
+   - Do **not** retry at all — the transient-credential case above excepted, and unlike
+     a challenge response (next paragraph), a quota or auth failure does not clear on a
+     backoff. A 403 or 503 is **not** classed here:
+     httpx builds its error message from the status, reason and URL alone, so a genuine
+     permission denial and a bot challenge are indistinguishable at that point — the
+     next block claims both and retries.
 
-   The generated `-> Any` return type is correct; callers must handle the error string
-   at runtime. Do not probe again hoping for a different result.
+   **Challenge / interstitial responses — retryable, unlike the above.** A bot-protection
+   interstitial is neither a shape nor a permanent failure. The tell is what the
+   *exception* looks like, not the body: a challenge page never reaches you, because
+   `probe` and `call` let httpx and SDK errors raise raw rather than excerpting the
+   response. Read it as a challenge when any of these lands on a host that answered
+   moments earlier:
+   - an `httpx.HTTPStatusError` reporting 403, or any 5xx. Its message carries the status,
+     reason and URL and never the body, so treat every one of these as a challenge
+     first — an error payload the *tool call itself* returned is the auth failure above,
+     and that one arrives as a payload with no HTTP status attached;
+   - an `McpError` reporting `Connection closed`;
+   - the probe does not return after the last `[probe]   [i/n] args=…` line — with or
+     without an `Unexpected content type: text/html` line from the SDK. An
+     interstitial served at HTTP 200 stalls the handshake indefinitely: the SDK pushes
+     that error onto a stream nothing reads, so the probe hangs instead of exiting
+     non-zero. Log line and stall are one marker, not two. `probe` has no timeout of
+     its own — bound
+     hosted probes with the harness's own timeout (never a `timeout` binary — see the
+     Guards) so this surfaces as a stall rather than a hang.
+
+   Any other transport-level exception — `httpx.ConnectError`, `ConnectTimeout`,
+   `ReadTimeout`, `RemoteProtocolError` — or an `HTTPStatusError` on a status no rule
+   above claims, belongs here too: retry once before recording the tool unprobed, since
+   a connect blip must not permanently abandon a tool.
+
+   A `[probe] error:` or `[call] error:` line that names no credential is neither class:
+   `MCP tool result has empty content`, `Unknown server …`, `config not found: …` and
+   their like are settled facts about this call, not a host under load. Record the tool
+   unprobed with the message and do not retry — no backoff changes any of them.
+
+   Do **not** record `_observed_shape` from a challenge. Retry that one tool with a fixed
+   backoff — 60 s, then 120 s, then stop — and if the third attempt still challenges,
+   record the tool as unprobed with the reason and move on. Once one tool has burned both
+   retries on a given **marker** — a status, a `Connection closed`, a stall — stop
+   retrying that marker for this server: what survives the backoff is not a challenge. A
+   403 that does is a real permission denial; a 5xx, a `Connection closed`, or a stall
+   that does is a host that is down or hanging. Keep probing the other tools — entitlement
+   is usually per tool, so most answer through a persistent 403 — and record any *further*
+   tool hitting that marker as unprobed, naming both candidate causes and saying in
+   `session-overview.md` which credential would have to be set — the actionable half if
+   the cause is entitlement, and lost if the failure is filed as a challenge.
+
+   Retry as a **separate re-issue after the batch**, never inside it: the batch form
+   aborts at the first failure under `set -e`, and its accumulator variant collects
+   failures without
+   retrying. Once a server has challenged once, widen the interval for the probes **not yet
+   issued** to ~10 s — under the accumulator form the batch has already
+   run to completion, so that means the retries and any later batch. Resuming the 2 s
+   cadence that tripped it re-trips it on the next
+   tool.
+
+   **Pacing for hosted endpoints.** Against an HTTP/remote server, leave **≥ 2 s between
+   live probes**. The multi-`--args` form fires its calls back-to-back inside a single
+   invocation, so against a hosted server split a tool's variant probes into separate,
+   paced invocations — reading the part file between them, per the overwrite rule below.
+   Parallel batch subagents are a local-`stdio` optimization — against
+   a hosted server probe from one agent at a time, or the interval cannot hold. Local
+   `stdio` servers need no pacing.
 
    Part files land at `<shapes-path>.parts/<tool>.json` (git-ignored), with the tool name
    percent-encoded — a `/` in a tool name becomes `%2F`.
