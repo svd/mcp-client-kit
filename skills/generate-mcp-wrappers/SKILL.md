@@ -16,10 +16,12 @@ keeps generation pure and re-runnable (and sets up `--check` drift later).
 ## Execution model (when to dispatch subagents)
 
 A single driver thread works for servers with ≤ ~4 selected tools. For larger servers,
-dispatch subagents to keep big payloads out of main context and parallelize network
-round-trips. The parts-based probe infrastructure (`_atomic_write_text`,
-`<shapes>.parts/<tool>.json`, `mcpgen merge`) was built for concurrent writers — the
-execution model below uses it.
+dispatch subagents to keep big payloads out of main context, and — against a local
+`stdio` server — to parallelize network round-trips. Against a hosted HTTP server the
+probe interval rules out fan-out, so subagents buy context economy only.
+
+The parts-based probe infrastructure (`_atomic_write_text`, `<shapes>.parts/<tool>.json`,
+`mcpgen merge`) supports concurrent writers — the execution model below uses it.
 
 **Hard constraint:** subagents cannot call `AskUserQuestion`. That line divides main
 from subagent:
@@ -35,7 +37,8 @@ from subagent:
 | 1 codegen stubs | inline | one command, barrier |
 | 2 select + discriminator detect | **main** | interactive — the hard line |
 | Recon | **1 subagent** | isolates discovery dumps; returns compact id + enum catalog |
-| 3 probe + draft | **batched parallel subagents** | context economy + parallelism |
+| Discriminator Pass 2 | **main** | few calls, decides the sweep's variant count |
+| 3 probe + draft | **batched parallel subagents** (local `stdio`); one agent for hosted HTTP | context economy + parallelism, bounded by the probe interval |
 | 3b merge | **main** | deterministic barrier |
 | 4 consistency + user choices | **main** | single coherent view; needs `AskUserQuestion` |
 | 5 regenerate | **main** | deterministic barrier |
@@ -170,7 +173,10 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
       Note for focus: the goal is to shape-spec tools that carry real records and
       whose payloads you want out of model context ("big dump" tools). Mutations and
-      acks rarely need a `TypedDict`.
+      acks rarely need a `TypedDict`, so the default set below may be pruned to the
+      record-carrying tools — say in `session-overview.md` what you dropped and why.
+      Prune before sizing the run: the Execution model picks single-driver vs fan-out
+      from how many tools are *selected*, so the prune has to come first.
 
    c. Ask the user how to proceed via `AskUserQuestion` (single-select, 3 options):
       - **Probe all** *(recommended)* — probe every tool from `tools/list`.
@@ -225,19 +231,6 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
 3. **Probe each selected tool → skeleton (parallel-safe).**
 
-   > **Dispatch (>4 selected tools):** Before probing, dispatch a **recon subagent** to
-   > obtain bootstrap ids and discriminator enum values. The recon agent calls whatever
-   > no-arg / discovery / listing tools *this specific server* exposes (infer them from
-   > the `mcpgen list` output for this server — no tool name is universal). If no such
-   > tool exists, the agent reports that and main falls back to `AskUserQuestion` for
-   > sample ids. The agent returns a compact catalog (ids + enum values) — never a raw
-   > payload — so main can fully specify each batch agent's task before dispatch.
-   >
-   > Then group selected tools into batches (batching rule: sibling sets together; see
-   > Execution model above) and dispatch each batch as a parallel subagent. Each agent
-   > both probes and drafts its step-4 shape entries (rich agent contract above). Run
-   > `mcpgen merge` (step 3b) once all batch agents finish.
-
    First, establish `<shapes-path>` — the consolidated shapes sidecar.  It must sit
    **beside the generated module** so `mcpgen codegen` auto-detects it:
    - CWD output (default): `<shapes-path>` = `<server>.shapes.json`
@@ -246,10 +239,31 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    Use the **same `<shapes-path>` value** in every probe (step 3), the merge (step 3b),
    and codegen `--shapes` if you pass it explicitly.
 
+   > **Recon (>4 selected tools):** Only now, with the ignore preflight green and
+   > `<shapes-path>` fixed, dispatch a **recon subagent** for bootstrap ids and
+   > discriminator enum values — it makes live calls, so it must not run before the
+   > preflight. It calls whatever no-arg / discovery / listing tools *this* server
+   > exposes (infer them from `mcpgen list` — no tool name is universal), or reports that
+   > none exist. Main then falls back to `AskUserQuestion` for sample ids where 2d's
+   > condition holds; where it does not, probe only the tools whose required args
+   > reference nothing and record the rest as unprobed, naming the id you lacked. It
+   > returns a compact catalog, never a raw payload.
+
+   > **Batch dispatch (>4 selected tools, local `stdio` only):** With Pass 2 settled,
+   > group selected tools into batches (batching rule: sibling sets together; see
+   > Execution model above) and dispatch each batch as a parallel subagent. **Against a
+   > hosted HTTP server, do not fan out** — parallel agents cannot hold the ≥ 2 s probe
+   > interval below, so probe from one agent at a time. Each agent
+   > both probes and drafts its step-4 shape entries (rich agent contract above). Pass
+   > every agent the same `<shapes-path>`. Run `mcpgen merge` (step 3b) once all batch
+   > agents finish — `probe` only writes a per-tool part file; nothing consolidates
+   > `<shapes-path>` until that merge.
+
    ```
-   # Probing is now parallel-safe.  Each invocation writes a per-tool part file
-   # under <shapes-path>.parts/ — distinct tools never touch the same file,
-   # so concurrent probe processes cannot clobber each other.
+   # Probing is parallel-safe.  Each invocation writes a per-tool part file
+   # under <shapes-path>.parts/ — distinct tools get distinct files (the one
+   # exception is the case-only collision noted below), so concurrent probe
+   # processes cannot clobber each other.
 
    # single probe
    <mcpgen> probe <server> <tool> --args '<sample json>' --emit-shape <shapes-path>
@@ -260,6 +274,39 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      --args '{"entityId":"<id2>","entityType":1}' \
      --emit-shape <shapes-path>
    ```
+
+   **Probes for distinct tools are independent — issue them in one batch.** Each tool
+   writes its own part file, so nothing serializes them. Put every probe in a single
+   shell invocation (one `<mcpgen> probe` per line); do not spend one turn per tool.
+   Against a local `stdio` server they may also go out as parallel tool calls — against
+   a hosted server keep them sequential in one invocation and interleave `sleep 2`, per
+   the pacing rule below. Each line still carries that tool's own valid args, built per
+   the `inputSchema.required` rule below. The step-3b read afterwards is **one file
+   read** of the merged `<shapes-path>` — not one read per tool.
+
+   ```bash
+   set -e   # fail-fast: without it the batch reports only the last probe's status
+   <mcpgen> probe <server> tool_a --args '<args-for-tool_a>' --emit-shape <shapes-path>
+   sleep 2  # hosted servers only; drop it for local stdio
+   <mcpgen> probe <server> tool_b --args '<args-for-tool_b>' --emit-shape <shapes-path>
+   ```
+
+   Newline-separated commands return the *last* exit status, so a failing probe followed
+   by a passing one reports success. `set -e` fixes the status but stops the batch at the
+   first failure — the tools after it go unprobed and must be re-issued. Drop `set -e`
+   and check each status instead when you would rather collect every result in one pass.
+   Either way, label the check with the tool name yourself, and keep the failure — a bare
+   `|| echo` returns 0 and hides it, from `set -e` too. Accumulate as the ignore preflight
+   does: `… || { echo "FAILED tool_a"; bad=1; }` per line, `[ "$bad" -eq 0 ] || exit 1` at
+   the end. Labelling is on you because `probe` announces the tool before calling it, but
+   an unparseable `--args` payload fails ahead of that line and names nothing.
+
+   Part filenames come from the tool name with its case preserved, so on a
+   case-insensitive filesystem (macOS's default) two tools differing only in case share
+   one part file and the second overwrites the first. It is rare, and reading between the
+   two probes does not save the first — `merge` only ever sees the surviving part. Probe
+   one, run step 3b, then probe the other and merge again; each merge folds its result
+   into `<shapes-path>` before the next probe can overwrite the part.
    **Quota / rate-limit / auth errors during probing.** If a probe returns an HTTP
    429/401/403, a JSON `"error"` key, or a payload that is *itself* an error message
    (the whole text is the failure, not prose that happens to mention one) — phrases
@@ -283,8 +330,11 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    The generated `-> Any` return type is correct; callers must handle the error string
    at runtime. Do not probe again hoping for a different result.
 
-   Part files land at `<shapes-path>.parts/<tool>.json` (git-ignored).
-   You may probe multiple tools in parallel; all parts will be preserved.
+   Part files land at `<shapes-path>.parts/<tool>.json` (git-ignored), with the tool name
+   percent-encoded — a `/` in a tool name becomes `%2F`.
+   Concurrent probes of *distinct* tools do not clobber each other's parts, the case-only
+   collision above excepted — whether you may actually run them concurrently is the
+   pacing question above, not a file-safety one.
    After probing is done, run step 3b to consolidate.
    Each `--args` makes one live call. The observed shapes are **deep-merged**: keys are
    unioned (a key absent from some probes is kept — `total=False` covers it), type
