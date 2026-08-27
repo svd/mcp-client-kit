@@ -327,22 +327,53 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    in `probed_args`. Note: codegen maps enum params to `Literal[...]` automatically, so the
    generated signature already encodes the allowed values.
 
-   Example: `"city": {"type": "string", "enum": ["New York", "Chicago", "Los Angeles"]}`
-   → probe with `city="New York"` → generated type `Literal['New York', 'Chicago', 'Los Angeles']`.
+   **JSON-in-string detection.** Some servers double-encode: the record arrives as a JSON
+   *string* inside the MCP envelope (e.g. `directory_tree`), so the client parses the
+   envelope and still hands you a `str`. When `_observed_shape == "str"`, test the raw
+   payload already captured above — re-run `call --out` whenever the args differ from
+   that tool's most recent capture, since the name is per tool, not per argument set,
+   so a later capture overwrites the earlier one — with this guarded snippet, never a
+   bare `json.loads()`, which exits
+   non-zero on prose:
 
-   **JSON-in-string detection.** Some servers serialize structured data as a JSON string
-   inside the MCP envelope (e.g. `directory_tree` returns a JSON string, not a parsed
-   dict). If `_observed_shape == "str"` and the raw probe value successfully parses with
-   `json.loads()` into a dict or list, annotate the shape entry with `"_json_unwrap": true`
-   and re-enter shape analysis on the parsed object — the tool may qualify for a `TypedDict`
-   model after unwrapping. If `json.loads()` fails, `_observed_shape: "str"` stands.
+   ```python
+   import json, pathlib
+   try:
+       raw = pathlib.Path("<server>.<tool>.probe-raw.json").read_text()
+       parsed = json.loads(raw)
+       label = "JSON_UNWRAP" if isinstance(parsed, (dict, list)) else "NOT_JSON"
+       print(label, type(parsed).__name__)
+   except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+       print("NOT_JSON", type(exc).__name__)
+   ```
 
-   **Image / binary / media tools.** Tools returning MCP `image`, `audio`, or `blob`
-   content (base64 + MIME type) surface as `_observed_shape: "str"` — the probe reads
-   only the text envelope, so the structured binary record (`data` + `mimeType`) is
-   invisible. If a tool description mentions "image", "media", "audio", "base64", or
-   "binary", leave the wrapper as `-> Any`, note it in `session-overview.md`, and do
-   not attempt to model the shape from a single probe.
+   Reading inside the `try` matters: a `call` that failed leaves no file, and an
+   unreadable or non-UTF-8 one raises just as loudly as a bare `json.loads()` would.
+
+   `JSON_UNWRAP dict` / `JSON_UNWRAP list` — re-enter shape analysis on the *parsed*
+   object. `_dig` / `_dig_list` parse a JSON-encoded string at runtime, so the typed
+   record does arrive — **but they are only emitted for a tool with a non-empty
+   `unwrap`**, which splits the case in two:
+   - The parsed object is itself an envelope (the record sits under `tree`, `results`,
+     …) — set `unwrap` to that key path and derive `return_model` and `fields` from the
+     record it reaches.
+   - The parsed object *is* the record — there is no key path, so `unwrap` stays empty,
+     nothing parses the string at runtime, and `return_model` must stay `null`. Never
+     invent a path to force parsing on: `_dig` would return that field instead of the
+     record, and a `TypedDict` would claim a dict the wrapper never returns.
+
+   Record `"_json_unwrap": true` as a note for the next reader — codegen itself does not
+   read that key. `NOT_JSON` is an **expected outcome**, not a probe failure: the payload
+   is prose or a bare scalar, `_observed_shape: "str"` stands, and nothing is recorded as
+   an error.
+
+   **Image / binary / media tools.** `image`, `resource`, and `resource_link` blocks
+   surface as small metadata dicts — `{"type", "mimeType", "has_data"}` and friends —
+   never the base64 bytes, which are deliberately dropped to keep shape-specs small.
+   The observed shape therefore describes the envelope, not the record. If a tool
+   description mentions "image", "media", "audio", "base64", or "binary", leave the
+   wrapper as `-> Any`, note it in `session-overview.md`, and do not model a payload
+   the probe never saw.
 
    **Empty-store probes produce under-typed list fields.** If a read tool returns an
    empty list (`[]`), the inner element shape is unobservable. Do not fabricate a schema
