@@ -30,7 +30,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "python asyncio TaskGroup cancellation",
+      "query": "python asyncio TaskGroup cancellation semantics",
       "k": 3
     },
     "_observed_shape": "str"
@@ -72,7 +72,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "id": "00000000-0000-4000-8000-000000000000"
+      "id": "00000000-0000-4000-8000-000000000000",
+      "limit": 3
     },
     "_observed_shape": "str",
     "_probe_status": "inconclusive"
@@ -90,38 +91,40 @@
     "_probe_status": "inconclusive"
   },
   "firecrawl_monitor_list": {
-    "unwrap": [],
-    "return_model": "MonitorList",
+    "unwrap": [
+      "data"
+    ],
+    "return_model": null,
     "input_overrides": {},
-    "fields": {
-      "success": "bool",
-      "data": "list"
-    },
+    "fields": {},
     "source": "live",
-    "probed_args": {}
+    "probed_args": {
+      "limit": 5
+    },
+    "_observed_shape": {
+      "success": "bool",
+      "data": [
+        "<empty>"
+      ]
+    },
+    "return_container": "list"
   },
   "firecrawl_parse": {
     "unwrap": [],
-    "return_model": "ParseUploadTicket",
+    "return_model": "ParseResponse",
     "input_overrides": {},
     "fields": {
       "success": "bool",
       "mode": "str",
-      "message": "str",
-      "upload": "dict",
-      "nextToolCall": "dict",
-      "notes": "list"
+      "message": "str"
     },
     "source": "live",
     "probed_args": {
-      "filePath": "<example-local-file>.html",
+      "filePath": "<example-file-path>.html",
       "formats": [
-        "markdown",
-        "links",
-        "summary"
+        "markdown"
       ]
-    },
-    "probe_args_scrubbed": true
+    }
   },
   "firecrawl_research_inspect_paper": {
     "unwrap": [],
@@ -142,8 +145,8 @@
     "source": "live",
     "probed_args": {
       "paperId": "arxiv:2503.23278",
-      "question": "What are the MCP lifecycle phases?",
-      "k": 3
+      "question": "What security threats are identified?",
+      "k": 2
     },
     "_observed_shape": "str"
   },
@@ -157,8 +160,9 @@
       "seed_ids": [
         "arxiv:2503.23278"
       ],
-      "intent": "Find related work on MCP security",
-      "mode": "similar"
+      "intent": "find related work on MCP security",
+      "mode": "similar",
+      "k": 3
     },
     "_observed_shape": "str"
   },
@@ -181,7 +185,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "CRISPR gene editing safety",
+      "query": "retrieval augmented generation",
       "k": 3
     },
     "_observed_shape": "str"
@@ -192,70 +196,30 @@
     "input_overrides": {},
     "fields": {
       "markdown": "str",
-      "html": "str",
-      "rawHtml": "str",
-      "summary": "str",
-      "links": "list",
       "metadata": "dict"
     },
     "source": "live",
-    "probed_args": [
-      {
-        "url": "https://example.com",
-        "formats": [
-          "markdown"
-        ]
-      },
-      {
-        "url": "https://example.com",
-        "formats": [
-          "html",
-          "links",
-          "summary"
-        ]
-      }
-    ]
+    "probed_args": {
+      "url": "https://example.com",
+      "formats": [
+        "markdown"
+      ]
+    }
   },
   "firecrawl_search": {
-    "unwrap": [
-      "data"
-    ],
-    "return_model": "SearchResults",
+    "unwrap": [],
+    "return_model": "SearchResponse",
     "input_overrides": {},
     "fields": {
-      "web": "list",
-      "news": "list",
-      "images": "list"
+      "success": "bool",
+      "data": "dict",
+      "creditsUsed": "int",
+      "id": "str"
     },
     "source": "live",
-    "probed_args": [
-      {
-        "query": "model context protocol",
-        "limit": 3,
-        "sources": [
-          {
-            "type": "web"
-          }
-        ]
-      },
-      {
-        "query": "model context protocol",
-        "limit": 3,
-        "sources": [
-          {
-            "type": "news"
-          }
-        ]
-      },
-      {
-        "query": "model context protocol",
-        "limit": 3,
-        "sources": [
-          {
-            "type": "images"
-          }
-        ]
-      }
-    ]
+    "probed_args": {
+      "query": "model context protocol",
+      "limit": 3
+    }
   }
 }

@@ -1,57 +1,54 @@
-# firecrawl — session overview
+# firecrawl — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-26T14:48:04Z
-- **Duration:** 8m 59s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-26T20:03:31Z
+- **Duration:** 7m 5s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Tool surface
+## Surface and selection
 
-The bearer-authenticated endpoint exposes **26 tools**. `annotations.readOnlyHint` is
-populated on every one, so tool selection came straight from the primary signal — no
-keyword heuristic needed. **16 read-only tools were probed; 10 mutating tools were
-skipped** (`crawl`, `agent`, `interact`, `interact_stop`, `feedback`, `search_feedback`,
-`monitor_create`/`update`/`delete`/`run`). No seed commands were configured or run.
+`mcpgen list firecrawl --schema` returned **26 tools**. Every tool carried
+`annotations.readOnlyHint`, so selection needed no keyword heuristic: **16 read-only tools were
+probed** and **10 mutating tools were skipped** — `crawl`, `agent`, `interact`, `interact_stop`,
+`feedback`, `search_feedback`, and the four `monitor_create/update/delete/run` writers.
 
-`mcpgen list` flagged 11 discriminator candidates. All were disqualified: `k`, `maxAge`
-and `limit` are window/count args; `id`, `paperId`, `scrapeId` and `url` are identity
-args; `prompt` is free text; `sitemap` and `proxy` are transport options; `rating` and
-`querySuggestions` belong to skipped mutating tools. None appears as a key in any
-observed response.
+`list` flagged eleven discriminator candidates; all failed Pass 1. `k` and `maxAge` are window
+params, `url`/`id`/`paperId`/`scrapeId` are unbounded identity args, and `prompt`, `proxy`,
+`sitemap`, `querySuggestions`, `rating` are input-only config absent from every response. No
+`discriminator` block was emitted and no single-variant model was minted.
 
 ## Surprises
 
-- **`firecrawl_parse` does not parse.** Given a `filePath` it returns a presigned-upload
-  ticket (`upload.uploadUrl`, `uploadRef`, `nextToolCall`) — the actual parse is a second
-  call keyed on `uploadRef`. That second-phase shape is unobservable without an out-of-band
-  GCS upload, so only the ticket is modelled. A first probe with a `.md` file was rejected
-  ("Unsupported upload type"); re-probed with an HTML fixture.
-- **Frequent transient 503s** from `https://mcp.firecrawl.dev/v2/mcp`. Roughly a third of
-  calls failed and succeeded on retry; probes were wrapped in a bounded 503-only backoff.
-- **The account holds no monitors** (`monitor_list` → `data: []`), so the inner monitor
-  record is unobservable and `data` stays `list`.
+- **`firecrawl_parse` is a two-phase upload flow.** Probed with a local `filePath`, it does not
+  return parsed markdown — it returns a signed-upload envelope (`upload.uploadUrl`, `uploadRef`,
+  a `nextToolCall` telling the caller to re-invoke `parse` with `uploadRef`). Completing phase two
+  needs a raw HTTP PUT, which the guards forbid, so the `uploadRef` branch was never observed.
+- **Six research/dev tools return prose, not JSON.** `developer_search` and the five
+  `research_*` readers all returned markdown. Each was re-fetched raw and tested for
+  JSON-in-string; none parsed. `_observed_shape: "str"` is honest — successful text, not errors.
+- **The account holds zero monitors.** `firecrawl_monitor_list` returned `{"success": true,
+  "data": []}` — a genuine success payload with an unobservable element shape.
+- **Five status tools could not be observed.** They need ids that only the skipped mutating
+  tools mint (`crawl`, `agent`, `monitor_create`). Probed with a synthetic UUID they returned
+  404 / "Monitor not found" / "Check not found" — error strings, not shapes — so each carries
+  `"_probe_status": "inconclusive"`.
 
 ## Shape decisions
 
-| Tool | unwrap | model |
-|---|---|---|
-| `firecrawl_scrape` | `[]` | `ScrapeResult` — flat record; format keys unioned across two probes (`markdown` / `html`+`links`+`summary`) |
-| `firecrawl_map` | `["links"]` | `list[MapLink]` (`url`, `title`) |
-| `firecrawl_search` | `["data"]` | `SearchResults` — `sources[].type` picks which of `web`/`news`/`images` appears, so three probes were unioned into one `total=False` base model rather than a variant overload (nested array-of-objects can't drive codegen overloads) |
-| `firecrawl_monitor_list` | `[]` | `MonitorList` |
-| `firecrawl_parse` | `[]` | `ParseUploadTicket` |
+| Tool | Unwrap | Model | Why |
+|---|---|---|---|
+| `firecrawl_scrape` | — | `ScrapeResult` | Flat record, no vendor envelope; `metadata` stays `dict` (one probe, format-dependent keys). |
+| `firecrawl_map` | `links` | `list[MapLink]` | Envelope is a single `links` key over uniform `{url, title}` records. |
+| `firecrawl_search` | — | `SearchResponse` | `data` is keyed by source (`web`/`news`/`images`) and switches on the `sources` input, so digging to `data.web` would lie for other sources; `data` stays `dict` while `success`/`creditsUsed`/`id` are typed. |
+| `firecrawl_parse` | — | `ParseResponse` | Only the upload-instruction branch was observed; `total=False` keeps the unseen parsed branch from being contradicted. |
+| `firecrawl_monitor_list` | `data` | none (`Any`) | Envelope stripped, but zero elements were seen — fabricating an element schema from an empty list was refused. Re-probe after creating a monitor to type it. |
+| 6 prose tools | — | none | Markdown text; a `TypedDict` would be a fiction. |
+| 5 status tools | — | none, `inconclusive` | Shape never observed. |
 
-**Six research/developer search tools** (`developer_search`, `research_search_papers`,
-`research_search_github`, `research_inspect_paper`, `research_read_paper`,
-`research_related_papers`) genuinely return markdown prose. Raw payloads were read to
-confirm these are content, not errors — left `-> Any` honestly.
+## Result
 
-**Five id-gated tools** (`check_crawl_status`, `agent_status`, `monitor_get`,
-`monitor_checks`, `monitor_check`) had no valid id available: crawl and agent jobs only
-exist after a mutating start, and the monitor list is empty. Probing with a synthetic
-UUID returned "not found" error strings, so each is marked `_probe_status: "inconclusive"`
-rather than passed off as a text-returning tool.
-
-The regenerated module parses (`ast.parse`, 845 lines), imports cleanly, and exports 26
-wrappers with 5 `TypedDict`s. Enum params rendered as `Literal[...]` automatically.
-`probed_args` scrubbed: the `parse` fixture path became `<example-local-file>.html`.
+The regenerated module **parses cleanly** (`ast.parse` OK). Four `TypedDict`s are emitted, the
+shaped signatures read `-> ScrapeResult`, `-> list[MapLink]`, `-> SearchResponse` and
+`-> ParseResponse`, and their bodies dig via `_dig` / `_dig_list`. The `firecrawl_parse`
+`probed_args` held a machine-local path, scrubbed to `<example-file-path>.html`; the gitignored
+`firecrawl.verify.json` keeps the real value for the roundtrip verifier.
