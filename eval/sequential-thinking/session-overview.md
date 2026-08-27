@@ -1,59 +1,59 @@
-# sequential-thinking — eval session overview
+# sequential-thinking — session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:40:22Z
-- **Duration:** 4m 21s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:06:56Z
+- **Duration:** 1m 50s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface
+## Tool surface
 
-The server exposes **one tool**, `sequentialthinking`. It carries full MCP annotations —
-`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true` — so step 2b cleared it
-on the annotation alone, with no keyword or semantic fallback needed. Selected set: 1/1 tools
-probed, 0 skipped. No mutating tools exist on this server, so nothing was withheld.
+The server exposes exactly **one** tool, `sequentialthinking`. It carries full MCP
+annotations — `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`,
+`openWorldHint: false` — so classification needed no keyword or semantic fallback: it is
+clean read-only and was selected for probing. **1 probed, 0 skipped.** No seed commands
+were configured and none were needed.
 
-**Discriminators: N/A.** The candidate precondition needs two or more tools declaring the same
-scalar parameter; with a single tool it cannot be met, and `list --schema` emitted no advisory
-on stderr. Nothing was polymorphic-suspect.
+**Discriminators: N/A.** The advisory's precondition needs a scalar parameter shared by two
+or more tools, and this server has one tool, so nothing can fire. The description sweep for a
+single-tool discriminator also came up empty: no parameter names a response key or otherwise
+declares what comes back. The nine input parameters (`thought`, `thoughtNumber`,
+`totalThoughts`, `isRevision`, `revisesThought`, `branchFromThought`, `branchId`,
+`needsMoreThoughts`, `nextThoughtNeeded`) all steer the *thinking session*, never the
+response envelope. Pass 2 was skipped outright.
 
 ## Probing
 
-One `probe` invocation with two `--args` sets, deep-merged: a plain thought
-(`thoughtNumber: 1`), and a branched thought carrying `branchFromThought`, `branchId`,
-`isRevision`, and `needsMoreThoughts`. The second set exists purely to make `branches`
-non-empty — the first probe alone returns `branches: []`, leaving its element type
-unobservable.
+One multi-probe with three `--args` sets, covering the plain path (thought 1 of 3), an
+explicit `isRevision: false` (thought 2), and a branch (thought 3 with `branchFromThought: 2`,
+`branchId: "alt-a"`). Required args per `inputSchema` are `thought`, `thoughtNumber`,
+`totalThoughts`; none reference an existing object, so free-text values were invented — no
+real ids, no PII, so `probed_args` needed no scrubbing.
 
-Two things were worth noting. First, the tool renders an ASCII thought box to **stderr** on
-every call; that is display noise, never part of the payload, and it is why the run kept
-stdout and stderr strictly separate throughout. Second, the response is transported as a
-JSON-encoded string inside the MCP text block, but the seam parses it before handing it back —
-`_observed_shape` came back as a dict, and the raw `call --out` capture was already an object.
-So this is **not** the JSON-in-string case: no `unwrap` path is needed to trigger runtime
-parsing, and `return_model` is legitimate with an empty `unwrap`.
+Two things worth noting:
+
+- The server's *human-facing* output goes to **stderr** as a boxed ASCII panel; the MCP
+  response itself is a small JSON status object. The panel is decoration, not payload.
+- Each `mcpgen` invocation launches a fresh stdio process, so the server's thought history
+  resets between probes and `thoughtHistoryLength` reads `1` every time. That field is
+  session state, not a record field — it will grow within a single long-lived caller.
+- `branches` came back `[]` on probes 1 and 2 and `["alt-a"]` on the branch probe, so the
+  merged shape carries `branches: ["str"]`.
 
 ## Shape decision
 
-Single tool, single model:
+Single tool, single decision. The raw payload (captured via `call --out`) is
+`{"thoughtNumber", "totalThoughts", "nextThoughtNeeded", "branches", "thoughtHistoryLength"}`
+at top level — **no vendor envelope**, so `unwrap` stays `[]` and no `_dig` helper is emitted.
+`return_model` is `ThoughtStatus`: the record is a progress/status ack, not a domain entity,
+so the name describes what it is rather than borrowing the tool's name. Four top-level scalars
+were promoted verbatim; `branches` was hand-added as the one permitted non-scalar
+(`"list"`) so the field stays visible rather than being silently dropped — its element type is
+`str`, but the inner model is not worth asserting from three samples. No
+`input_overrides` were needed: the schema's `integer`/`boolean`/`string` types matched what
+the server actually accepted.
 
-- **`unwrap`: `[]`** — the record arrives at the top level; there is no vendor envelope.
-- **`return_model`: `ThoughtProgress`** — a new, non-colliding name for the progress receipt
-  the tool returns (it acknowledges bookkeeping, it does not echo the thought back).
-- **`return_container`**: omitted — the record is a single dict, not a list.
-- **`fields`**: the four observed top-level scalars (`thoughtNumber`, `totalThoughts`,
-  `nextThoughtNeeded`, `thoughtHistoryLength`) plus a hand-added `"branches": "list"`. The
-  skeleton drops non-scalars; `branches` was observed as a list of strings (branch ids), but
-  `fields` admits only the bare `"list"` escape, so the element type is recorded here rather
-  than in the spec.
-- **`input_overrides`**: `{}` — the input schema is honest. `integer` and `boolean` map
-  cleanly; nothing was mistyped.
+## Verification
 
-No scrubbing was required: `probed_args` holds only authored prose and the literal branch id
-`alt-a`, none of it PII.
-
-## Result
-
-Regeneration picked the sidecar up by auto-detection. The module `ast.parse`s cleanly, emits
-`class ThoughtProgress(TypedDict, total=False)`, and the wrapper signature reads
-`-> ThoughtProgress` with a `cast(...)` over `caller.call` — the correct emission for an empty
-`unwrap`, where no `_dig` is warranted. Runner generation was left to the harness verify stage.
+Regenerated with the shape-spec auto-detected beside the module. `ast.parse` clean;
+`sequentialthinking(...) -> ThoughtStatus` with a `cast` to the `TypedDict` (the correct body
+for an empty unwrap — nothing to dig). Nothing left as `Any`.

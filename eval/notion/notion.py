@@ -27,7 +27,7 @@ class TeamsResult(TypedDict, total=False):
     hasMore: bool
 
 
-class WorkspaceUserSummary(TypedDict, total=False):
+class UserSummary(TypedDict, total=False):
     type: str
     id: str
     name: str
@@ -47,9 +47,7 @@ class RecentPageSummary(TypedDict, total=False):
 
 
 class DataSourceQueryResult(TypedDict, total=False):
-    results: list
     has_more: bool
-    data_source_ids: list
 
 
 class SearchContentItem(TypedDict, total=False):
@@ -664,7 +662,7 @@ async def notion_get_teams(caller: McpCaller, *, query: str | None = None) -> Te
 notion_get_teams.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'query': {'description': 'Optional search query to filter teams by name (case-insensitive).', 'type': 'string', 'minLength': 1, 'maxLength': 100}}, 'additionalProperties': {}}
 
 
-async def notion_get_users(caller: McpCaller, *, query: str | None = None, start_cursor: str | None = None, page_size: int | None = None, user_id: str | None = None) -> list[WorkspaceUserSummary]:
+async def notion_get_users(caller: McpCaller, *, query: str | None = None, start_cursor: str | None = None, page_size: int | None = None, user_id: str | None = None) -> list[UserSummary]:
     """Retrieves a list of users in the current workspace. Shows workspace members and guests with their IDs, names, emails (if available), and types (person or bot).
 
     Supports cursor-based pagination to iterate through all users in the workspace.
@@ -699,7 +697,7 @@ async def notion_get_users(caller: McpCaller, *, query: str | None = None, start
     if user_id is not None:
         args["user_id"] = user_id
     result = await caller.call(SERVER, "notion-get-users", args)
-    return cast("list[WorkspaceUserSummary]", _dig_list(result, ('results', )))
+    return cast("list[UserSummary]", _dig_list(result, ('results', )))
 
 notion_get_users.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'query': {'description': 'Optional search query to filter users by name or email (case-insensitive).', 'type': 'string', 'minLength': 1, 'maxLength': 100}, 'start_cursor': {'description': 'Cursor for pagination. Use the next_cursor value from the previous response to get the next page.', 'type': 'string', 'minLength': 1}, 'page_size': {'description': 'Number of users to return per page (1–100; default 100).', 'type': 'integer', 'minimum': 1, 'maximum': 100}, 'user_id': {'description': 'Return only the user matching this ID. Pass "self" to fetch the current user.', 'type': 'string', 'minLength': 1, 'maxLength': 100}}, 'additionalProperties': {}}
 

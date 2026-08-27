@@ -15,7 +15,7 @@ SERVER = 'astro-docs'
 
 
 
-class AstroDocSearchResult(TypedDict, total=False):
+class SearchDocItem(TypedDict, total=False):
     content: str
     source_url: str
     title: str
@@ -55,7 +55,7 @@ def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
     return cur
 
 
-async def search_astro_docs(caller: McpCaller, *, query: str) -> list[AstroDocSearchResult]:
+async def search_astro_docs(caller: McpCaller, *, query: str) -> list[SearchDocItem]:
     """Search the official Astro framework docs
 
     Args:
@@ -63,6 +63,6 @@ async def search_astro_docs(caller: McpCaller, *, query: str) -> list[AstroDocSe
     """
     args: dict[str, Any] = {"query": query}
     result = await caller.call(SERVER, "search_astro_docs", args)
-    return cast("list[AstroDocSearchResult]", _dig_list(result, ('search_results', )))
+    return cast("list[SearchDocItem]", _dig_list(result, ('search_results', )))
 
 search_astro_docs.__schema__ = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'Search query'}}, 'required': ['query'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}

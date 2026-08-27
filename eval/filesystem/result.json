@@ -7,23 +7,22 @@
     "signatures": "pass",
     "idempotency": "pass",
     "pii": "pass",
-    "roundtrip": "pass"
+    "roundtrip": "skip"
   },
   "check_details": {
     "ast": "",
     "signatures": "",
     "idempotency": "offline determinism check (real tool schemas from filesystem.mcpgen.json)",
     "pii": "",
-    "roundtrip": "live call to 'directory_tree' returned typed result"
+    "roundtrip": "no_shaped_tool_by_design"
   },
   "modes_hit": [
-    "A",
-    "C"
+    "A"
   ],
   "verdict": "pass",
   "versions": {
     "engine": "0.9.0.dev1",
-    "skill_ref": "v0.0.4-159-g8cc836b",
+    "skill_ref": "v0.0.4-161-gbf232ef",
     "skill_path": "~/src/mcp-client-kit"
   }
 }

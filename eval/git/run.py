@@ -50,9 +50,9 @@ async def main() -> None:
 
         # git_branch -> Any  (observed: str)
         branches = await git_wrappers.git_branch(
-            caller, repo_path=REPO_PATH, branch_type="local"
+            caller, repo_path=REPO_PATH, branch_type="all"
         )
-        print(f"git_branch(local): {type(branches).__name__}, {len(str(branches))} char(s)")
+        print(f"git_branch(all): {type(branches).__name__}, {len(str(branches))} char(s)")
 
         # git_log -> Any  (observed: str)
         log = await git_wrappers.git_log(caller, repo_path=REPO_PATH, max_count=5)

@@ -23,7 +23,7 @@ from mcpgen import McpBridgeCaller
 SERVER_URL = "https://mcp.deepwiki.com/mcp"
 
 # Real probe arg shared by all three tools (deepwiki.verify.json).
-REPO = "facebook/react"
+REPO = "modelcontextprotocol/python-sdk"
 
 
 async def main() -> None:
@@ -36,22 +36,22 @@ async def main() -> None:
         # No discriminated tools: shapes.json records no discriminator/variants,
         # so each tool gets exactly one call.
 
-        # read_wiki_structure -> Any  (observed shape: str, ~1.4 KB)
+        # read_wiki_structure -> Any  (observed shape: str, ~1.9 KB)
         # Get a list of documentation topics for a GitHub repository.
         structure = await deepwiki.read_wiki_structure(caller, repoName=REPO)
         print(f"read_wiki_structure: {type(structure).__name__} len={len(structure)}")
 
-        # read_wiki_contents -> Any  (observed shape: str, ~621 KB)
+        # read_wiki_contents -> Any  (observed shape: str, ~535 KB)
         # View documentation about a GitHub repository.
         contents = await deepwiki.read_wiki_contents(caller, repoName=REPO)
         print(f"read_wiki_contents: {type(contents).__name__} len={len(contents)}")
 
-        # ask_question -> Any  (observed shape: str, ~2.8 KB)
+        # ask_question -> Any  (observed shape: str, ~2.2 KB)
         # Ask any question about a GitHub repository, answered against its wiki.
         answer = await deepwiki.ask_question(
             caller,
             repoName=REPO,
-            question="What is the fiber reconciler?",
+            question="What transports does the server support?",
         )
         print(f"ask_question: {type(answer).__name__} len={len(answer)}")
 

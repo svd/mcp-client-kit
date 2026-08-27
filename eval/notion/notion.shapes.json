@@ -1,42 +1,7 @@
 {
-  "notion-search": {
-    "unwrap": ["results"],
-    "return_container": "list",
-    "discriminator": "query_type",
-    "variants": {
-      "internal": {
-        "return_model": "SearchContentItem",
-        "fields": {
-          "id": "str",
-          "title": "str",
-          "url": "str",
-          "type": "str",
-          "highlight": "str",
-          "timestamp": "str"
-        },
-        "source": "live"
-      },
-      "user": {
-        "return_model": "SearchUserItem",
-        "fields": {
-          "text": "str"
-        },
-        "source": "live"
-      }
-    },
-    "input_overrides": {"query_type": "str"},
-    "source": "live",
-    "probed_args": [
-      {"query": "project plan", "query_type": "internal", "page_size": 5},
-      {"query": "a", "query_type": "user", "page_size": 5},
-      {"query": "tasks", "page_url": "https://app.notion.com/p/<PAGE_ID>", "page_size": 5}
-    ],
-    "probe_args_scrubbed": true
-  },
   "notion-fetch": {
     "unwrap": [],
     "return_model": "NotionEntity",
-    "return_container": null,
     "input_overrides": {},
     "fields": {
       "title": "str",
@@ -44,29 +9,27 @@
       "text": "str"
     },
     "source": "live",
-    "probed_args": [
-      {"id": "<PAGE_ID>", "include_discussions": true},
-      {"id": "self"}
-    ],
-    "probe_args_scrubbed": true
-  },
-  "notion-get-users": {
-    "unwrap": ["results"],
-    "return_container": "list",
-    "return_model": "WorkspaceUserSummary",
-    "input_overrides": {},
-    "fields": {
-      "type": "str",
-      "id": "str",
-      "name": "str"
+    "probed_args": {
+      "id": "<page-id>"
     },
+    "probe_args_scrubbed": true,
+    "_note": "Two probes (a page id and a database id) returned the same four keys, so `id` is not a shape discriminator. `metadata` is a nested dict ({type: str}) and stays untyped; `text` carries the Notion-flavored Markdown body."
+  },
+  "notion-get-comments": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
     "source": "live",
-    "probed_args": {"page_size": 5}
+    "probed_args": {
+      "page_id": "<page-id>"
+    },
+    "probe_args_scrubbed": true,
+    "_note": "The probed page carries no discussions, so the response was an empty object `{}`. Nothing about the populated shape was observable; re-probe against a page with comments before shaping."
   },
   "notion-get-teams": {
     "unwrap": [],
     "return_model": "TeamsResult",
-    "return_container": null,
     "input_overrides": {},
     "fields": {
       "joinedTeams": "list",
@@ -74,23 +37,29 @@
       "hasMore": "bool"
     },
     "source": "live",
-    "probed_args": {}
+    "probed_args": {},
+    "_note": "Both team lists came back empty in this workspace, so the element shape is unobservable. `joinedTeams`/`otherTeams` are hand-added as `list` (the empty-list exception) to keep them visible."
   },
-  "notion-list-private-pages": {
-    "unwrap": ["results"],
+  "notion-get-users": {
+    "unwrap": [
+      "results"
+    ],
     "return_container": "list",
-    "return_model": "SidebarPageSummary",
+    "return_model": "UserSummary",
     "input_overrides": {},
     "fields": {
       "type": "str",
-      "url": "str",
-      "title": "str"
+      "id": "str",
+      "name": "str"
     },
     "source": "live",
-    "probed_args": {"limit": 5}
+    "probed_args": {},
+    "_note": "Envelope is {results, has_more}; unwrapped to the record list. `email` was absent for every probed user, so it is not typed."
   },
   "notion-list-favorite-pages": {
-    "unwrap": ["results"],
+    "unwrap": [
+      "results"
+    ],
     "return_container": "list",
     "return_model": "SidebarPageSummary",
     "input_overrides": {},
@@ -100,10 +69,32 @@
       "title": "str"
     },
     "source": "live",
-    "probed_args": {"limit": 5}
+    "probed_args": {
+      "limit": 5
+    }
+  },
+  "notion-list-private-pages": {
+    "unwrap": [
+      "results"
+    ],
+    "return_container": "list",
+    "return_model": "SidebarPageSummary",
+    "input_overrides": {},
+    "fields": {
+      "type": "str",
+      "url": "str",
+      "title": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "limit": 5
+    },
+    "_note": "Same record shape as notion-list-favorite-pages, so the two share `SidebarPageSummary`. The envelope's `nextCursor` is dropped by the unwrap."
   },
   "notion-list-recent-pages": {
-    "unwrap": ["results"],
+    "unwrap": [
+      "results"
+    ],
     "return_container": "list",
     "return_model": "RecentPageSummary",
     "input_overrides": {},
@@ -114,65 +105,106 @@
       "icon": "str"
     },
     "source": "live",
-    "probed_args": {"limit": 5}
+    "probed_args": {
+      "limit": 5
+    },
+    "_note": "Distinct model from SidebarPageSummary: recent entries also carry `icon`, which is absent on some rows and covered by total=False."
   },
   "notion-list-shared-pages": {
-    "unwrap": ["results"],
+    "unwrap": [
+      "results"
+    ],
     "return_container": "list",
     "return_model": null,
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {"limit": 5}
+    "probed_args": {
+      "limit": 5
+    },
+    "_note": "`results` came back empty in this workspace, so the element shape was never observed. Unwrap-only: the envelope is stripped but the element stays Any rather than borrowing a shape from the sibling list tools."
   },
   "notion-query-data-sources": {
     "unwrap": [],
     "return_model": "DataSourceQueryResult",
-    "return_container": null,
     "input_overrides": {},
     "fields": {
-      "results": "list",
-      "has_more": "bool",
-      "data_source_ids": "list"
+      "has_more": "bool"
     },
     "source": "live",
     "probed_args": {
       "data": {
         "mode": "sql",
-        "data_source_urls": ["collection://<DATA_SOURCE_ID>"],
-        "query": "SELECT * FROM \"collection://<DATA_SOURCE_ID>\" LIMIT 3"
+        "data_source_urls": [
+          "collection://<data-source-uuid>"
+        ],
+        "query": "SELECT * FROM \"collection://<data-source-uuid>\" LIMIT 5"
       }
     },
-    "probe_args_scrubbed": true
-  },
-  "notion-get-comments": {
-    "unwrap": [],
-    "return_model": null,
-    "return_container": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {"page_id": "<PAGE_ID>", "include_resolved": true, "include_all_blocks": true},
-    "probe_args_scrubbed": true
+    "probe_args_scrubbed": true,
+    "_note": "The input `data` is itself a union (mode=sql | mode=view), but the selector is nested inside an object rather than a top-level scalar param, so overloads cannot key on it — resolved as a generic base model. Only `has_more` is a stable top-level scalar: `results` rows are the queried database's own columns (dynamic per data source) and `data_source_ids` is a list, so neither is typed. mode=view was not probed (no view URL reachable without a mutating tool)."
   },
   "notion-query-meeting-notes": {
     "unwrap": [],
     "return_model": null,
-    "return_container": null,
     "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {},
-    "_probe_status": "inconclusive"
+    "_probe_status": "inconclusive",
+    "_note": "Every response was an error rather than a result, so no shape was ever observed."
   },
   "notion-search-agents": {
     "unwrap": [],
     "return_model": null,
-    "return_container": null,
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {"scope": "workspace", "limit": 5},
-    "_probe_status": "inconclusive"
+    "probed_args": {
+      "scope": "workspace",
+      "limit": 5
+    },
+    "_probe_status": "inconclusive",
+    "_note": "Both enum values of `scope` (favorites, workspace) returned an error envelope rather than a result, so the agent record shape was never observed."
+  },
+  "notion-search": {
+    "unwrap": [
+      "results"
+    ],
+    "return_container": "list",
+    "discriminator": "query_type",
+    "input_overrides": {},
+    "variants": {
+      "internal": {
+        "return_model": "SearchContentItem",
+        "fields": {
+          "id": "str",
+          "title": "str",
+          "url": "str",
+          "type": "str",
+          "highlight": "str",
+          "timestamp": "str"
+        }
+      },
+      "user": {
+        "return_model": "SearchUserItem",
+        "fields": {
+          "text": "str"
+        }
+      }
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "query": "task list",
+        "query_type": "internal",
+        "content_search_mode": "workspace_search"
+      },
+      {
+        "query": "s",
+        "query_type": "user"
+      }
+    ],
+    "_note": "Confirmed discriminator: `query_type` is a two-value scalar enum and both values were probed separately. internal returns ranked content records; user returns a single blob whose `text` holds a <users-search-results> XML document. The envelope's `type` key echoes the mode (content_search / user_search) and is dropped by the unwrap."
   }
 }

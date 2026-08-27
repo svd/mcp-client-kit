@@ -3,11 +3,20 @@ Smoke-test runner for generated github/ wrappers.
 Transport: Streamable HTTP  (https://api.githubcopilot.com/mcp/)
 Auth: Bearer token (set GITHUB_PAT env var)
 
-Args come from eval/github/github.verify.json (real, pre-scrub probe args) where
-present. The discriminated tools get_commit, issue_read and pull_request_read are
-absent from verify.json, so their args come from the scrubbed
-github.shapes.json probed_args — those carry no placeholders, but the
-issue/PR numbers (332898 / 332876) are live microsoft/vscode ids and may age out.
+Args come from eval/github/github.verify.json (real, pre-scrub probe args).
+Three tools carry a shape discriminator and are called once per probed variant:
+  - issue_read        (method: get / get_comments / get_sub_issues / get_parent / get_labels)
+  - pull_request_read (method: get / get_diff / get_status / get_files / get_commits /
+                       get_review_comments / get_reviews)
+  - get_commit        (detail: none / stats / full_patch — see `_discriminator_note`
+                       in github.shapes.json; resolved as one base model, but all
+                       three response shapes were probed, so all three are exercised)
+get_file_contents is polymorphic on `path` (file vs. directory), so it is called
+once per probed path.
+
+get_team_members probed against a private org; github.verify.json holds the real
+org/team but this file is committed, so those two values come from the environment
+(GITHUB_TEAM_ORG / GITHUB_TEAM_SLUG) and the call is skipped when they are unset.
 
 Usage:
     GITHUB_PAT=<token> python eval/github/run.py
@@ -25,6 +34,19 @@ import github
 from mcpgen import McpBridgeCaller
 
 SERVER_URL = "https://api.githubcopilot.com/mcp/"
+
+# Real values lifted from github.verify.json.
+OWNER = "microsoft"
+REPO = "vscode"
+COMMIT_SHA = "a3b089bdf6dd50bf85586c39b01f345628b25dfa"
+FILE_PATH = "README.md"
+DIR_PATH = "src/"
+LABEL_NAME = "bug"
+RELEASE_TAG = "1.135.0"
+GIT_TAG = "vsda-v1.39.1"
+ISSUE_NUMBER = 332915
+PULL_NUMBER = 331934
+PER_PAGE = 3
 
 
 async def main() -> None:
@@ -44,296 +66,248 @@ async def main() -> None:
         # request_copilot_review, run_secret_scanning, sub_issue_write,
         # update_pull_request, update_pull_request_branch
 
-        # --- identity ---------------------------------------------------
+        # --- identity / org context -------------------------------------------
         # get_me -> AuthenticatedUser
         me = await github.get_me(caller)
         print(f"get_me: login={me.get('login')!r}  id={me.get('id')!r}")
 
-        # get_teams -> list[TeamMembership]
+        # get_teams -> list[OrgTeams]
         teams = await github.get_teams(caller)
-        print(f"get_teams: {len(teams)} membership(s)")
+        print(f"get_teams: {len(teams)} org team group(s)")
 
-        # get_team_members -> Any  (probe was inconclusive; shape unknown)
-        members = await github.get_team_members(
-            caller, org="EPAMHackathons", team_slug="hackathon"
-        )
-        print(f"get_team_members: {type(members).__name__}")
+        # get_team_members -> Any  (probe was inconclusive; real org/team are
+        # private, so they come from the environment rather than this file)
+        team_org = os.environ.get("GITHUB_TEAM_ORG")
+        team_slug = os.environ.get("GITHUB_TEAM_SLUG")
+        if team_org and team_slug:
+            members = await github.get_team_members(
+                caller, org=team_org, team_slug=team_slug
+            )
+            print(f"get_team_members: {type(members).__name__}")
+        else:
+            print("get_team_members: skipped (GITHUB_TEAM_ORG/GITHUB_TEAM_SLUG unset)")
 
-        # --- repository metadata ----------------------------------------
-        # get_file_contents -> Any
-        readme = await github.get_file_contents(
-            caller, owner="microsoft", repo="vscode", path="README.md"
-        )
-        print(f"get_file_contents: {type(readme).__name__}")
-
-        # list_branches -> list[BranchSummary]
-        branches = await github.list_branches(
-            caller, owner="microsoft", repo="vscode", perPage=5
-        )
+        # --- repository metadata ----------------------------------------------
+        # list_branches -> list[Branch]
+        branches = await github.list_branches(caller, owner=OWNER, repo=REPO, perPage=PER_PAGE)
         print(f"list_branches: {len(branches)} branch(es)")
 
         # list_tags -> list[TagSummary]
-        tags = await github.list_tags(
-            caller, owner="microsoft", repo="vscode", perPage=3
-        )
+        tags = await github.list_tags(caller, owner=OWNER, repo=REPO, perPage=PER_PAGE)
         print(f"list_tags: {len(tags)} tag(s)")
 
-        # get_tag -> GitRef
-        tag = await github.get_tag(
-            caller, owner="microsoft", repo="vscode", tag="v1.19.3"
-        )
-        print(f"get_tag: ref={tag.get('ref')!r}")
+        # get_tag -> Tag
+        tag = await github.get_tag(caller, owner=OWNER, repo=REPO, tag=GIT_TAG)
+        print(f"get_tag: ref={tag.get('ref')!r}  node_id={tag.get('node_id')!r}")
 
-        # list_repository_collaborators -> Any  (probe was inconclusive)
-        collaborators = await github.list_repository_collaborators(
-            caller, owner="microsoft", repo="vscode", perPage=3
-        )
-        print(f"list_repository_collaborators: {type(collaborators).__name__}")
-
-        # --- releases ----------------------------------------------------
         # list_releases -> list[ReleaseSummary]
-        releases = await github.list_releases(
-            caller, owner="microsoft", repo="vscode", perPage=3
-        )
+        releases = await github.list_releases(caller, owner=OWNER, repo=REPO, perPage=PER_PAGE)
         print(f"list_releases: {len(releases)} release(s)")
 
         # get_latest_release -> Release
-        latest = await github.get_latest_release(
-            caller, owner="microsoft", repo="vscode"
-        )
-        print(
-            f"get_latest_release: tag_name={latest.get('tag_name')!r}"
-            f"  name={latest.get('name')!r}"
-        )
+        latest = await github.get_latest_release(caller, owner=OWNER, repo=REPO)
+        print(f"get_latest_release: tag_name={latest.get('tag_name')!r}  name={latest.get('name')!r}")
 
         # get_release_by_tag -> Release
-        release = await github.get_release_by_tag(
-            caller, owner="microsoft", repo="vscode", tag="1.135.0"
-        )
-        print(f"get_release_by_tag: tag_name={release.get('tag_name')!r}")
+        release = await github.get_release_by_tag(caller, owner=OWNER, repo=REPO, tag=RELEASE_TAG)
+        print(f"get_release_by_tag: tag_name={release.get('tag_name')!r}  draft={release.get('draft')!r}")
 
-        # --- commits ------------------------------------------------------
-        # list_commits -> list[CommitSummary]
-        commits = await github.list_commits(
-            caller, owner="microsoft", repo="vscode", perPage=3
+        # list_repository_collaborators -> Any  (probe inconclusive: the PAT has
+        # no push access to microsoft/vscode, so no success payload was observed)
+        collaborators = await github.list_repository_collaborators(
+            caller, owner=OWNER, repo=REPO, perPage=PER_PAGE
         )
+        print(f"list_repository_collaborators: {type(collaborators).__name__}")
+
+        # --- file contents (polymorphic on `path`) ----------------------------
+        # get_file_contents -> Any  (file path -> [prose str, resource metadata])
+        file_contents = await github.get_file_contents(
+            caller, owner=OWNER, repo=REPO, path=FILE_PATH
+        )
+        print(f"get_file_contents({FILE_PATH!r}): {type(file_contents).__name__}")
+
+        # get_file_contents -> Any  (directory path -> list[dir-entry dict])
+        dir_contents = await github.get_file_contents(
+            caller, owner=OWNER, repo=REPO, path=DIR_PATH
+        )
+        print(f"get_file_contents({DIR_PATH!r}): {type(dir_contents).__name__}")
+
+        # --- commits -----------------------------------------------------------
+        # list_commits -> list[CommitSummary]
+        commits = await github.list_commits(caller, owner=OWNER, repo=REPO, perPage=PER_PAGE)
         print(f"list_commits: {len(commits)} commit(s)")
 
-        # get_commit -> Commit  (detail="none")
+        # get_commit -> Commit  (detail='none': no stats/files keys)
         commit_none = await github.get_commit(
-            caller, owner="microsoft", repo="vscode", sha="main", detail="none"
+            caller, owner=OWNER, repo=REPO, sha=COMMIT_SHA, detail="none"
         )
-        print(f"get_commit(none): sha={commit_none.get('sha')!r}")
+        print(
+            f"get_commit(none): sha={commit_none.get('sha')!r}  "
+            f"has_stats={'stats' in commit_none}"
+        )
 
-        # get_commit -> Commit  (detail="stats" — adds nested stats+files)
+        # get_commit -> Commit  (detail='stats': server default)
         commit_stats = await github.get_commit(
-            caller, owner="microsoft", repo="vscode", sha="main", detail="stats"
+            caller, owner=OWNER, repo=REPO, sha=COMMIT_SHA, detail="stats"
         )
-        print(f"get_commit(stats): sha={commit_stats.get('sha')!r}")
-
-        # get_commit -> Commit  (detail="full_patch" — adds patch per file)
-        commit_patch = await github.get_commit(
-            caller, owner="microsoft", repo="vscode", sha="main", detail="full_patch"
+        print(
+            f"get_commit(stats): sha={commit_stats.get('sha')!r}  "
+            f"files={len(commit_stats.get('files') or [])}"
         )
-        print(f"get_commit(full_patch): sha={commit_patch.get('sha')!r}")
 
-        # --- issues -------------------------------------------------------
+        # get_commit -> Commit  (detail='full_patch': adds `patch` per file)
+        commit_full = await github.get_commit(
+            caller, owner=OWNER, repo=REPO, sha=COMMIT_SHA, detail="full_patch"
+        )
+        print(
+            f"get_commit(full_patch): sha={commit_full.get('sha')!r}  "
+            f"files={len(commit_full.get('files') or [])}"
+        )
+
+        # --- issues ------------------------------------------------------------
         # list_issue_types -> list[IssueType]
-        issue_types = await github.list_issue_types(
-            caller, owner="microsoft", repo="vscode"
-        )
+        issue_types = await github.list_issue_types(caller, owner=OWNER, repo=REPO)
         print(f"list_issue_types: {len(issue_types)} type(s)")
 
-        # list_issue_fields -> Any
-        issue_fields = await github.list_issue_fields(
-            caller, owner="microsoft", repo="vscode"
-        )
+        # list_issue_fields -> Any  (returned [] for microsoft/vscode: no custom fields)
+        issue_fields = await github.list_issue_fields(caller, owner=OWNER, repo=REPO)
         print(f"list_issue_fields: {type(issue_fields).__name__}")
 
-        # list_issues -> list[IssueSummary]  (unwrapped from "issues")
-        issues = await github.list_issues(
-            caller, owner="microsoft", repo="vscode", perPage=3
-        )
-        print(f"list_issues: {len(issues)} issue(s)")
-
         # get_label -> Label
-        label = await github.get_label(
-            caller, owner="microsoft", repo="vscode", name="bug"
-        )
+        label = await github.get_label(caller, owner=OWNER, repo=REPO, name=LABEL_NAME)
         print(f"get_label: name={label.get('name')!r}  color={label.get('color')!r}")
 
-        # issue_read -> Any  (method discriminator; all 5 probed variants)
-        issue_get = await github.issue_read(
-            caller,
-            method="get",
-            owner="microsoft",
-            repo="vscode",
-            issue_number=332898,
-        )
-        print(f"issue_read(get): {type(issue_get).__name__}")
+        # list_issues -> list[IssueSummary]
+        issues = await github.list_issues(caller, owner=OWNER, repo=REPO, perPage=PER_PAGE)
+        print(f"list_issues: {len(issues)} issue(s)")
 
+        # issue_read -> Issue  (method='get')
+        issue = await github.issue_read(
+            caller, method="get", owner=OWNER, repo=REPO, issue_number=ISSUE_NUMBER
+        )
+        print(
+            f"issue_read(get): number={issue.get('number')!r}  "
+            f"state={issue.get('state')!r}  comments={issue.get('comments')!r}"
+        )
+
+        # issue_read -> Any  (method='get_comments': bare JSON list)
         issue_comments = await github.issue_read(
-            caller,
-            method="get_comments",
-            owner="microsoft",
-            repo="vscode",
-            issue_number=332898,
+            caller, method="get_comments", owner=OWNER, repo=REPO,
+            issue_number=ISSUE_NUMBER, perPage=PER_PAGE,
         )
         print(f"issue_read(get_comments): {type(issue_comments).__name__}")
 
-        issue_sub = await github.issue_read(
-            caller,
-            method="get_sub_issues",
-            owner="microsoft",
-            repo="vscode",
-            issue_number=332898,
+        # issue_read -> Any  (method='get_sub_issues': bare JSON list, [] when probed)
+        sub_issues = await github.issue_read(
+            caller, method="get_sub_issues", owner=OWNER, repo=REPO,
+            issue_number=ISSUE_NUMBER,
         )
-        print(f"issue_read(get_sub_issues): {type(issue_sub).__name__}")
+        print(f"issue_read(get_sub_issues): {type(sub_issues).__name__}")
 
+        # issue_read -> IssueParent  (method='get_parent')
         issue_parent = await github.issue_read(
-            caller,
-            method="get_parent",
-            owner="microsoft",
-            repo="vscode",
-            issue_number=332898,
+            caller, method="get_parent", owner=OWNER, repo=REPO, issue_number=ISSUE_NUMBER
         )
-        print(f"issue_read(get_parent): {type(issue_parent).__name__}")
+        print(f"issue_read(get_parent): parent={issue_parent.get('parent')!r}")
 
+        # issue_read -> IssueLabels  (method='get_labels')
         issue_labels = await github.issue_read(
-            caller,
-            method="get_labels",
-            owner="microsoft",
-            repo="vscode",
-            issue_number=332898,
+            caller, method="get_labels", owner=OWNER, repo=REPO, issue_number=ISSUE_NUMBER
         )
-        print(f"issue_read(get_labels): {type(issue_labels).__name__}")
+        print(f"issue_read(get_labels): totalCount={issue_labels.get('totalCount')!r}")
 
-        # --- pull requests -------------------------------------------------
-        # list_pull_requests -> list[PullRequestSummary]  (state="open")
-        prs_open = await github.list_pull_requests(
-            caller, owner="microsoft", repo="vscode", state="open", perPage=2
+        # --- pull requests -----------------------------------------------------
+        # list_pull_requests -> list[PullRequestSummary]
+        prs = await github.list_pull_requests(caller, owner=OWNER, repo=REPO, perPage=PER_PAGE)
+        print(f"list_pull_requests: {len(prs)} pull request(s)")
+
+        # pull_request_read -> PullRequest  (method='get')
+        pr = await github.pull_request_read(
+            caller, method="get", owner=OWNER, repo=REPO, pullNumber=PULL_NUMBER
         )
-        print(f"list_pull_requests(open): {len(prs_open)} PR(s)")
-
-        # list_pull_requests -> list[PullRequestSummary]  (state="closed")
-        prs_closed = await github.list_pull_requests(
-            caller, owner="microsoft", repo="vscode", state="closed", perPage=2
+        print(
+            f"pull_request_read(get): number={pr.get('number')!r}  "
+            f"state={pr.get('state')!r}  merged={pr.get('merged')!r}"
         )
-        print(f"list_pull_requests(closed): {len(prs_closed)} PR(s)")
 
-        # pull_request_read -> Any  (method discriminator; all 9 probed variants)
-        pr_get = await github.pull_request_read(
-            caller,
-            method="get",
-            owner="microsoft",
-            repo="vscode",
-            pullNumber=332876,
-        )
-        print(f"pull_request_read(get): {type(pr_get).__name__}")
-
+        # pull_request_read -> Any  (method='get_diff': plain unified-diff string)
         pr_diff = await github.pull_request_read(
-            caller,
-            method="get_diff",
-            owner="microsoft",
-            repo="vscode",
-            pullNumber=332876,
+            caller, method="get_diff", owner=OWNER, repo=REPO, pullNumber=PULL_NUMBER
         )
         print(f"pull_request_read(get_diff): {type(pr_diff).__name__}")
 
+        # pull_request_read -> PullRequestStatus  (method='get_status')
         pr_status = await github.pull_request_read(
-            caller,
-            method="get_status",
-            owner="microsoft",
-            repo="vscode",
-            pullNumber=332876,
+            caller, method="get_status", owner=OWNER, repo=REPO, pullNumber=PULL_NUMBER
         )
-        print(f"pull_request_read(get_status): {type(pr_status).__name__}")
+        print(
+            f"pull_request_read(get_status): state={pr_status.get('state')!r}  "
+            f"total_count={pr_status.get('total_count')!r}"
+        )
 
+        # pull_request_read -> Any  (method='get_files': bare JSON list)
         pr_files = await github.pull_request_read(
-            caller,
-            method="get_files",
-            owner="microsoft",
-            repo="vscode",
-            pullNumber=332876,
+            caller, method="get_files", owner=OWNER, repo=REPO,
+            pullNumber=PULL_NUMBER, perPage=PER_PAGE,
         )
         print(f"pull_request_read(get_files): {type(pr_files).__name__}")
 
+        # pull_request_read -> Any  (method='get_commits': bare JSON list)
         pr_commits = await github.pull_request_read(
-            caller,
-            method="get_commits",
-            owner="microsoft",
-            repo="vscode",
-            pullNumber=332876,
+            caller, method="get_commits", owner=OWNER, repo=REPO,
+            pullNumber=PULL_NUMBER, perPage=PER_PAGE,
         )
         print(f"pull_request_read(get_commits): {type(pr_commits).__name__}")
 
+        # pull_request_read -> PullRequestReviewThreads  (method='get_review_comments')
         pr_review_comments = await github.pull_request_read(
-            caller,
-            method="get_review_comments",
-            owner="microsoft",
-            repo="vscode",
-            pullNumber=332876,
+            caller, method="get_review_comments", owner=OWNER, repo=REPO,
+            pullNumber=PULL_NUMBER,
         )
-        print(f"pull_request_read(get_review_comments): {type(pr_review_comments).__name__}")
+        print(
+            "pull_request_read(get_review_comments): "
+            f"totalCount={pr_review_comments.get('totalCount')!r}"
+        )
 
+        # pull_request_read -> Any  (method='get_reviews': bare JSON list)
         pr_reviews = await github.pull_request_read(
-            caller,
-            method="get_reviews",
-            owner="microsoft",
-            repo="vscode",
-            pullNumber=332876,
+            caller, method="get_reviews", owner=OWNER, repo=REPO, pullNumber=PULL_NUMBER
         )
         print(f"pull_request_read(get_reviews): {type(pr_reviews).__name__}")
 
-        pr_comments = await github.pull_request_read(
-            caller,
-            method="get_comments",
-            owner="microsoft",
-            repo="vscode",
-            pullNumber=332876,
+        # --- search ------------------------------------------------------------
+        # search_repositories -> list[SearchRepositoryItem]
+        repos = await github.search_repositories(
+            caller, query="language:python mcp", perPage=PER_PAGE
         )
-        print(f"pull_request_read(get_comments): {type(pr_comments).__name__}")
-
-        pr_check_runs = await github.pull_request_read(
-            caller,
-            method="get_check_runs",
-            owner="microsoft",
-            repo="vscode",
-            pullNumber=332876,
-        )
-        print(f"pull_request_read(get_check_runs): {type(pr_check_runs).__name__}")
-
-        # --- search --------------------------------------------------------
-        # search_repositories -> list[SearchRepositoryItem]  (unwrapped from "items")
-        repos = await github.search_repositories(caller, query="vscode", perPage=3)
         print(f"search_repositories: {len(repos)} repo(s)")
 
         # search_code -> list[SearchCodeItem]
-        code = await github.search_code(
-            caller, query="repo:microsoft/vscode addEventListener", perPage=3
+        code_hits = await github.search_code(
+            caller, query="repo:microsoft/vscode ripgrep", perPage=PER_PAGE
         )
-        print(f"search_code: {len(code)} hit(s)")
+        print(f"search_code: {len(code_hits)} hit(s)")
 
         # search_commits -> list[SearchCommitItem]
         commit_hits = await github.search_commits(
-            caller, query="repo:microsoft/vscode fix", perPage=3
+            caller, query="repo:microsoft/vscode fix", perPage=PER_PAGE
         )
         print(f"search_commits: {len(commit_hits)} hit(s)")
 
         # search_issues -> list[SearchIssueItem]
         issue_hits = await github.search_issues(
-            caller, query="repo:microsoft/vscode terminal rendering bug", perPage=3
+            caller, query="repo:microsoft/vscode terminal rendering bug", perPage=PER_PAGE
         )
         print(f"search_issues: {len(issue_hits)} hit(s)")
 
-        # search_pull_requests -> list[SearchPullRequestItem]
+        # search_pull_requests -> list[SearchPRItem]
         pr_hits = await github.search_pull_requests(
-            caller, query="repo:microsoft/vscode is:pr is:open", perPage=3
+            caller, query="repo:microsoft/vscode is:merged", perPage=PER_PAGE
         )
         print(f"search_pull_requests: {len(pr_hits)} hit(s)")
 
         # search_users -> list[SearchUserItem]
-        users = await github.search_users(caller, query="octocat", perPage=3)
+        users = await github.search_users(caller, query="octocat", perPage=PER_PAGE)
         print(f"search_users: {len(users)} user(s)")
 
 

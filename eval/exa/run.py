@@ -30,43 +30,26 @@ async def main() -> None:
     # reconnecting for every tool call.
     async with caller.connected():
         # Skipped mutating tools: none — both exa tools are read-only.
-        # No discriminated tools: shapes.json records no discriminator/variants.
-        # Each tool was probed twice, so each gets one call per probed arg set.
+        # No discriminated tools: shapes.json records no discriminator/variants,
+        # so each tool gets exactly one call with its probed arg set.
 
         # web_search_exa -> Any  (observed shape: str, ~24.8 KB)
         # Search the web and get clean, ready-to-use content.
-        search_mcp = await exa.web_search_exa(
+        search = await exa.web_search_exa(
             caller,
-            query="blog post explaining the Model Context Protocol architecture and design",
+            query="blog post explaining the Model Context Protocol architecture",
             numResults=3,
         )
-        print(f"web_search_exa(numResults=3): {type(search_mcp).__name__} len={len(search_mcp)}")
+        print(f"web_search_exa: {type(search).__name__} len={len(search)}")
 
-        # web_search_exa -> Any  (second probed arg set: category: filter, default numResults)
-        search_rust = await exa.web_search_exa(
-            caller,
-            query="category:company official documentation site for the Rust programming language",
-        )
-        print(f"web_search_exa(category:company): {type(search_rust).__name__} len={len(search_rust)}")
-
-        # web_fetch_exa -> Any  (observed shape: str, ~5.4 KB)
-        # Read a webpage's full content as clean markdown.
-        fetch_capped = await exa.web_fetch_exa(
+        # web_fetch_exa -> Any  (observed shape: str, ~1.6 KB)
+        # Read a webpage's full content as clean markdown; follows up on a search.
+        fetched = await exa.web_fetch_exa(
             caller,
             urls=["https://modelcontextprotocol.io/introduction"],
-            maxCharacters=2000,
+            maxCharacters=1500,
         )
-        print(f"web_fetch_exa(1 url, maxCharacters=2000): {type(fetch_capped).__name__} len={len(fetch_capped)}")
-
-        # web_fetch_exa -> Any  (second probed arg set: batched URLs, no cap)
-        fetch_batch = await exa.web_fetch_exa(
-            caller,
-            urls=[
-                "https://modelcontextprotocol.io/introduction",
-                "https://www.rust-lang.org/",
-            ],
-        )
-        print(f"web_fetch_exa(2 urls): {type(fetch_batch).__name__} len={len(fetch_batch)}")
+        print(f"web_fetch_exa: {type(fetched).__name__} len={len(fetched)}")
 
 
 if __name__ == "__main__":

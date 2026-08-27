@@ -3,96 +3,112 @@ Smoke-test runner for generated filesystem/ wrappers.
 Transport: stdio  (npx -y @modelcontextprotocol/server-filesystem /private/tmp)
 Auth: none
 
+Every tool on this server returns prose or a JSON-encoded blob rather than a
+shaped record, so all wrappers are annotated `-> Any` and there are no
+discriminated return models. `read_text_file` was probed twice (full read and
+`head=5`), so it is called once per probed argument variant.
+
+Args below come from eval/filesystem/filesystem.verify.json (real, pre-scrub
+values). The directory paths point at a scratchpad directory from the probe
+session; if it no longer exists, set PROBE_DIR to any directory under
+/private/tmp before running.
+
 Usage:
-    python filesystem/run.py
+    python eval/filesystem/run.py
 """
 import asyncio
+import importlib.util
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-import filesystem
+# The wrapper module file is "filesystem.py", but its parent directory is also
+# named "filesystem/", so a plain `import filesystem` would resolve to that
+# directory as a namespace package instead of the wrappers. Load it by path.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_spec = importlib.util.spec_from_file_location(
+    "filesystem_wrappers",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "filesystem.py"),
+)
+filesystem_wrappers = importlib.util.module_from_spec(_spec)
+sys.modules["filesystem_wrappers"] = filesystem_wrappers
+_spec.loader.exec_module(filesystem_wrappers)
 
 from mcpgen import McpBridgeCaller
 
+# Real probed args (eval/filesystem/filesystem.verify.json).
+PROBE_DIR = (
+    "/private/tmp/claude-501/-Users-Sviataslau-Svirydau-src-mcp-client-kit-eval"
+    "/fdfef571-2efc-4233-8a2f-502e07c83bd1/scratchpad"
+)
+PROBE_FILE = "/private/tmp/c2.txt"
+PROBE_FILE_2 = "/private/tmp/cli_flags.txt"
+
+
+def _preview(value: object, limit: int = 120) -> str:
+    """First line of a response, truncated — these tools return str/Any."""
+    text = value if isinstance(value, str) else repr(value)
+    first = text.splitlines()[0] if text.splitlines() else ""
+    return first[:limit] + ("..." if len(first) > limit else "")
+
 
 async def main() -> None:
-    caller = McpBridgeCaller(cmd="npx -y @modelcontextprotocol/server-filesystem /private/tmp")
+    caller = McpBridgeCaller(
+        cmd="npx -y @modelcontextprotocol/server-filesystem /private/tmp"
+    )
 
     # One connection for the whole run: a single initialize() and a single
     # subprocess, instead of reconnecting for every tool call.
     async with caller.connected():
         # Skipped mutating tools: create_directory, edit_file, move_file, write_file
-        # Skipped read-only tool without probed args: read_media_file (needs a real
-        # image/audio file inside the allowed root; none was probed).
-        # All args below come from filesystem.verify.json (real, pre-scrub probe args).
-        # No tool has a discriminated return shape; read_text_file was probed with two
-        # arg variants (full read, head=5), so both are exercised.
+        # Skipped read-only tool: read_media_file (never probed; returns binary media)
 
         # list_allowed_directories -> Any
-        allowed = await filesystem.list_allowed_directories(caller)
-        print(f"list_allowed_directories: {type(allowed).__name__}")
-
-        # list_directory -> Any
-        listing = await filesystem.list_directory(caller, path="/private/tmp/_base")
-        print(f"list_directory: {type(listing).__name__}")
-
-        # list_directory_with_sizes -> Any
-        sized = await filesystem.list_directory_with_sizes(
-            caller, path="/private/tmp/_base/eval_harness", sortBy="name"
-        )
-        print(f"list_directory_with_sizes: {type(sized).__name__}")
-
-        # directory_tree -> list[DirectoryNode]
-        tree = await filesystem.directory_tree(caller, path="/private/tmp/_base")
-        print(f"directory_tree: {len(tree)} node(s)")
-        if tree:
-            root = tree[0]
-            children = root.get("children") or []
-            print(
-                f"directory_tree[0]: name={root.get('name')!r} "
-                f"type={root.get('type')!r} children={len(children)}"
-            )
-
-        # search_files -> Any
-        matches = await filesystem.search_files(
-            caller, path="/private/tmp/_base", pattern="*.py"
-        )
-        print(f"search_files: {type(matches).__name__}")
+        roots = await filesystem_wrappers.list_allowed_directories(caller)
+        print(f"list_allowed_directories: {type(roots).__name__}  {_preview(roots)}")
 
         # get_file_info -> Any
-        info = await filesystem.get_file_info(
-            caller, path="/private/tmp/_base/eval_harness/versions.py"
-        )
-        print(f"get_file_info: {type(info).__name__}")
+        info = await filesystem_wrappers.get_file_info(caller, path=PROBE_FILE)
+        print(f"get_file_info: {type(info).__name__}  {_preview(info)}")
 
-        # read_text_file -> Any  (variant 1: whole file)
-        text = await filesystem.read_text_file(
-            caller, path="/private/tmp/_base/eval_harness/versions.py"
-        )
-        print(f"read_text_file: {type(text).__name__}")
+        # list_directory -> Any
+        listing = await filesystem_wrappers.list_directory(caller, path=PROBE_DIR)
+        print(f"list_directory: {type(listing).__name__}  {_preview(listing)}")
 
-        # read_text_file -> Any  (variant 2: head=5)
-        head = await filesystem.read_text_file(
-            caller, path="/private/tmp/_base/eval_harness/manifest.py", head=5
+        # list_directory_with_sizes -> Any
+        sized = await filesystem_wrappers.list_directory_with_sizes(
+            caller, path=PROBE_DIR, sortBy="name"
         )
-        print(f"read_text_file(head=5): {type(head).__name__}")
+        print(f"list_directory_with_sizes: {type(sized).__name__}  {_preview(sized)}")
+
+        # directory_tree -> Any  (payload is a JSON-encoded list of entries)
+        tree = await filesystem_wrappers.directory_tree(caller, path=PROBE_DIR)
+        print(f"directory_tree: {type(tree).__name__}  {_preview(tree)}")
+
+        # search_files -> Any
+        matches = await filesystem_wrappers.search_files(
+            caller, path=PROBE_DIR, pattern="*.json"
+        )
+        print(f"search_files: {type(matches).__name__}  {_preview(matches)}")
+
+        # read_text_file -> Any  (probed variant 1: whole file)
+        text_full = await filesystem_wrappers.read_text_file(caller, path=PROBE_FILE)
+        print(f"read_text_file(full): {type(text_full).__name__}  {_preview(text_full)}")
+
+        # read_text_file -> Any  (probed variant 2: head=5)
+        text_head = await filesystem_wrappers.read_text_file(
+            caller, path=PROBE_FILE_2, head=5
+        )
+        print(f"read_text_file(head=5): {type(text_head).__name__}  {_preview(text_head)}")
 
         # read_file -> Any
-        raw = await filesystem.read_file(
-            caller, path="/private/tmp/_base/eval_harness/versions.py"
-        )
-        print(f"read_file: {type(raw).__name__}")
+        contents = await filesystem_wrappers.read_file(caller, path=PROBE_FILE)
+        print(f"read_file: {type(contents).__name__}  {_preview(contents)}")
 
         # read_multiple_files -> Any
-        multi = await filesystem.read_multiple_files(
-            caller,
-            paths=[
-                "/private/tmp/_base/eval_harness/versions.py",
-                "/private/tmp/_base/tests/__init__.py",
-            ],
+        multi = await filesystem_wrappers.read_multiple_files(
+            caller, paths=[PROBE_FILE, PROBE_FILE_2]
         )
-        print(f"read_multiple_files: {type(multi).__name__}")
+        print(f"read_multiple_files: {type(multi).__name__}  {_preview(multi)}")
 
 
 if __name__ == "__main__":

@@ -1,55 +1,61 @@
-# deepwiki — generate-mcp-wrappers session overview
+# deepwiki — skill session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:30:39Z
-- **Duration:** 8m 38s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:03:14Z
+- **Duration:** 3m 1s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface
+## Tool inventory
 
-`mcpgen list deepwiki --schema` reported **3 tools**: `ask_question`, `read_wiki_contents`,
-`read_wiki_structure`. The server publishes no `annotations` block, so classification fell back
-to the keyword plus semantic read: all three are pure reads over a public documentation index —
-`ask`/`read` verbs, no create/update/delete surface — so **all 3 were selected and probed, 0
-skipped**. No seed commands were configured, and none were needed: DeepWiki's store is the
-public GitHub corpus, already populated.
+`mcpgen list deepwiki --schema` returned **3 tools**, all of them read-only:
+`ask_question`, `read_wiki_contents`, `read_wiki_structure`. The server ships no
+`annotations` block, so classification fell back to the keyword plus semantic read of
+`references/mutating-tools.md`; every name is a pure read verb (`ask`, `read`) and no tool
+writes anything. Nothing was skipped as mutating, and **all 3 tools were probed**. No seed
+commands were configured, and none were needed — deepwiki is a hosted read-only index over
+public GitHub repositories.
 
-**Discriminators: N/A.** All three tools share `repoName`, but the engine's Pass-1 denylist drops
-`reponame` on a lowercased exact match, so no advisory fired on the `list --schema` stderr and no
-candidate cleared the precondition. Nothing was left polymorphic-suspect.
+## Discriminators
 
-Probe argument for every tool was the real public repo `facebook/react`; `ask_question` also took
-the free-text question "What is the fiber reconciler?". Probes were issued as separate, paced
-invocations because this is a hosted HTTP endpoint.
+`list --schema` emitted no discriminator advisory. Checked by hand: the only parameter shared
+by two or more tools is `repoName`, which the engine denylists (`reponame`) as an identity
+param, and on `ask_question` it is an `anyOf` union (`string | array`) that fails the scalar
+type test regardless. The description sweep found no parameter naming a response key. Recorded
+as **discriminators: N/A**; Pass 2 was skipped.
 
-## Responses
+## Probing and the surprise
 
-Every tool returned a bare `str`, at three very different sizes: 1,441 bytes for
-`read_wiki_structure`, 2,883 for `ask_question`, and **635,591** for `read_wiki_contents` — the
-full rendered wiki for one repository in a single response, easily the most notable observation of
-the run.
+All three tools were probed against `modelcontextprotocol/python-sdk` — a real, public repo, so
+the required `repoName` arg referenced something that actually exists. Probes were paced ≥2 s
+apart because the endpoint is hosted HTTP. Every probe succeeded and every one returned
+`_observed_shape: "str"`.
 
-Because `_observed_shape == "str"` is also the signature of a double-encoded payload, each tool's
-raw response was captured with `mcpgen call --out` and JSON-tested. All three came back
-`NOT_JSON`: `read_wiki_structure` is a plain indented topic outline, `read_wiki_contents` is
-Markdown with `# Page:` headers and `<details>` blocks, and `ask_question` is an AI-authored prose
-answer with inline citations. There is no vendor envelope anywhere on this server — nothing to
-unwrap, and no record to promote.
+That is the notable result: deepwiki returns **prose, not records**. To rule out the
+double-encoding case, each tool's raw payload was captured with `mcpgen call --out` and tested
+with the guarded `json.loads` snippet. All three came back `NOT_JSON`:
+
+- `read_wiki_structure` (1.9 KB) — a plain-text outline (`Available pages for …`, numbered list)
+- `read_wiki_contents` (535 KB) — one concatenated Markdown document (`# Page: Overview …`)
+- `ask_question` (2.2 KB) — an English answer paragraph with inline code spans
+
+`NOT_JSON` here is an expected outcome, not a probe failure, so no `_probe_status:
+"inconclusive"` marker was added — these are genuine success payloads that happen to be text.
 
 ## Shape decisions
 
-Identical for all three tools: `unwrap` empty, `return_model` `null`, `fields` empty,
-`source: "live"`. Minting a `TypedDict` here would state an authoritative lie about a payload that
-is genuinely free text. `_observed_shape: "str"` is retained as evidence, and deliberately *not*
-recorded as `_probe_status: "inconclusive"` — every probe returned a real success payload, so the
-`str` is an observed fact, not an unobserved shape.
+For all three tools: `unwrap: []`, `return_model: null`, `fields: {}`, `-> Any`. There is no
+envelope to dig past and no record to model; inventing an unwrap path would make `_dig` return
+a substring instead of the document. `_observed_shape: "str"` is left in the sidecar as the
+evidence that the `Any` is honest rather than unresolved. `probed_args` needed no scrubbing —
+a public repo slug and a benign question string, both functional.
 
-One honest `Any` remains: `ask_question`'s `repoName` is declared `anyOf: [string, array<string>]`,
-so codegen types it `Any`. No `input_override` was added — the schema is not lying, it really does
-accept both, and narrowing it would be invention rather than a correction.
+One useful side effect: codegen read `_observed_bytes` and added a size warning to
+`read_wiki_contents`'s docstring (`~522 KB observed`), which is exactly the signal a caller
+needs for a tool that dumps a whole wiki into context.
 
-## Result
+## Verification
 
-The regenerated module parses cleanly (`ast.parse` OK) and exposes all 3 async wrappers, each
-returning `Any` by design. This server is a `no_shaped_tool_by_design` case: zero shaped tools is
-the correct outcome, not a coverage gap.
+The regenerated module parses cleanly (`ast.parse` OK), carries embedded `__schema__` on each
+function, and correctly types `repoName` as `str` on the two read tools and `Any` on
+`ask_question` (whose union schema admits a list). `run.py` is the harness's responsibility and
+was not generated here.

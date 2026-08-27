@@ -11,15 +11,11 @@ import importlib.util
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-# The wrapper module file is "time.py", which collides with the stdlib `time`
-# module (already in sys.modules by the time this runs), so a plain `import
-# time` would silently pick up the stdlib one. Load it by path as
-# `time_wrappers` instead.
-_spec = importlib.util.spec_from_file_location(
-    "time_wrappers",
-    os.path.join(os.path.dirname(__file__), "time.py"),
-)
+# The wrapper module is named "time", which collides with the stdlib module
+# already imported by asyncio. Load it by path instead of via sys.path so the
+# generated wrappers are the ones exercised here.
+_WRAPPER_PATH = os.path.join(os.path.dirname(__file__), "time.py")
+_spec = importlib.util.spec_from_file_location("time_wrappers", _WRAPPER_PATH)
 time_wrappers = importlib.util.module_from_spec(_spec)
 sys.modules["time_wrappers"] = time_wrappers
 _spec.loader.exec_module(time_wrappers)
@@ -33,39 +29,28 @@ async def main() -> None:
     # One connection for the whole run: a single initialize() and a single
     # subprocess, instead of reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating tools: none — this server exposes only read-only tools.
-        # Args below are the real probed args from time.verify.json.
+        # Skipped mutating tools: (none — all tools are read-only)
+        # Args are the real probed args from time.verify.json.
 
-        # get_current_time -> CurrentTime  (probed variant: America/New_York)
-        now_ny = await time_wrappers.get_current_time(caller, timezone="America/New_York")
+        # get_current_time -> CurrentTime
+        now = await time_wrappers.get_current_time(caller, timezone="America/New_York")
         print(
-            f"get_current_time(America/New_York): timezone={now_ny.get('timezone')!r} "
-            f"datetime={now_ny.get('datetime')!r} "
-            f"day_of_week={now_ny.get('day_of_week')!r} "
-            f"is_dst={now_ny.get('is_dst')!r}"
+            f"get_current_time: timezone={now.get('timezone')!r}  "
+            f"datetime={now.get('datetime')!r}  "
+            f"day_of_week={now.get('day_of_week')!r}  is_dst={now.get('is_dst')!r}"
         )
 
-        # get_current_time -> CurrentTime  (probed variant: Europe/London)
-        now_london = await time_wrappers.get_current_time(caller, timezone="Europe/London")
-        print(
-            f"get_current_time(Europe/London): timezone={now_london.get('timezone')!r} "
-            f"datetime={now_london.get('datetime')!r} "
-            f"day_of_week={now_london.get('day_of_week')!r} "
-            f"is_dst={now_london.get('is_dst')!r}"
-        )
-
-        # convert_time -> TimeConversion
-        conversion = await time_wrappers.convert_time(
+        # convert_time -> ConvertedTime
+        converted = await time_wrappers.convert_time(
             caller,
             source_timezone="America/New_York",
             time="14:30",
             target_timezone="Asia/Tokyo",
         )
         print(
-            f"convert_time(America/New_York 14:30 -> Asia/Tokyo): "
-            f"source={conversion.get('source')!r} "
-            f"target={conversion.get('target')!r} "
-            f"time_difference={conversion.get('time_difference')!r}"
+            f"convert_time: source={converted.get('source')!r}  "
+            f"target={converted.get('target')!r}  "
+            f"time_difference={converted.get('time_difference')!r}"
         )
 
 

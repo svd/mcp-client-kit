@@ -1,84 +1,46 @@
 {
-  "aws___get_regional_availability": {
-    "unwrap": [
-      "content",
-      "result"
-    ],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": [
-      {
-        "regions": [
-          "us-east-1"
-        ],
-        "resource_type": "product"
-      },
-      {
-        "regions": [
-          "us-east-1"
-        ],
-        "resource_type": "api"
-      },
-      {
-        "regions": [
-          "us-east-1"
-        ],
-        "resource_type": "cfn"
-      }
-    ],
-    "_observed_bytes": 7285,
-    "discriminator": "resource_type",
-    "variants": {
-      "product": {
-        "return_model": "RegionalProductAvailability",
-        "fields": {
-          "products": "dict[str, dict[str, str] | None]",
-          "next_token": "str",
-          "failed_regions": "Any | None"
-        }
-      },
-      "api": {
-        "return_model": "RegionalApiAvailability",
-        "fields": {
-          "service_apis": "dict[str, str | None]",
-          "next_token": "str",
-          "failed_regions": "Any | None"
-        }
-      },
-      "cfn": {
-        "return_model": "RegionalCfnAvailability",
-        "fields": {
-          "cfn_resources": "dict[str, str | None]",
-          "next_token": "str",
-          "failed_regions": "Any | None"
-        }
-      }
-    }
-  },
   "aws___list_regions": {
-    "unwrap": [
-      "content",
-      "result"
-    ],
-    "return_model": "AwsRegion",
+    "unwrap": ["content", "result"],
+    "return_model": "RegionSummary",
+    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "region_id": "str",
       "region_long_name": "str"
     },
     "source": "live",
-    "probed_args": {},
-    "_observed_bytes": 2781,
-    "return_container": "list"
+    "probed_args": {}
+  },
+  "aws___search_documentation": {
+    "unwrap": ["content", "result"],
+    "return_model": "SearchDocumentationItem",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {
+      "rank_order": "int",
+      "title": "str",
+      "context": "str",
+      "url": "str",
+      "skill_description": "str",
+      "skill_name": "str"
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "search_phrase": "AWS Lambda function timeout limit",
+        "limit": 4
+      },
+      {
+        "search_phrase": "AWS Lambda skill",
+        "topics": ["agent_skills"],
+        "limit": 4
+      }
+    ]
   },
   "aws___read_documentation": {
-    "unwrap": [
-      "content",
-      "result"
-    ],
-    "return_model": "DocPage",
+    "unwrap": ["content", "result"],
+    "return_model": "DocumentationPage",
+    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "status": "str",
@@ -96,59 +58,59 @@
       "requests": [
         {
           "url": "https://docs.aws.amazon.com/lambda/latest/dg/welcome.html",
-          "max_length": 2000
+          "max_length": 3000
         }
       ]
-    },
-    "_observed_bytes": 2448,
-    "return_container": "list"
+    }
   },
   "aws___retrieve_skill": {
-    "unwrap": [
-      "content",
-      "skill_content"
-    ],
-    "return_model": null,
+    "unwrap": ["content"],
+    "return_model": "SkillDocument",
+    "input_overrides": {},
+    "fields": {
+      "skill_content": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "skill_name": "connecting-lambda-to-api-gateway"
+    }
+  },
+  "aws___get_regional_availability": {
+    "unwrap": ["content", "result"],
+    "discriminator": "resource_type",
+    "variants": {
+      "product": {
+        "return_model": "ProductAvailability",
+        "fields": {
+          "products": "dict",
+          "next_token": "str | None",
+          "failed_regions": "Any | None"
+        }
+      },
+      "api": {
+        "return_model": "ServiceApiAvailability",
+        "fields": {
+          "service_apis": "dict",
+          "next_token": "str | None",
+          "failed_regions": "Any | None"
+        }
+      },
+      "cfn": {
+        "return_model": "CfnResourceAvailability",
+        "fields": {
+          "cfn_resources": "dict",
+          "next_token": "str | None",
+          "failed_regions": "Any | None"
+        }
+      }
+    },
     "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {
-      "skill_name": "debugging-lambda-timeouts"
-    },
-    "_observed_bytes": 1692,
-    "_scalar_payload": "content.skill_content is a markdown string; unwrap-only, no TypedDict (return_model must not name a primitive)."
-  },
-  "aws___search_documentation": {
-    "unwrap": [
-      "content",
-      "result"
-    ],
-    "return_model": "SearchResultItem",
-    "input_overrides": {},
-    "fields": {
-      "rank_order": "int",
-      "title": "str",
-      "context": "str",
-      "url": "str",
-      "skill_description": "str",
-      "skill_name": "str"
-    },
-    "source": "live",
-    "probed_args": [
-      {
-        "search_phrase": "Lambda function timeout configuration",
-        "limit": 3
-      },
-      {
-        "search_phrase": "Lambda timeout error",
-        "topics": [
-          "troubleshooting"
-        ],
-        "limit": 3
-      }
-    ],
-    "_observed_bytes": 4544,
-    "return_container": "list",
-    "_heterogeneous_list": "One response mixes two record kinds: doc hits carry context+url, agent-skill hits carry skill_description+skill_name. Not selected by any argument, so modelled as one total=False union rather than a discriminated variant set."
+      "regions": ["us-east-1"],
+      "resource_type": "cfn",
+      "filters": ["AWS::S3::Bucket"]
+    }
   }
 }

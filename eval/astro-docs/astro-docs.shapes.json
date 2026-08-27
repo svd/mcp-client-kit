@@ -3,7 +3,7 @@
     "unwrap": [
       "search_results"
     ],
-    "return_model": "AstroDocSearchResult",
+    "return_model": "SearchDocItem",
     "return_container": "list",
     "input_overrides": {},
     "fields": {

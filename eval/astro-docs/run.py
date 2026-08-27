@@ -12,8 +12,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-# The wrapper module file is "astro-docs.py" — the hyphen makes it
-# unimportable by a plain `import`, so load it by path as `astro_docs`.
+# The wrapper module file is "astro-docs.py" — the hyphen makes it unimportable
+# by a plain `import`, so load it by path under the name `astro_docs`.
 _MODULE_PATH = os.path.join(os.path.dirname(__file__), "astro-docs.py")
 _spec = importlib.util.spec_from_file_location("astro_docs", _MODULE_PATH)
 assert _spec is not None and _spec.loader is not None
@@ -26,42 +26,43 @@ from mcpgen import McpBridgeCaller
 SERVER_URL = "https://mcp.docs.astro.build/mcp"
 
 
+def _preview(label: str, results: list) -> None:
+    """`search_astro_docs -> list[SearchDocItem]` after the `search_results` unwrap."""
+    print(f"{label}: {len(results)} item(s)")
+    for item in results[:3]:
+        title = item.get("title")
+        source_url = item.get("source_url")
+        source_type = item.get("source_type")
+        content = item.get("content") or ""
+        print(
+            f"  - title={title!r} source_type={source_type!r} "
+            f"source_url={source_url!r} content={len(content)} chars"
+        )
+
+
 async def main() -> None:
     caller = McpBridgeCaller(url=SERVER_URL)
 
     # One connection for the whole run: a single initialize() instead of
     # reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating tools: (none — the server exposes a single read-only
-        # search tool).
-        # Args are the real, pre-scrub probe args from astro-docs.verify.json.
-        # search_astro_docs has no discriminator, so both probed queries are
-        # replayed against the one return shape (list[AstroDocSearchResult]).
+        # Skipped mutating tools: none. astro-docs exposes a single read-only
+        # search tool.
+        # No tool in astro-docs.shapes.json carries a discriminator, so there are
+        # no per-variant calls; both probed queries from astro-docs.verify.json
+        # are exercised to cover the full probed arg set.
 
-        # search_astro_docs -> list[AstroDocSearchResult]
+        # search_astro_docs -> list[SearchDocItem]  (probe 1)
         collections = await astro_docs.search_astro_docs(
             caller, query="content collections"
         )
-        print(f"search_astro_docs('content collections'): {len(collections)} item(s)")
-        for hit in collections[:3]:
-            print(
-                f"  - {hit.get('title')!r}  "
-                f"{hit.get('source_type')!r}  {hit.get('source_url')!r}"
-            )
+        _preview("search_astro_docs('content collections')", collections)
 
-        # search_astro_docs -> list[AstroDocSearchResult]  (second probed query)
+        # search_astro_docs -> list[SearchDocItem]  (probe 2)
         transitions = await astro_docs.search_astro_docs(
             caller, query="view transitions astro:page-load"
         )
-        print(
-            "search_astro_docs('view transitions astro:page-load'): "
-            f"{len(transitions)} item(s)"
-        )
-        for hit in transitions[:3]:
-            print(
-                f"  - {hit.get('title')!r}  "
-                f"{hit.get('source_type')!r}  {hit.get('source_url')!r}"
-            )
+        _preview("search_astro_docs('view transitions astro:page-load')", transitions)
 
 
 if __name__ == "__main__":

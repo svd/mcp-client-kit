@@ -5,32 +5,20 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "operations": [
-          {
-            "cmd": "ls",
-            "args": [
-              "hf://models/trending",
-              "--limit",
-              "5"
-            ]
-          }
-        ]
-      },
-      {
-        "operations": [
-          {
-            "cmd": "stat",
-            "args": [
-              "hf://models/openai/gpt-oss-120b"
-            ]
-          }
-        ]
-      }
-    ],
+    "probed_args": {
+      "operations": [
+        {
+          "cmd": "ls",
+          "args": [
+            "hf://models/trending",
+            "--limit",
+            "5"
+          ]
+        }
+      ]
+    },
     "_observed_shape": "str",
-    "_observed_bytes": 1035
+    "_observed_bytes": 1036
   },
   "hf_whoami": {
     "unwrap": [],
@@ -48,26 +36,17 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "repo_ids": [
-          "openai/gpt-oss-120b"
-        ],
-        "repo_type": "model"
-      },
-      {
-        "repo_ids": [
-          "stanfordnlp/imdb"
-        ],
-        "repo_type": "dataset",
-        "operations": [
-          "overview",
-          "dataset_structure"
-        ]
-      }
-    ],
+    "probed_args": {
+      "repo_ids": [
+        "google-bert/bert-base-uncased"
+      ],
+      "repo_type": "model",
+      "operations": [
+        "overview"
+      ]
+    },
     "_observed_shape": "str",
-    "_observed_bytes": 4337
+    "_observed_bytes": 1835
   },
   "hub_repo_search": {
     "unwrap": [],

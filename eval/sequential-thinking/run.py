@@ -33,16 +33,17 @@ async def main() -> None:
     # tool. It appends to an in-process thought log that dies with the subprocess,
     # so it is treated as read-only for smoke-test purposes.
     #
-    # No discriminator in shapes.json; verify.json records two probes, emitted
-    # below in sequence (linear step, then a branch off thought 1).
+    # No discriminator in shapes.json; verify.json records three probes, emitted
+    # below in sequence: a linear opening thought, a non-revision follow-up, and a
+    # branch off thought 2. All three return the same ThoughtStatus shape.
 
     # One connection for the whole run: a single initialize() and a single
     # subprocess, instead of reconnecting for every tool call.
     async with caller.connected():
-        # sequentialthinking -> ThoughtProgress  (probe 1/2: initial linear thought)
+        # sequentialthinking -> ThoughtStatus  (probe 1/3: initial linear thought)
         step1 = await sequential_thinking.sequentialthinking(
             caller,
-            thought="Step one: enumerate the constraints of the problem.",
+            thought="Evaluate whether the wrapper generation pipeline produces typed records.",
             thoughtNumber=1,
             totalThoughts=3,
             nextThoughtNeeded=True,
@@ -55,17 +56,14 @@ async def main() -> None:
             f"  thoughtHistoryLength={step1.get('thoughtHistoryLength')!r}"
         )
 
-        # sequentialthinking -> ThoughtProgress  (probe 2/2: branch off thought 1)
+        # sequentialthinking -> ThoughtStatus  (probe 2/3: follow-up, isRevision=False)
         step2 = await sequential_thinking.sequentialthinking(
             caller,
-            thought="Step two: branch to explore an alternative framing.",
+            thought="Second step: consider the response envelope shape.",
             thoughtNumber=2,
             totalThoughts=3,
             nextThoughtNeeded=True,
-            branchFromThought=1,
-            branchId="alt-a",
             isRevision=False,
-            needsMoreThoughts=False,
         )
         print(
             f"sequentialthinking(2): thoughtNumber={step2.get('thoughtNumber')!r}"
@@ -73,6 +71,24 @@ async def main() -> None:
             f"  nextThoughtNeeded={step2.get('nextThoughtNeeded')!r}"
             f"  branches={step2.get('branches')!r}"
             f"  thoughtHistoryLength={step2.get('thoughtHistoryLength')!r}"
+        )
+
+        # sequentialthinking -> ThoughtStatus  (probe 3/3: branch off thought 2)
+        step3 = await sequential_thinking.sequentialthinking(
+            caller,
+            thought="Final step: conclude.",
+            thoughtNumber=3,
+            totalThoughts=3,
+            nextThoughtNeeded=False,
+            branchFromThought=2,
+            branchId="alt-a",
+        )
+        print(
+            f"sequentialthinking(3): thoughtNumber={step3.get('thoughtNumber')!r}"
+            f"  totalThoughts={step3.get('totalThoughts')!r}"
+            f"  nextThoughtNeeded={step3.get('nextThoughtNeeded')!r}"
+            f"  branches={step3.get('branches')!r}"
+            f"  thoughtHistoryLength={step3.get('thoughtHistoryLength')!r}"
         )
 
 

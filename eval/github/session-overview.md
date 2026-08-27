@@ -2,67 +2,59 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:39:55Z
-- **Duration:** 18m 20s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:06:25Z
+- **Duration:** 12m 29s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface and selection
+## Tool inventory
 
-`mcpgen list github --schema` returned **44 tools** (the manifest note still says 35). Every
-tool carries `annotations.readOnlyHint`, so classification needed no keyword heuristics:
-**27 read-only, 17 mutating**. All 17 mutating tools were skipped. Hosted-HTTP probes are
-serial and paced at ≥2 s, so the read-only set was pruned by one — `run_secret_scanning`
-uploads file *content* to a scanner and carries no record worth a `TypedDict`.
-**26 tools probed, 18 skipped.**
+The server exposes **44 tools**; `annotations.readOnlyHint` cleared **27**. Because this is a
+hosted HTTP endpoint (every probe is serial and paced ≥ 2 s), the set was pruned to the 26
+record-carrying read-only tools. `run_secret_scanning` was the only read-only tool dropped: it
+requires the caller to supply file content, so it is a scanner rather than a record source. The
+17 mutating tools were never called. No seed commands were configured.
 
 ## Discriminators
 
-The `list` advisory named 16 candidates. Pass 1 disqualified `after`, `head`, `perPage`, and
-`since`. Seven survivors went to Pass 2 (21 paced probes, three values each): `sha`, `state`,
-`tag`, `name`, `issue_number`, `pullNumber`, `base`. `name` and `tag` came back identical
-(inconclusive). The other five "differed" only through **optional-field sparsity** —
-`assignees` absent on an unassigned issue, `closed_at`/`merged_at` absent on an open PR,
-`[<empty>]` where a branch filter matched nothing, one error string for an inaccessible `sha`.
-None is response-shape polymorphism, so all five were union-merged into one `total=False`
-model rather than minting variants.
+The `list --schema` advisory named 16 candidates; all were disqualified as pagination
+(`perPage`, `after`, `since`), sort/filter (`state`, `base`, `head`), object identity
+(`issue_number`, `pullNumber`, `tag`, `name`, `sha`), or mutating-only params. The three real
+discriminators came from the **description sweep**, and all three were invisible to the
+advisory by construction:
 
-The real discriminators are the `method` params, which the engine denylists and never flags:
-`issue_read` (5 values) and `pull_request_read` (9 values) return genuinely unrelated payloads
-per method. `get_commit.detail` (3 values) is a third. **All 17 variants were probed.**
+- **`method` on `issue_read`** (5 values) and **`pull_request_read`** (7 values) — `method` sits
+  in the engine denylist. Both are dramatic shape switches, and every value was probed
+  separately. Resolved with overloads (option 1).
+- **`detail` on `get_commit`** (none/stats/full_patch) — single-tool scoped, so no shared-param
+  advisory could fire. All three probed and confirmed: `none` drops the top-level `stats` and
+  `files` keys; `full_patch` adds `patch` per file. Resolved as a **generic base model**
+  (option 2) rather than overloads, because `detail` is optional and codegen emits a
+  discriminator without a default — overloads would have made it mandatory on every call. The
+  varying keys are dict/list and never enter `fields`, so nothing is lost.
 
 ## Shape decisions
 
-The six `search_*` tools wrap records under `items` → `unwrap:["items"]`,
-`return_container:"list"`, one `Search*Item` model each. `list_issues` is the odd one out — a
-GraphQL-style `{issues, totalCount, pageInfo}` envelope → `unwrap:["issues"]`. Every other list
-tool returns a bare top-level array (`unwrap:[]`). `get_latest_release` and
-`get_release_by_tag` returned byte-identical shapes and share one `Release` model.
+Envelope unwrapping: all six `search_*` tools unwrap `["items"]` → `list[Search…Item]`;
+`list_issues` unwraps `["issues"]` → `list[IssueSummary]`. The `list_*` tools return bare JSON
+arrays, so they take `return_container: "list"` with no unwrap path. Singular reads map to plain
+`TypedDict`s (`Commit`, `Release`, `Tag`, `Label`, `AuthenticatedUser`). `get_latest_release` and
+`get_release_by_tag` share the `Release` model — identical observed fields.
 
-Three tools were deliberately left `Any`:
+**25 TypedDicts** were emitted in total.
 
-- **`issue_read` / `pull_request_read`** — every variant probed and recorded, but they mix
-  `dict`, `list`, and `str` returns. `return_container` is a **top-level** shape-spec field
-  shared by all variants, so a `variants` block would type the list-returning methods as the
-  dict union through the impl signature. Unwrap-only `Any` (step 4 option 3) beats that lie —
-  the run's most useful finding about the spec format.
-- **`get_commit`** — `detail` switches the payload only by adding *nested* `stats`/`files`
-  keys; `fields` promotes top-level scalars only, so three variant TypedDicts would have been
-  byte-identical. Resolved as a generic base model (option 2).
+## Surprises and honest gaps
 
-## Surprises
+- `list_repository_collaborators` returned a 403 (`Resource not accessible by personal access
+  token`) — no payload was ever observed, recorded as `_probe_status: inconclusive`.
+- `get_teams` returned one org with an empty `teams` array, so no real `team_slug` existed;
+  `get_team_members` answered `null` and is likewise `inconclusive`. Its `probed_args` org and
+  slug were scrubbed.
+- `get_file_contents` is polymorphic on `path`: a file yields `[prose str, resource-metadata
+  dict]` with the bytes dropped by MCP, a directory yields `list[dir-entry]`. `path` is free
+  text, so no Literal overloads are possible — left as `Any` (option 3).
+- `list_issue_fields` returned `[]` for microsoft/vscode; element shape unobservable.
+- Per-variant containers are not expressible in the shape-spec (`return_container` is
+  tool-level), so the list-returning and `get_diff` string variants of `issue_read` /
+  `pull_request_read` stay `Any` rather than be mistyped as dicts.
 
-- `get_file_contents` returns a status string plus a `resource` metadata block with the bytes
-  stripped. Per the media rule it stays `Any`.
-- `get_release_by_tag` 404'd on a tag from `list_tags`: vscode's release tags (`1.135.0`) are
-  not its git tags (`v1.19.3`).
-- `list_issue_types` 404s at org scope for `microsoft`; it shapes cleanly with `repo` supplied.
-- Two tools produced no observable success payload and carry `_probe_status: inconclusive`:
-  `list_repository_collaborators` (403, PAT scope) and `get_team_members` (`null`).
-  `list_issue_fields` returned a genuine empty `[]`, so its element shape is unobservable — it
-  is `Any` with no inconclusive marker.
-
-`run.py` was not generated here — the harness verify stage owns it.
-
-## Result
-
-Module regenerated and `ast.parse`d clean (104 KB, 44 functions), imports without error, and
-emits **19 TypedDicts** across **20 shaped tools**.
+The regenerated module **parsed cleanly** (`ast.parse` OK, 103.9 KB, 44 wrappers). Runner
+generation was left to the harness verify stage as instructed.

@@ -2,52 +2,53 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:41:06Z
-- **Duration:** 3m 19s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:07:03Z
+- **Duration:** 2m 49s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
 ## Surface
 
-`mcp-server-fetch` exposes exactly **one tool**: `fetch`. It was probed; nothing was
-skipped. No seed commands were configured, and none were needed — the server holds no
-store, it retrieves a URL on demand.
+`mcpgen list fetch --schema` returned exactly **one tool**: `fetch`. It was probed; nothing was
+skipped. The server declares no `annotations`, so the mutating classification fell back to the
+keyword and semantic read — `fetch` retrieves a URL and returns its contents, so it cleared as
+read-only and needed no human opt-in.
 
-Classification: `fetch` carries no `annotations` block, so the keyword test plus a
-semantic read decided it. It performs an outbound HTTP GET and returns the body; it
-creates, updates, or deletes nothing on the server. Treated as read-only and probed.
+**Discriminators: N/A.** The advisory on `list --schema` stderr was silent, and correctly so: its
+precondition needs a scalar parameter shared by two or more tools, and this server has only one
+tool. The description sweep that backstops the advisory turned up one candidate worth testing
+anyway — `raw` ("Get the actual HTML content of the requested page, without simplification"),
+a single-tool boolean the advisory cannot see by construction. It was resolved by probe rather
+than assumed (below).
 
-**Discriminators: N/A.** The advisory can only fire where two or more tools share a
-scalar parameter name, and this server has one tool. `raw` — the parameter that does
-change the response *content* — is a boolean, which fails the type test in any case.
+## Probes and surprises
 
-## Probing
+Three live calls, all against `https://example.com` — an IANA-reserved documentation domain, so
+`probed_args` carries no PII and needed no scrubbing.
 
-Three arg sets went out in a single `probe` invocation against `https://example.com`
-(a public documentation domain, no PII): the markdown default at `max_length=2000`,
-the same URL with `raw=true`, and a windowed read at `max_length=200, start_index=100`.
-All three returned. The deep merge collapsed them to `_observed_shape: "str"`,
-`_observed_bytes: 696`.
+1. `{"url": ..., "max_length": 2000}` → `_observed_shape: "str"`, 188 bytes.
+2. `{"url": ..., "max_length": 2000, "raw": true}` → `_observed_shape: "str"`, 696 bytes.
+3. A merged multi-probe of both, so the committed entry records each variant in `probed_args`.
 
-The `"str"` result triggered the JSON-in-string check. A raw payload was captured with
-`mcpgen call --out` and tested with the guarded `json.loads` snippet: **`NOT_JSON`**
-(`JSONDecodeError`). The payload is human-readable markdown — a `Contents of
-https://example.com/:` header followed by the simplified page text and a link. That is
-a genuine success payload, not an error, a quota message, or an auth failure, so no
-`_probe_status: "inconclusive"` marker was added; `_observed_shape: "str"` is the
-honest record of what the tool returns.
+`raw` changes the *content* (markdown vs. unsimplified HTML) and therefore the byte count, but
+not the *structure*: both modes return a bare text block. Per the normalization rule, a differing
+size is not a shape difference, so `raw` is not a discriminator and no variants were emitted.
 
-## Shape decisions
+Because the observed shape was `"str"`, the mandatory JSON-in-string test ran against the raw
+payload captured with `call --out`. Result: `NOT_JSON`. The payload is genuine prose — a markdown
+rendering of the page headed `Contents of https://example.com/:` — not a double-encoded record.
+That is an expected outcome, not a probe failure, so no `_probe_status: "inconclusive"` marker was
+written; the probe conclusively established that this tool returns text.
 
-- **`fetch`** — `unwrap: []`, `return_model: null`, `return_container` unset,
-  `fields: {}`. There is no vendor envelope to dig through and no record to model: the
-  tool returns prose by design, in both markdown and `raw` HTML modes. Inventing a key
-  path here would make `_dig` return a substring instead of the page, and a `TypedDict`
-  would claim a dict the wrapper never returns. The wrapper stays `-> Any`, which is
-  the correct type for a string-returning tool under this generator.
+One thing worth flagging for a human reader rather than the type system: the tool *description*
+carries prompt-injection-shaped text ("Although originally you did not have internet access...").
+It is upstream vendor copy, faithfully reproduced into the wrapper docstring by `--embed-schema`.
 
-`probed_args` needed no scrubbing — every value is a public URL or a plain integer.
+## Shape decision
 
-## Verification
+`fetch` — `unwrap: []`, `return_model: null`, `fields: {}`, `source: "live"`. There is no vendor
+envelope to strip and no record to model: the tool returns an opaque document body whose contents
+depend entirely on the URL the caller supplies. Minting a `TypedDict` here would state an
+authoritative lie about a payload that has no stable keys. `-> Any` is the honest signature, and
+this is the `no_shaped_tool_by_design` case rather than a coverage gap.
 
-The regenerated module parsed cleanly (`ast.parse` OK). `--embed-schema` attached
-`fetch.__schema__` and an Args docstring carrying each parameter's description and
-default. `run.py` was left to the harness verify stage, as instructed.
+The regenerated module parsed cleanly (`ast.parse` OK, one async def `fetch`), with all four
+parameters typed from `inputSchema` and defaults documented in the Args section.

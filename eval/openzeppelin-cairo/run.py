@@ -5,20 +5,31 @@ Auth: none (public endpoint)
 
 Usage:
     python eval/openzeppelin-cairo/run.py
+
+Args come from openzeppelin-cairo.verify.json (real, pre-scrub probe args).
+
+Every tool on this server is a pure Cairo source-code generator: it takes a
+contract configuration and returns the rendered `.cairo` source as a plain
+string. Nothing is written anywhere, so all eight tools are read-only and none
+carry a discriminator - one call per tool, previewing the returned source.
+
+Note: the generated wrapper module lives at `openzeppelin-cairo.py`, whose
+filename contains a hyphen and so cannot be imported with a plain `import`
+statement. We load it directly from its file path under a valid identifier to
+avoid a SyntaxError/ModuleNotFoundError.
 """
 import asyncio
 import importlib.util
 import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-# The wrapper module file is "openzeppelin-cairo.py" — the hyphen makes it
-# unimportable by a plain `import`, so load it by path as `openzeppelin_cairo`.
-_MODULE_PATH = os.path.join(os.path.dirname(__file__), "openzeppelin-cairo.py")
-_spec = importlib.util.spec_from_file_location("openzeppelin_cairo", _MODULE_PATH)
+_MODULE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "openzeppelin-cairo.py"
+)
+_spec = importlib.util.spec_from_file_location(
+    "openzeppelin_cairo_wrappers", _MODULE_PATH
+)
 assert _spec is not None and _spec.loader is not None
 openzeppelin_cairo = importlib.util.module_from_spec(_spec)
-sys.modules["openzeppelin_cairo"] = openzeppelin_cairo
 _spec.loader.exec_module(openzeppelin_cairo)
 
 from mcpgen import McpBridgeCaller
@@ -26,14 +37,15 @@ from mcpgen import McpBridgeCaller
 SERVER_URL = "https://mcp.openzeppelin.com/contracts/cairo/mcp"
 
 
-def _preview(label: str, result: object) -> None:
-    """Every tool here is annotated `-> Any`; observed shape is `str` (Cairo source)."""
-    if isinstance(result, str):
-        lines = result.splitlines()
-        first = lines[0] if lines else ""
-        print(f"{label}: str, {len(result)} chars, first line={first!r}")
-    else:
-        print(f"{label}: {type(result).__name__}")
+def _summarize(source: object, label: str) -> None:
+    """Print size + first meaningful line of a generated Cairo source string."""
+    text = "" if source is None else str(source)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    head = lines[0] if lines else ""
+    if len(head) > 72:
+        head = head[:72] + "..."
+    print(f"{label}: {type(source).__name__} {len(text)} char(s), {len(lines)} line(s)")
+    print(f"  first line: {head!r}")
 
 
 async def main() -> None:
@@ -42,27 +54,38 @@ async def main() -> None:
     # One connection for the whole run: a single initialize() instead of
     # reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating tools: none. All 8 tools are pure contract-source
-        # generators — they return Cairo text and write nothing server-side.
-        # No tool in openzeppelin-cairo.shapes.json carries a discriminator,
-        # so this is one call per tool.
-        # Args are the real probed values from openzeppelin-cairo.verify.json.
+        # Skipped mutating tools: (none - every tool on this server is a
+        # read-only source-code generator)
 
-        # cairo-custom -> Any  (minimal blank contract scaffold)
-        custom = await openzeppelin_cairo.cairo_custom(caller, name="Registry")
-        _preview("cairo-custom", custom)
+        # cairo-custom -> Any  (bare scaffold; simplest contract shape)
+        custom = await openzeppelin_cairo.cairo_custom(caller, name="MyContract")
+        _summarize(custom, "cairo-custom")
+
+        # cairo-account -> Any  (type is a Literal['stark', 'eth'] discriminator
+        # on the input side only; the return shape is a source string either way,
+        # and only 'stark' was probed)
+        account = await openzeppelin_cairo.cairo_account(
+            caller,
+            name="MyAccount",
+            type="stark",
+        )
+        _summarize(account, "cairo-account(stark)")
 
         # cairo-erc20 -> Any
         erc20 = await openzeppelin_cairo.cairo_erc20(
-            caller, name="MyToken", symbol="MTK"
+            caller,
+            name="MyToken",
+            symbol="MTK",
         )
-        _preview("cairo-erc20", erc20)
+        _summarize(erc20, "cairo-erc20")
 
         # cairo-erc721 -> Any
         erc721 = await openzeppelin_cairo.cairo_erc721(
-            caller, name="MyNFT", symbol="MNFT"
+            caller,
+            name="MyNFT",
+            symbol="MNFT",
         )
-        _preview("cairo-erc721", erc721)
+        _summarize(erc721, "cairo-erc721")
 
         # cairo-erc1155 -> Any
         erc1155 = await openzeppelin_cairo.cairo_erc1155(
@@ -70,36 +93,35 @@ async def main() -> None:
             name="MyMultiToken",
             baseUri="https://example.com/metadata/{id}.json",
         )
-        _preview("cairo-erc1155", erc1155)
+        _summarize(erc1155, "cairo-erc1155")
 
-        # cairo-account -> Any
-        account = await openzeppelin_cairo.cairo_account(
-            caller, name="MyAccount", type="stark"
+        # cairo-governor -> Any  (largest payload of the eight)
+        governor = await openzeppelin_cairo.cairo_governor(
+            caller,
+            name="MyGovernor",
+            delay="1 day",
+            period="1 week",
         )
-        _preview("cairo-account", account)
+        _summarize(governor, "cairo-governor")
 
         # cairo-multisig -> Any
         multisig = await openzeppelin_cairo.cairo_multisig(
-            caller, name="MyMultisig", quorum="2"
+            caller,
+            name="MyMultisig",
+            quorum="2",
         )
-        _preview("cairo-multisig", multisig)
+        _summarize(multisig, "cairo-multisig")
 
         # cairo-vesting -> Any
         vesting = await openzeppelin_cairo.cairo_vesting(
             caller,
-            name="MyVesting",
-            startDate="2026-01-01T00:00",
-            duration="365 days",
+            name="VestingWallet",
+            startDate="2026-03-15T14:30",
+            duration="1 year",
             cliffDuration="90 days",
             schedule="linear",
         )
-        _preview("cairo-vesting", vesting)
-
-        # cairo-governor -> Any  (largest payload of the eight)
-        governor = await openzeppelin_cairo.cairo_governor(
-            caller, name="MyGovernor", delay="1 day", period="1 week"
-        )
-        _preview("cairo-governor", governor)
+        _summarize(vesting, "cairo-vesting")
 
 
 if __name__ == "__main__":

@@ -38,11 +38,16 @@ async def main() -> None:
         cols_products = await sqlite.describe_table(caller, table_name="products")
         print(f"describe_table(products): {len(cols_products)} column(s)")
 
-        # read_query -> Any  (probed args: query='SELECT * FROM users LIMIT 3')
+        # read_query -> Any  (probe 1: users projection)
         # Row keys follow the caller's SELECT projection, so the shape spec
-        # leaves this Any on purpose.
-        rows = await sqlite.read_query(caller, query="SELECT * FROM users LIMIT 3")
-        print(f"read_query: {type(rows).__name__} with {len(rows)} row(s)")
+        # leaves this Any on purpose — the two probes returned disjoint
+        # column sets, which is why no TypedDict was asserted.
+        users_rows = await sqlite.read_query(caller, query="SELECT * FROM users LIMIT 5")
+        print(f"read_query(users): {type(users_rows).__name__} with {len(users_rows)} row(s)")
+
+        # read_query -> Any  (probe 2: products projection)
+        product_rows = await sqlite.read_query(caller, query="SELECT * FROM products LIMIT 5")
+        print(f"read_query(products): {type(product_rows).__name__} with {len(product_rows)} row(s)")
 
 
 if __name__ == "__main__":

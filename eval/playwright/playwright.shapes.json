@@ -5,21 +5,12 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "level": "error"
-      },
-      {
-        "level": "info"
-      },
-      {
-        "level": "debug"
-      }
-    ],
+    "probed_args": {
+      "level": "info"
+    },
     "_observed_shape": "str",
-    "_observed_bytes": 531,
-    "return_container": null,
-    "_json_unwrap": false
+    "_observed_bytes": 524,
+    "_note": "'level' and 'filename' both probed - neither changes the response shape; the payload stays markdown prose."
   },
   "browser_find": {
     "unwrap": [],
@@ -32,8 +23,7 @@
     },
     "_observed_shape": "str",
     "_observed_bytes": 9654,
-    "return_container": null,
-    "_json_unwrap": false
+    "_note": "Markdown search snippets over the accessibility tree, not JSON."
   },
   "browser_hide_highlight": {
     "unwrap": [],
@@ -41,16 +31,9 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "target": "h1",
-      "element": "main heading"
-    },
+    "probed_args": {},
     "_observed_shape": "str",
-    "_observed_bytes": 321,
-    "return_container": null,
-    "_mutating_suspect": true,
-    "_mutating_reason": "annotations.readOnlyHint=true, but removes a previously injected page overlay; probed anyway because the server declares it read-only.",
-    "_json_unwrap": false
+    "_observed_bytes": 308
   },
   "browser_highlight": {
     "unwrap": [],
@@ -60,14 +43,10 @@
     "source": "live",
     "probed_args": {
       "target": "h1",
-      "element": "main heading"
+      "element": "page heading"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 315,
-    "return_container": null,
-    "_mutating_suspect": true,
-    "_mutating_reason": "annotations.readOnlyHint=true, but injects a persistent overlay into the live page; probed anyway because the server declares it read-only.",
-    "_json_unwrap": false
+    "_observed_bytes": 315
   },
   "browser_network_request": {
     "unwrap": [],
@@ -79,10 +58,8 @@
       "index": 1
     },
     "_observed_shape": "str",
-    "_observed_bytes": 1722,
-    "return_container": null,
-    "_note": "Human-readable request/response dump. Verified NOT_JSON against the raw payload.",
-    "_json_unwrap": false
+    "_observed_bytes": 1694,
+    "_note": "Markdown detail block. 'part' (4 enum values) was probed across all four plus the omitted case - all five return prose, so it selects content, not shape."
   },
   "browser_network_requests": {
     "unwrap": [],
@@ -90,18 +67,12 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "static": false
-      },
-      {
-        "static": true
-      }
-    ],
+    "probed_args": {
+      "static": false
+    },
     "_observed_shape": "str",
-    "_observed_bytes": 1558,
-    "return_container": null,
-    "_json_unwrap": false
+    "_observed_bytes": 425,
+    "_note": "Numbered markdown list, not JSON. 'static' and 'filter' change content volume only."
   },
   "browser_pdf_save": {
     "unwrap": [],
@@ -112,10 +83,7 @@
     "probed_args": {},
     "_observed_shape": "str",
     "_observed_bytes": 509,
-    "return_container": null,
-    "_mutating_suspect": true,
-    "_mutating_reason": "annotations.readOnlyHint=true, but writes a PDF into --output-dir; probed anyway because the server declares it read-only.",
-    "_json_unwrap": false
+    "_note": "Ack naming the written file under the isolated --output-dir."
   },
   "browser_snapshot": {
     "unwrap": [],
@@ -126,9 +94,7 @@
     "probed_args": {},
     "_observed_shape": "str",
     "_observed_bytes": 14585,
-    "return_container": null,
-    "_note": "Markdown + fenced YAML accessibility tree. Verified NOT_JSON against the raw payload.",
-    "_json_unwrap": false
+    "_note": "Accessibility tree rendered as markdown/YAML prose, not JSON. Verified against the raw payload."
   },
   "browser_start_tracing": {
     "unwrap": [],
@@ -139,10 +105,7 @@
     "probed_args": {},
     "_observed_shape": "str",
     "_observed_bytes": 269,
-    "return_container": null,
-    "_mutating_suspect": true,
-    "_mutating_reason": "annotations.readOnlyHint=true, but starts tracing; writes trace/network/resource files; probed anyway because the server declares it read-only.",
-    "_json_unwrap": false
+    "_note": "Ack naming trace files written under the isolated --output-dir."
   },
   "browser_start_video": {
     "unwrap": [],
@@ -153,10 +116,7 @@
     "probed_args": {},
     "_observed_shape": "str",
     "_observed_bytes": 38,
-    "return_container": null,
-    "_mutating_suspect": true,
-    "_mutating_reason": "annotations.readOnlyHint=true, but starts a recorder; writes a video file; probed anyway because the server declares it read-only.",
-    "_json_unwrap": false
+    "_note": "Ack only."
   },
   "browser_stop_tracing": {
     "unwrap": [],
@@ -167,11 +127,8 @@
     "probed_args": {},
     "_observed_shape": "str",
     "_observed_bytes": 42,
-    "return_container": null,
     "_probe_status": "inconclusive",
-    "_mutating_suspect": true,
-    "_mutating_reason": "annotations.readOnlyHint=true, but stops tracing; finalizes trace files; probed anyway because the server declares it read-only.",
-    "_json_unwrap": false
+    "_note": "Every response was 'Error: Tracing is not started' - a fresh process per probe means no tracing session survives to stop."
   },
   "browser_stop_video": {
     "unwrap": [],
@@ -182,10 +139,7 @@
     "probed_args": {},
     "_observed_shape": "str",
     "_observed_bytes": 38,
-    "return_container": null,
-    "_mutating_suspect": true,
-    "_mutating_reason": "annotations.readOnlyHint=true, but stops the recorder; finalizes a video file; probed anyway because the server declares it read-only.",
-    "_json_unwrap": false
+    "_note": "Returned 'No videos were recorded.' - a real result, not an error: each probe is a fresh process, so no recording from a prior call survives."
   },
   "browser_take_screenshot": {
     "unwrap": [],
@@ -201,11 +155,7 @@
       "...x2"
     ],
     "_observed_bytes": 729,
-    "return_container": null,
-    "_mutating_suspect": true,
-    "_mutating_reason": "annotations.readOnlyHint=true, but writes a PNG into --output-dir; probed anyway because the server declares it read-only.",
-    "_note": "Returns a 2-element content list: a markdown text block plus an image block whose base64 bytes mcpgen drops. The observed shape describes the MCP envelope, not a record; left as Any per the media-tool guard.",
-    "_json_unwrap": false
+    "_note": "Returns a 2-block content list: markdown text plus an image block whose bytes the probe drops ({type, mimeType, has_data}). Media tool - left as Any, no payload modelled."
   },
   "browser_video_chapter": {
     "unwrap": [],
@@ -218,11 +168,8 @@
     },
     "_observed_shape": "str",
     "_observed_bytes": 44,
-    "return_container": null,
     "_probe_status": "inconclusive",
-    "_mutating_suspect": true,
-    "_mutating_reason": "annotations.readOnlyHint=true, but renders a chapter card into the recording; probed anyway because the server declares it read-only.",
-    "_json_unwrap": false
+    "_note": "Every response was 'Error: No open pages available.' - shape never observed."
   },
   "browser_video_hide_actions": {
     "unwrap": [],
@@ -233,11 +180,8 @@
     "probed_args": {},
     "_observed_shape": "str",
     "_observed_bytes": 44,
-    "return_container": null,
     "_probe_status": "inconclusive",
-    "_mutating_suspect": true,
-    "_mutating_reason": "annotations.readOnlyHint=true, but turns off persistent action overlays; probed anyway because the server declares it read-only.",
-    "_json_unwrap": false
+    "_note": "Every response was 'Error: No open pages available.' - shape never observed."
   },
   "browser_video_show_actions": {
     "unwrap": [],
@@ -248,11 +192,8 @@
     "probed_args": {},
     "_observed_shape": "str",
     "_observed_bytes": 44,
-    "return_container": null,
     "_probe_status": "inconclusive",
-    "_mutating_suspect": true,
-    "_mutating_reason": "annotations.readOnlyHint=true, but turns on persistent action overlays; probed anyway because the server declares it read-only.",
-    "_json_unwrap": false
+    "_note": "Every response was 'Error: No open pages available.' - shape never observed."
   },
   "browser_wait_for": {
     "unwrap": [],
@@ -265,8 +206,7 @@
     },
     "_observed_shape": "str",
     "_observed_bytes": 44,
-    "return_container": null,
     "_probe_status": "inconclusive",
-    "_json_unwrap": false
+    "_note": "Every response was 'Error: No open pages available.' - shape never observed, despite --init-page putting other tools on a live page."
   }
 }

@@ -15,30 +15,30 @@ SERVER = 'aws-knowledge'
 
 
 
-class RegionalApiAvailability(TypedDict, total=False):
-    service_apis: dict[str, str | None]
-    next_token: str
+class ServiceApiAvailability(TypedDict, total=False):
+    service_apis: dict
+    next_token: str | None
     failed_regions: Any | None
 
 
-class RegionalCfnAvailability(TypedDict, total=False):
-    cfn_resources: dict[str, str | None]
-    next_token: str
+class CfnResourceAvailability(TypedDict, total=False):
+    cfn_resources: dict
+    next_token: str | None
     failed_regions: Any | None
 
 
-class RegionalProductAvailability(TypedDict, total=False):
-    products: dict[str, dict[str, str] | None]
-    next_token: str
+class ProductAvailability(TypedDict, total=False):
+    products: dict
+    next_token: str | None
     failed_regions: Any | None
 
 
-class AwsRegion(TypedDict, total=False):
+class RegionSummary(TypedDict, total=False):
     region_id: str
     region_long_name: str
 
 
-class DocPage(TypedDict, total=False):
+class DocumentationPage(TypedDict, total=False):
     status: str
     url: str
     content: str
@@ -50,7 +50,11 @@ class DocPage(TypedDict, total=False):
     error_code: str | None
 
 
-class SearchResultItem(TypedDict, total=False):
+class SkillDocument(TypedDict, total=False):
+    skill_content: str
+
+
+class SearchDocumentationItem(TypedDict, total=False):
     rank_order: int
     title: str
     context: str
@@ -115,15 +119,15 @@ def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
 
 
 @overload
-async def aws___get_regional_availability(caller: McpCaller, *, resource_type: Literal['api'], regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> RegionalApiAvailability: ...
+async def aws___get_regional_availability(caller: McpCaller, *, resource_type: Literal['api'], regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> ServiceApiAvailability: ...
 
 @overload
-async def aws___get_regional_availability(caller: McpCaller, *, resource_type: Literal['cfn'], regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> RegionalCfnAvailability: ...
+async def aws___get_regional_availability(caller: McpCaller, *, resource_type: Literal['cfn'], regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> CfnResourceAvailability: ...
 
 @overload
-async def aws___get_regional_availability(caller: McpCaller, *, resource_type: Literal['product'], regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> RegionalProductAvailability: ...
+async def aws___get_regional_availability(caller: McpCaller, *, resource_type: Literal['product'], regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> ProductAvailability: ...
 
-async def aws___get_regional_availability(caller: McpCaller, *, resource_type: str, regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> RegionalApiAvailability | RegionalCfnAvailability | RegionalProductAvailability:
+async def aws___get_regional_availability(caller: McpCaller, *, resource_type: str, regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> ServiceApiAvailability | CfnResourceAvailability | ProductAvailability:
     """AWS resource availability per region.
 
     - Max 10 regions; multi-region needs `filters`; single-region supports `next_token`.
@@ -159,20 +163,20 @@ async def aws___get_regional_availability(caller: McpCaller, *, resource_type: s
     if region is not None:
         args["region"] = region
     result = await caller.call(SERVER, "aws___get_regional_availability", args)
-    return cast("RegionalApiAvailability | RegionalCfnAvailability | RegionalProductAvailability", _dig(result, ('content', 'result', )))
+    return cast("ServiceApiAvailability | CfnResourceAvailability | ProductAvailability", _dig(result, ('content', 'result', )))
 
 aws___get_regional_availability.__schema__ = {'type': 'object', 'properties': {'regions': {'type': 'array', 'items': {'type': 'string'}, 'description': 'AWS region codes (max 10). Multi-region requires `filters`; single-region supports `next_token`.'}, 'resource_type': {'type': 'string', 'description': "Required: 'product' | 'api' | 'cfn'."}, 'filters': {'type': 'array', 'items': {'type': 'string'}, 'description': "Use exact AWS product or sub-feature name.\n\n- product: 'Amazon Bedrock' (service), or sub-features like 'Comprehend Auto Scaling', 'Latency-Based Routing', 'PrivateLink Support'. When the user names a specific sub-feature, filter on the sub-feature -- do NOT generalize to the parent service ('Amazon Comprehend'); that returns availability for the wrong scope.\n- api: 'SdkServiceId+Operation' (e.g. 'CloudFormation+CreateStack', 'IAM+GetSSHPublicKey') or 'SdkServiceId' (e.g. 'EC2'). Use a literal '+' between service and operation -- not space, colon, or hyphen.\n- cfn: 'AWS::EC2::Instance', 'AWS::Lambda::Function'.\n\nInclude every region the user named; don't add filters they didn't request.\n\nValues must EXACTLY match AWS's catalog (e.g. 'AWS Lambda', not 'Lambda' or 'AWS Lambda Service'). If unsure of the exact name, first call once for one region with NO filters to list valid names, then filter on the exact match."}, 'next_token': {'type': 'string', 'description': 'Pagination token. Single-region, no filters only.'}, 'region': {'type': 'string', 'description': 'Unused; use `regions`.'}}, 'required': ['resource_type']}
 
 
-async def aws___list_regions(caller: McpCaller) -> list[AwsRegion]:
+async def aws___list_regions(caller: McpCaller) -> list[RegionSummary]:
     """Retrieve a list of all AWS regions."""
     result = await caller.call(SERVER, "aws___list_regions", {})
-    return cast("list[AwsRegion]", _dig_list(result, ('content', 'result', )))
+    return cast("list[RegionSummary]", _dig_list(result, ('content', 'result', )))
 
 aws___list_regions.__schema__ = {'type': 'object', 'properties': {}, 'required': []}
 
 
-async def aws___read_documentation(caller: McpCaller, *, requests: list[dict] | None = None) -> list[DocPage]:
+async def aws___read_documentation(caller: McpCaller, *, requests: list[dict] | None = None) -> list[DocumentationPage]:
     """Fetch full AWS doc pages as markdown. `search_documentation` already returns verbatim page chunks, so don't re-read a URL whose chunk you already have to "confirm" or "round out" an answer -- the chunk is the real page text; treat it as authoritative.
 
     Reading the full page is justified ONLY when the chunks genuinely lack the content:
@@ -195,12 +199,12 @@ async def aws___read_documentation(caller: McpCaller, *, requests: list[dict] | 
     if requests is not None:
         args["requests"] = requests
     result = await caller.call(SERVER, "aws___read_documentation", args)
-    return cast("list[DocPage]", _dig_list(result, ('content', 'result', )))
+    return cast("list[DocumentationPage]", _dig_list(result, ('content', 'result', )))
 
 aws___read_documentation.__schema__ = {'type': 'object', 'properties': {'requests': {'type': 'array', 'items': {'type': 'object', 'properties': {'url': {'type': 'string', 'description': 'Doc URL with allow-listed prefix; use exact URL from search.'}, 'max_length': {'type': 'integer', 'description': 'Chars returned (default 10000).'}, 'start_index': {'type': 'integer', 'description': 'Char offset (default 0). Use prior `end_index` to continue, or TOC offset to jump.'}}, 'required': ['url']}, 'description': 'List of `{url, max_length?, start_index?}`. Batch 2-5.'}}, 'required': []}
 
 
-async def aws___retrieve_skill(caller: McpCaller, *, skill_name: str, file: str | None = None) -> Any:
+async def aws___retrieve_skill(caller: McpCaller, *, skill_name: str, file: str | None = None) -> SkillDocument:
     """Retrieve an AWS skill (workflows, references). Returns SKILL.md, or `file` if given.
 
     Call `search_documentation` FIRST and copy `skill_name` verbatim -- it is an opaque registry ID. Never guess or fabricate `skill_name` or `file`.
@@ -213,12 +217,12 @@ async def aws___retrieve_skill(caller: McpCaller, *, skill_name: str, file: str 
     if file is not None:
         args["file"] = file
     result = await caller.call(SERVER, "aws___retrieve_skill", args)
-    return _dig(result, ('content', 'skill_content', ))
+    return cast("SkillDocument", _dig(result, ('content', )))
 
 aws___retrieve_skill.__schema__ = {'type': 'object', 'properties': {'file': {'type': 'string', 'description': "Optional file path within the skill, copied as cited (e.g. `references/architecture.md`). Don't add or strip a `references/` prefix. Omit for SKILL.md."}, 'skill_name': {'type': 'string', 'description': 'Required. Exact `skill_name` from a search_documentation result, copied verbatim. Do not invent or modify.'}}, 'required': ['skill_name']}
 
 
-async def aws___search_documentation(caller: McpCaller, *, search_phrase: str, limit: int | None = None, topics: list[str] | None = None) -> list[SearchResultItem]:
+async def aws___search_documentation(caller: McpCaller, *, search_phrase: str, limit: int | None = None, topics: list[str] | None = None) -> list[SearchDocumentationItem]:
     """AWS docs search. Each result's `context` is verbatim page text -- a real chunk of the actual page, not a short snippet -- and usually already contains the answer, so answer directly from it. Use `read_documentation` only when the chunks genuinely lack the needed detail.
 
     Pick ONE topic. Add a 2nd ONLY if query genuinely spans domains. Extra topics dilute ranking.
@@ -247,6 +251,6 @@ async def aws___search_documentation(caller: McpCaller, *, search_phrase: str, l
     if topics is not None:
         args["topics"] = topics
     result = await caller.call(SERVER, "aws___search_documentation", args)
-    return cast("list[SearchResultItem]", _dig_list(result, ('content', 'result', )))
+    return cast("list[SearchDocumentationItem]", _dig_list(result, ('content', 'result', )))
 
 aws___search_documentation.__schema__ = {'type': 'object', 'properties': {'limit': {'type': 'integer', 'description': 'Maximum number of results to return (default 4).'}, 'search_phrase': {'type': 'string', 'description': 'Keywords; preserve exact error strings and all task terms verbatim.'}, 'topics': {'type': 'array', 'items': {'type': 'string', 'description': 'topic name'}, 'description': 'Up to 3 from: reference_documentation, current_awareness, troubleshooting, amplify_docs, cdk_docs, cdk_constructs, cloudformation, agent_skills, strands_docs, general. Default ["general"].'}}, 'required': ['search_phrase']}

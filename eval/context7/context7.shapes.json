@@ -10,7 +10,7 @@
       "query": "How to configure middleware in Next.js"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 5396
+    "_observed_bytes": 5302
   },
   "resolve-library-id": {
     "unwrap": [],
@@ -23,6 +23,6 @@
       "query": "How to configure middleware"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2078
+    "_observed_bytes": 2095
   }
 }

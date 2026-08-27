@@ -6,10 +6,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "EvalAccount"
+      "name": "MyAccount",
+      "signatureValidation": "ERC7739"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 857
+    "_observed_bytes": 853
   },
   "solidity-custom": {
     "unwrap": [],
@@ -18,10 +19,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "EvalCustom"
+      "name": "GammaToken",
+      "upgradeable": "uups"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 111
+    "_observed_bytes": 855
   },
   "solidity-erc1155": {
     "unwrap": [],
@@ -30,11 +32,12 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "EvalMulti",
-      "uri": "https://example.com/token/{id}.json"
+      "name": "MyMulti",
+      "uri": "https://example.com/token/{id}.json",
+      "mintable": true
     },
     "_observed_shape": "str",
-    "_observed_bytes": 562
+    "_observed_bytes": 936
   },
   "solidity-erc20": {
     "unwrap": [],
@@ -43,11 +46,14 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "EvalToken",
-      "symbol": "EVT"
+      "name": "MyToken",
+      "symbol": "MTK",
+      "premint": "1000",
+      "mintable": true,
+      "burnable": true
     },
     "_observed_shape": "str",
-    "_observed_bytes": 428
+    "_observed_bytes": 870
   },
   "solidity-erc721": {
     "unwrap": [],
@@ -56,11 +62,13 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "EvalNft",
-      "symbol": "ENFT"
+      "name": "MyNFT",
+      "symbol": "MNFT",
+      "mintable": true,
+      "enumerable": true
     },
     "_observed_shape": "str",
-    "_observed_bytes": 295
+    "_observed_bytes": 1373
   },
   "solidity-governor": {
     "unwrap": [],
@@ -69,12 +77,12 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "EvalGovernor",
+      "name": "MyGovernor",
       "delay": "1 day",
       "period": "1 week"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 3302
+    "_observed_bytes": 3298
   },
   "solidity-rwa": {
     "unwrap": [],
@@ -83,11 +91,12 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "EvalRwa",
-      "symbol": "EVR"
+      "name": "MyAsset",
+      "symbol": "MRWA",
+      "decimals": "18"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 422
+    "_observed_bytes": 423
   },
   "solidity-stablecoin": {
     "unwrap": [],
@@ -96,10 +105,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "EvalStable",
-      "symbol": "EVS"
+      "name": "MyStable",
+      "symbol": "MUSD",
+      "decimals": "6"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 431
+    "_observed_bytes": 518
   }
 }

@@ -1,7 +1,7 @@
 {
   "convert_time": {
     "unwrap": [],
-    "return_model": "TimeConversion",
+    "return_model": "ConvertedTime",
     "input_overrides": {},
     "fields": {
       "source": "dict",
@@ -13,7 +13,8 @@
       "source_timezone": "America/New_York",
       "time": "14:30",
       "target_timezone": "Asia/Tokyo"
-    }
+    },
+    "_observed_bytes": 278
   },
   "get_current_time": {
     "unwrap": [],
@@ -26,13 +27,9 @@
       "is_dst": "bool"
     },
     "source": "live",
-    "probed_args": [
-      {
-        "timezone": "America/New_York"
-      },
-      {
-        "timezone": "Europe/London"
-      }
-    ]
+    "probed_args": {
+      "timezone": "America/New_York"
+    },
+    "_observed_bytes": 116
   }
 }

@@ -1,46 +1,52 @@
-# openzeppelin-solidity — session overview
+# openzeppelin-solidity — skill run overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:46:06Z
-- **Duration:** 3m 25s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:10:28Z
+- **Duration:** 3m 51s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface
+## Server surface
 
-The server exposes **8 tools**, all of them contract generators named `solidity-<kind>`:
-`solidity-erc20`, `solidity-erc721`, `solidity-erc1155`, `solidity-stablecoin`, `solidity-rwa`,
-`solidity-account`, `solidity-governor`, `solidity-custom`. None carries an `annotations` block,
-so classification fell back to the keyword-plus-semantic read. Every description ends with the
-same sentence — *"Returns the source code of the generated contract, formatted in a Markdown
-code block. Does not write to disk."* — which settles the verdict: the verbs (`Make`, `create
-more supply`) are about the *generated* contract, not about server state. All 8 are pure
-functions and all 8 were probed. Nothing was skipped as mutating, and no seed commands apply.
+`mcpgen list --schema` returned **8 tools**, all Solidity contract wizards:
+`solidity-erc20`, `solidity-erc721`, `solidity-erc1155`, `solidity-stablecoin`,
+`solidity-rwa`, `solidity-account`, `solidity-governor`, `solidity-custom`.
+No tool carries `annotations`, so classification fell back to the keyword plus
+semantic read. Every description ends "Returns the source code of the generated
+contract, formatted in a Markdown code block. **Does not write to disk.**" — the
+`make`/`create` verb is about contract *text*, not server state, so all 8 cleared
+as non-mutating. **All 8 were probed; none skipped.** No seed commands apply.
 
-## Discriminators
+## Discriminator handling
 
-`list --schema` raised seven candidates: `name` (all 8 tools), `symbol`, `decimals`,
-`premint`, `premintChainId`, `namespacePrefix`, and `crossChainBridging`. Pass 1 disqualifies
-none of them by name. Pass 2 probed `solidity-erc721` at `crossChainBridging="erc7786native"`
-(869 bytes) and with the argument omitted (295 bytes) — the payload size changed but the shape
-did not, both being a bare string. Recorded as **inconclusive, not disproven**; the other six
-candidates are content substituted into the emitted source and cannot alter a response that has
-no structure to vary. Resolution taken: option 3, unwrap-only, for all 8 tools.
+The `list` advisory flagged seven candidates: `crossChainBridging`, `decimals`,
+`name`, `namespacePrefix`, `premint`, `premintChainId`, `symbol`. Pass 1 dropped
+none by name. Pass 2 probed `solidity-custom` at three distinct `name` values
+(`MyContractAlpha`, `BetaVault` + `pausable`, `GammaToken` + `upgradeable=uups`):
+all three returned the identical shape `"str"`, differing only in byte count.
+The advisory's candidates are contract *configuration* knobs — they change the
+emitted Solidity text, never the response type — so all seven resolve to
+option 3 (no model) rather than variants.
+
+## Surprises
+
+- `solidity-rwa` and `solidity-stablecoin` first failed with
+  `MCP error -32602 … expected string, received number` on `decimals`. That was
+  my probe args, not a schema lie: both declare `decimals` as `"type": "string"`.
+  Notably `solidity-governor` declares the same-named param as `"number"`, which
+  is why the name-matched advisory grouped four tools whose types disagree.
+  Re-probed with `"18"` / `"6"` and both returned real contract source.
+- Payload sizes span 423 B (`solidity-rwa`, minimal options) to 3298 B
+  (`solidity-governor`) — small responses here are genuine output, not errors.
+- A guarded `json.loads` on the raw `solidity-rwa` payload returned `NOT_JSON`:
+  the body is a literal ```` ```solidity ```` fenced block, not double-encoded JSON.
 
 ## Shape decisions
 
-Every probe returned a genuine success payload — verified by capturing three of them raw
-(`solidity-erc721`, `solidity-custom`, `solidity-rwa`), each a fenced ```solidity block holding
-real, compilable OpenZeppelin source. The payloads are prose, not double-encoded JSON, so the
-JSON-in-string test reports `NOT_JSON` and `_observed_shape: "str"` stands as evidence rather
-than as a probe failure. No `_probe_status: inconclusive` marker was written anywhere: nothing
-was unobserved. Consequently `unwrap: []`, `return_model: null`, and `fields: {}` for all 8 —
-this server is `no_shaped_tool_by_design`. `probed_args` needed no scrubbing; every value is an
-invented literal (`EvalToken`, `EVT`, `https://example.com/token/{id}.json`).
+Identical for all 8 tools: `unwrap: []`, `return_model: null`, `fields: {}`,
+`_observed_shape: "str"`. There is no vendor envelope and no record — the
+response *is* prose. Inventing an unwrap path would make `_dig` return a
+fragment the wrapper never produced, so every wrapper honestly stays `-> Any`.
+This is `no_shaped_tool_by_design`, not a coverage gap.
 
-## Findings
-
-The regenerated module parses cleanly (`ast.parse` OK, 60950 bytes) with 8 `-> Any` wrappers and
-no `_dig` helpers, which is correct here. One engine observation: `votes`, `access`, and
-`upgradeable` declare their allowed values as `anyOf` unions of `const` strings rather than a
-flat `enum` array, and codegen renders them `Any | None` instead of `Literal[...]`. Left
-unedited on purpose — the artifacts must measure the skill, not a hand fix.
+The regenerated module parses cleanly (`ast.parse` OK, 60950 bytes, 8 typed
+`async def`s). `probed_args` hold only synthetic contract names — no PII.

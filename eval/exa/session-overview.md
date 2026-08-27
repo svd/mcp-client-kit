@@ -1,62 +1,55 @@
-# exa — session overview
+# exa — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:42:15Z
-- **Duration:** 4m 34s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:07:11Z
+- **Duration:** 2m 24s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Tool surface
+## Tool inventory
 
-`mcpgen list exa --schema` reported **2 tools**, and **both were probed**; none were skipped.
-Both carry an explicit `annotations.readOnlyHint: true`, so classification was a clean annotation
-read — no keyword or semantic fallback needed, and no tool withheld from the selected set.
+`mcpgen list exa --schema` reported **2 tools**, both carrying explicit
+`annotations.readOnlyHint: true` / `destructiveHint: false`:
 
-- `web_search_exa` — semantic web search; `query` required, `numResults` optional
-- `web_fetch_exa` — pages as markdown; `urls` required, `maxCharacters` optional
+- `web_search_exa` — semantic web search, returns clean text from top results
+- `web_fetch_exa` — reads one or more URLs as clean markdown
 
-**Discriminators: N/A.** No parameter name is shared by two or more tools (`query`, `numResults`,
-`urls`, `maxCharacters`), so the candidate precondition cannot be met and no advisory fired on the
-`list` stderr. Pass 2 was correctly skipped rather than run and recorded inconclusive.
+No mutating tools exist on this server, so nothing was skipped for safety. Both tools were
+selected and probed: **2 probed, 0 skipped**. The server is hosted HTTP, so probes ran
+sequentially with a 2 s pause between them rather than fanning out.
 
-## Probing and responses
+## Discriminators
 
-Both were probed live, sequentially with ≥2 s pacing, each twice with distinct argument variants
-to widen the observation rather than type from one sample:
+`discriminators: N/A`. The `list --schema` advisory was silent, and the precondition confirms
+why: no scalar parameter name is shared by two or more tools. `query` and `numResults` belong
+only to `web_search_exa`; `urls` (an array) and `maxCharacters` only to `web_fetch_exa`. The
+description sweep found no prose declaring a response key either, so Pass 2 was skipped.
 
-- `web_search_exa` — a natural-language query with `numResults: 3`, then a `category:company`
-  query with `numResults` omitted.
-- `web_fetch_exa` — one URL with `maxCharacters: 2000`, then two URLs batched, `maxCharacters`
-  omitted.
+## Probe results
 
-Every probe returned a real success payload (24.8 KB of search results, 5.4 KB of fetched
-markdown), so nothing here is an error shape and no `_probe_status: inconclusive` marker applies.
+Both probes returned successfully with substantial payloads — 24,857 bytes for
+`web_search_exa` (query: a natural-language description of an MCP architecture article,
+`numResults: 3`) and 1,601 bytes for `web_fetch_exa` (one public docs URL,
+`maxCharacters: 1500`). Both observed as `"str"`.
 
-Both observed as `"str"`. Because a bare `"str"` can hide a double-encoded record, both raw
-payloads were captured with `mcpgen call --out` (one call per invocation) and tested with the
-guarded `json.loads` check. Both returned **NOT_JSON** — genuine prose. Search results arrive as a
-flat `Title: / URL: / Published: / Author: / Highlights:` markdown block per result; fetches
-arrive as page markdown under an `# <title>` heading. The one mild surprise: batching two URLs
-into `web_fetch_exa` still returns a *single* concatenated markdown string rather than a list or
-per-URL object — the byte count grew (2106 → 5351) while the shape did not.
+Following the JSON-in-string check, each raw payload was captured with `mcpgen call --out` and
+tested with a guarded `json.loads`. Both returned **`NOT_JSON`**: the search payload is a
+`Title:/URL:/Published:/Author:/Highlights:` markdown block, and the fetch payload is plain
+page markdown. These are genuine prose responses, not double-encoded records and not error
+strings — so `_observed_shape: "str"` stands as honest evidence and no `_probe_status:
+inconclusive` marker was warranted.
 
 ## Shape decisions
 
-Neither tool was shaped — the correct outcome, not a gap:
+Neither tool is shapeable. For both: `unwrap: []`, `return_model: null`,
+`return_container` unset, `fields: {}`, `source: "live"`. There is no vendor envelope to strip
+and no record to promote — inventing an unwrap path here would make `_dig` return a fragment
+the wrapper never receives. This is Mode A by design: a search API whose contract is text.
 
-- `web_search_exa` — `unwrap: []`, `return_model: null`, `fields: {}`. No vendor envelope to dig
-  through and no record to promote; the payload is human-readable text end to end.
-- `web_fetch_exa` — identical, and confirmed against the multi-URL variant.
+`probed_args` needed no scrubbing — a generic technical query and a public documentation URL,
+both functional and PII-free.
 
-`_observed_shape: "str"` is retained in both entries as evidence that these are genuine
-text-returning tools, matching the other prose-returning servers in this eval set. `probed_args`
-needed no scrubbing: public search queries and public documentation URLs, no PII, and functional
-(the roundtrip verifier replays them).
+## Verification
 
-This lands exa in **Mode A — no shaped tools by design**, consistent with the manifest note.
-
-## Final module
-
-Regeneration picked up the shape-spec (`[codegen] shapes: … (2 tool(s))`) and correctly emitted
-both wrappers as `-> Any` with no `_dig`/`_dig_list` helpers — the engine did not invent an unwrap
-where none was recorded. The module parses cleanly under `ast.parse`. Per the harness contract,
-`run.py` was not generated here; the verify stage owns it.
+Regeneration with the shape-spec in place produced a byte-identical 3,310-byte module.
+`ast.parse` succeeded; both wrappers read `-> Any`, which is the correct and honest signature
+for tools that return prose. `run.py` is the harness's responsibility and was not generated here.

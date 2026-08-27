@@ -5,12 +5,19 @@ Auth: none
 
 Usage:
     python eval/everything/run.py
+
+The everything server is a protocol demo: most tools return prose, images, or
+resource links rather than structured records. Only get-structured-content has
+a shaped return (WeatherReport), and it is called once per probed location.
 """
 import asyncio
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+# The wrapper module sits next to this file; put its directory on sys.path so
+# "import everything" resolves to everything.py rather than to the package
+# directory that holds it.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import everything
 
 from mcpgen import McpBridgeCaller
@@ -22,66 +29,84 @@ async def main() -> None:
     # One connection for the whole run: a single initialize() and a single
     # subprocess, instead of reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating tools: gzip_file_as_resource (writes a resource),
-        # toggle_simulated_logging, toggle_subscriber_updates (flip server state).
-        # All args below come from eval/everything/everything.verify.json (real
-        # probed args) except where marked synthetic.
+        # Skipped mutating tools: gzip_file_as_resource (writes a new
+        # server-side resource), toggle_simulated_logging,
+        # toggle_subscriber_updates (both flip server session state).
 
-        # echo -> Any  (prose echo of the message)
-        echoed = await everything.echo(caller, message="eval-probe")
+        # get-env -> Any
+        env = await everything.get_env(caller)
+        print(f"get_env: {type(env).__name__}")
+
+        # echo -> Any
+        echoed = await everything.echo(caller, message="eval probe")
         print(f"echo: {type(echoed).__name__}")
 
-        # get-sum -> Any  (prose: "The sum of 2 and 3 is 5.")
+        # get-sum -> Any
         total = await everything.get_sum(caller, a=2, b=3)
-        print(f"get-sum: {type(total).__name__}")
+        print(f"get_sum: {type(total).__name__}")
 
-        # get-env -> Any  (flat str->str mapping of the launched process env)
-        env = await everything.get_env(caller)
-        print(f"get-env: {type(env).__name__}")
+        # get-annotated-message -> Any
+        annotated = await everything.get_annotated_message(caller, messageType="debug")
+        print(f"get_annotated_message: {type(annotated).__name__}")
 
-        # get-annotated-message -> Any  (messageType="error")
-        annotated_error = await everything.get_annotated_message(caller, messageType="error")
-        print(f"get-annotated-message(error): {type(annotated_error).__name__}")
-
-        # get-annotated-message -> Any  (messageType="success")
-        annotated_success = await everything.get_annotated_message(caller, messageType="success")
-        print(f"get-annotated-message(success): {type(annotated_success).__name__}")
-
-        # get-annotated-message -> Any  (messageType="debug")
-        annotated_debug = await everything.get_annotated_message(caller, messageType="debug")
-        print(f"get-annotated-message(debug): {type(annotated_debug).__name__}")
-
-        # get-resource-links -> Any  (resource_link blocks, metadata dropped by mcpgen)
-        links = await everything.get_resource_links(caller, count=3)
-        print(f"get-resource-links: {type(links).__name__}")
-
-        # get-resource-reference -> Any  (resourceType is an enum, but both
-        # "Text" and "Blob" were probed and returned the same shape; verify.json
-        # keeps the "Blob" probe, so only that one is replayed here)
-        ref = await everything.get_resource_reference(caller, resourceType="Blob", resourceId=2)
-        print(f"get-resource-reference: {type(ref).__name__}")
-
-        # get-tiny-image -> Any  (base64 image bytes dropped by the probe)
+        # get-tiny-image -> Any  (no args in schema; not probed with args)
         image = await everything.get_tiny_image(caller)
-        print(f"get-tiny-image: {type(image).__name__}")
+        print(f"get_tiny_image: {type(image).__name__}")
 
-        # get-structured-content -> WeatherRecord  (the only shaped tool here)
-        weather = await everything.get_structured_content(caller, location="New York")
+        # get-resource-links -> Any
+        links = await everything.get_resource_links(caller, count=3)
+        print(f"get_resource_links: {type(links).__name__}")
+
+        # get-resource-reference -> Any
+        reference = await everything.get_resource_reference(
+            caller, resourceType="Blob", resourceId=2
+        )
+        print(f"get_resource_reference: {type(reference).__name__}")
+
+        # get-structured-content -> WeatherReport  (location='New York')
+        weather_ny = await everything.get_structured_content(caller, location="New York")
         print(
-            f"get-structured-content: temperature={weather.get('temperature')!r} "
-            f"conditions={weather.get('conditions')!r} humidity={weather.get('humidity')!r}"
+            f"get_structured_content(New York): "
+            f"temperature={weather_ny.get('temperature')!r} "
+            f"conditions={weather_ny.get('conditions')!r} "
+            f"humidity={weather_ny.get('humidity')!r}"
         )
 
-        # trigger-long-running-operation -> Any  (prose completion summary)
-        long_op = await everything.trigger_long_running_operation(caller, duration=1, steps=2)
-        print(f"trigger-long-running-operation: {type(long_op).__name__}")
+        # get-structured-content -> WeatherReport  (location='Chicago')
+        weather_chi = await everything.get_structured_content(caller, location="Chicago")
+        print(
+            f"get_structured_content(Chicago): "
+            f"temperature={weather_chi.get('temperature')!r} "
+            f"conditions={weather_chi.get('conditions')!r} "
+            f"humidity={weather_chi.get('humidity')!r}"
+        )
 
-        # simulate-research-query -> Any  (not probed; synthetic args.
-        # ambiguous=False keeps it from raising an elicitation request.)
+        # get-structured-content -> WeatherReport  (location='Los Angeles')
+        weather_la = await everything.get_structured_content(
+            caller, location="Los Angeles"
+        )
+        print(
+            f"get_structured_content(Los Angeles): "
+            f"temperature={weather_la.get('temperature')!r} "
+            f"conditions={weather_la.get('conditions')!r} "
+            f"humidity={weather_la.get('humidity')!r}"
+        )
+
+        # trigger-long-running-operation -> Any
+        # Probed with the short duration/steps pair so the smoke test stays fast.
+        operation = await everything.trigger_long_running_operation(
+            caller, duration=1, steps=2
+        )
+        print(f"trigger_long_running_operation: {type(operation).__name__}")
+
+        # simulate-research-query -> Any
+        # Not probed during wrapper generation, so these args are synthetic.
+        # ambiguous stays False: True triggers an elicitation round-trip that
+        # this non-interactive runner cannot answer.
         research = await everything.simulate_research_query(
             caller, topic="model context protocol", ambiguous=False
         )
-        print(f"simulate-research-query: {type(research).__name__}")
+        print(f"simulate_research_query: {type(research).__name__}")
 
 
 if __name__ == "__main__":

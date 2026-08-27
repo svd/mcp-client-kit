@@ -5,6 +5,10 @@ Auth: none (public endpoint)
 
 Usage:
     python eval/openzeppelin-solidity/run.py
+
+Args come from openzeppelin-solidity.verify.json (real, pre-scrub probe args).
+Every tool returns prose (Solidity source as a string), so there are no shaped
+models to drill into — each block prints the response type and a short preview.
 """
 import asyncio
 import importlib.util
@@ -12,15 +16,14 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-# The wrapper module file is "openzeppelin-solidity.py" — the hyphen makes it
-# unimportable by a plain `import`, so load it by path under the name
-# `openzeppelin_solidity`.
+
+# The wrapper module file is "openzeppelin-solidity.py"; the hyphen makes it
+# un-importable by name, so load it directly from its path.
 _MODULE_PATH = os.path.join(os.path.dirname(__file__), "openzeppelin-solidity.py")
 _spec = importlib.util.spec_from_file_location("openzeppelin_solidity", _MODULE_PATH)
 assert _spec is not None and _spec.loader is not None
-openzeppelin_solidity = importlib.util.module_from_spec(_spec)
-sys.modules["openzeppelin_solidity"] = openzeppelin_solidity
-_spec.loader.exec_module(openzeppelin_solidity)
+oz = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(oz)
 
 from mcpgen import McpBridgeCaller
 
@@ -28,10 +31,9 @@ SERVER_URL = "https://mcp.openzeppelin.com/contracts/solidity/mcp"
 
 
 def _preview(label: str, result: object) -> None:
-    """Every tool here is annotated `-> Any`; observed shape is `str` (Solidity source)."""
+    """Every tool here returns Solidity source as prose -> report type + size."""
     if isinstance(result, str):
-        lines = result.splitlines()
-        first = lines[0] if lines else ""
+        first = result.strip().splitlines()[0] if result.strip() else ""
         print(f"{label}: str, {len(result)} chars, first line={first!r}")
     else:
         print(f"{label}: {type(result).__name__}")
@@ -43,55 +45,81 @@ async def main() -> None:
     # One connection for the whole run: a single initialize() instead of
     # reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating tools: none. All 8 tools are pure contract-source
-        # generators — they return Solidity text and write nothing server-side.
-        # No tool in openzeppelin-solidity.shapes.json carries a discriminator,
-        # so this is one call per tool.
-        # Args are the real probed values from openzeppelin-solidity.verify.json.
+        # Skipped mutating tools: none — all 8 tools are pure contract generators.
+        # No discriminated tools in this server: one call per tool.
 
-        # solidity-custom -> Any  (minimal blank contract scaffold)
-        custom = await openzeppelin_solidity.solidity_custom(caller, name="EvalCustom")
-        _preview("solidity-custom", custom)
-
-        # solidity-erc20 -> Any
-        erc20 = await openzeppelin_solidity.solidity_erc20(
-            caller, name="EvalToken", symbol="EVT"
+        # solidity-erc20 -> Any (prose)
+        erc20 = await oz.solidity_erc20(
+            caller,
+            name="MyToken",
+            symbol="MTK",
+            premint="1000",
+            mintable=True,
+            burnable=True,
         )
         _preview("solidity-erc20", erc20)
 
-        # solidity-erc721 -> Any
-        erc721 = await openzeppelin_solidity.solidity_erc721(
-            caller, name="EvalNft", symbol="ENFT"
+        # solidity-erc721 -> Any (prose)
+        erc721 = await oz.solidity_erc721(
+            caller,
+            name="MyNFT",
+            symbol="MNFT",
+            mintable=True,
+            enumerable=True,
         )
         _preview("solidity-erc721", erc721)
 
-        # solidity-erc1155 -> Any
-        erc1155 = await openzeppelin_solidity.solidity_erc1155(
-            caller, name="EvalMulti", uri="https://example.com/token/{id}.json"
+        # solidity-erc1155 -> Any (prose)
+        erc1155 = await oz.solidity_erc1155(
+            caller,
+            name="MyMulti",
+            uri="https://example.com/token/{id}.json",
+            mintable=True,
         )
         _preview("solidity-erc1155", erc1155)
 
-        # solidity-stablecoin -> Any
-        stablecoin = await openzeppelin_solidity.solidity_stablecoin(
-            caller, name="EvalStable", symbol="EVS"
+        # solidity-stablecoin -> Any (prose)
+        stablecoin = await oz.solidity_stablecoin(
+            caller,
+            name="MyStable",
+            symbol="MUSD",
+            decimals="6",
         )
         _preview("solidity-stablecoin", stablecoin)
 
-        # solidity-rwa -> Any
-        rwa = await openzeppelin_solidity.solidity_rwa(
-            caller, name="EvalRwa", symbol="EVR"
+        # solidity-rwa -> Any (prose)
+        rwa = await oz.solidity_rwa(
+            caller,
+            name="MyAsset",
+            symbol="MRWA",
+            decimals="18",
         )
         _preview("solidity-rwa", rwa)
 
-        # solidity-account -> Any  (ERC-4337 smart account scaffold)
-        account = await openzeppelin_solidity.solidity_account(caller, name="EvalAccount")
+        # solidity-account -> Any (prose)
+        account = await oz.solidity_account(
+            caller,
+            name="MyAccount",
+            signatureValidation="ERC7739",
+        )
         _preview("solidity-account", account)
 
-        # solidity-governor -> Any  (largest output; `delay`/`period` are required)
-        governor = await openzeppelin_solidity.solidity_governor(
-            caller, name="EvalGovernor", delay="1 day", period="1 week"
+        # solidity-governor -> Any (prose)
+        governor = await oz.solidity_governor(
+            caller,
+            name="MyGovernor",
+            delay="1 day",
+            period="1 week",
         )
         _preview("solidity-governor", governor)
+
+        # solidity-custom -> Any (prose)
+        custom = await oz.solidity_custom(
+            caller,
+            name="GammaToken",
+            upgradeable="uups",
+        )
+        _preview("solidity-custom", custom)
 
 
 if __name__ == "__main__":

@@ -39,8 +39,14 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "query": "SELECT * FROM users LIMIT 3"
-    }
+    "probed_args": [
+      {
+        "query": "SELECT * FROM users LIMIT 5"
+      },
+      {
+        "query": "SELECT * FROM products LIMIT 5"
+      }
+    ],
+    "_shape_note": "Row shape is dictated entirely by the caller's free-text SELECT; the two probes returned disjoint column sets (users: id/name/email/active/score; products: id/title/price/stock/discontinued) that the deep merge unioned. No enumerable variants exist, so this stays unwrap-only Any rather than asserting a TypedDict built from one database's schema."
   }
 }

@@ -4,14 +4,14 @@
   "auth": "oauth",
   "checks": {
     "ast": "pass",
-    "signatures": "skip",
+    "signatures": "pass",
     "idempotency": "pass",
     "pii": "pass",
     "roundtrip": "skip"
   },
   "check_details": {
     "ast": "",
-    "signatures": "probe_inconclusive: 10 tool(s) had no observable success payload \u2014 shapes unknown: get_agent_skill, get_attachment, get_diff, get_diff_threads, get_document, get_milestone, get_project, get_release, get_release_note, list_milestones",
+    "signatures": "",
     "idempotency": "offline determinism check (real tool schemas from linear.mcpgen.json)",
     "pii": "",
     "roundtrip": "oauth_not_supported_in_verifier"
@@ -21,10 +21,10 @@
     "B",
     "C"
   ],
-  "verdict": "partial",
+  "verdict": "pass",
   "versions": {
     "engine": "0.9.0.dev1",
-    "skill_ref": "v0.0.4-159-g8cc836b",
+    "skill_ref": "v0.0.4-161-gbf232ef",
     "skill_path": "~/src/mcp-client-kit"
   }
 }

@@ -6,18 +6,12 @@ caller's concern, not this module's.
 """
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal
 
 from mcpgen.seam import McpCaller
 
 SERVER = 'filesystem'
 
-
-
-class DirectoryNode(TypedDict, total=False):
-    name: str
-    type: str
-    children: list
 
 
 async def create_directory(caller: McpCaller, *, path: str) -> Any:
@@ -32,7 +26,7 @@ async def create_directory(caller: McpCaller, *, path: str) -> Any:
 create_directory.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'path': {'type': 'string'}}, 'required': ['path']}
 
 
-async def directory_tree(caller: McpCaller, *, path: str, excludePatterns: list[str] | None = None) -> list[DirectoryNode]:
+async def directory_tree(caller: McpCaller, *, path: str, excludePatterns: list[str] | None = None) -> Any:
     """Get a recursive tree view of files and directories as a JSON structure. Each entry includes 'name', 'type' (file/directory), and 'children' for directories. Files have no children array, while directories always have a children array (which may be empty). The output is formatted with 2-space indentation for readability. Only works within allowed directories.
 
     Args:
@@ -42,7 +36,7 @@ async def directory_tree(caller: McpCaller, *, path: str, excludePatterns: list[
     args: dict[str, Any] = {"path": path}
     if excludePatterns is not None:
         args["excludePatterns"] = excludePatterns
-    return cast("list[DirectoryNode]", await caller.call(SERVER, "directory_tree", args))
+    return await caller.call(SERVER, "directory_tree", args)
 
 directory_tree.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'path': {'type': 'string'}, 'excludePatterns': {'default': [], 'type': 'array', 'items': {'type': 'string'}}}, 'required': ['path']}
 

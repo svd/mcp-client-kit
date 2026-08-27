@@ -30,7 +30,7 @@ ask_question.__schema__ = {'properties': {'repoName': {'anyOf': [{'type': 'strin
 async def read_wiki_contents(caller: McpCaller, *, repoName: str) -> Any:
     """View documentation about a GitHub repository.
 
-    Returns a large payload (~621 KB observed) — prefer narrower queries where available.
+    Returns a large payload (~522 KB observed) — prefer narrower queries where available.
 
     Args:
         repoName: GitHub repository in owner/repo format (e.g. "facebook/react").

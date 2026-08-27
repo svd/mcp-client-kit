@@ -5,22 +5,14 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "urls": [
-          "https://modelcontextprotocol.io/introduction"
-        ],
-        "maxCharacters": 2000
-      },
-      {
-        "urls": [
-          "https://modelcontextprotocol.io/introduction",
-          "https://www.rust-lang.org/"
-        ]
-      }
-    ],
+    "probed_args": {
+      "urls": [
+        "https://modelcontextprotocol.io/introduction"
+      ],
+      "maxCharacters": 1500
+    },
     "_observed_shape": "str",
-    "_observed_bytes": 5351
+    "_observed_bytes": 1601
   },
   "web_search_exa": {
     "unwrap": [],
@@ -28,16 +20,11 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "query": "blog post explaining the Model Context Protocol architecture and design",
-        "numResults": 3
-      },
-      {
-        "query": "category:company official documentation site for the Rust programming language"
-      }
-    ],
+    "probed_args": {
+      "query": "blog post explaining the Model Context Protocol architecture",
+      "numResults": 3
+    },
     "_observed_shape": "str",
-    "_observed_bytes": 24802
+    "_observed_bytes": 24857
   }
 }

@@ -6,12 +6,12 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "code": "def f():\n    return 1\n",
+      "code": "def f(x):\n    return x + 1\n",
       "language": "python"
     },
-    "_observed_shape": "str",
     "_observed_bytes": 473,
-    "_probe_status": "inconclusive"
+    "_probe_status": "inconclusive",
+    "_note": "Hosted server returned a fixed deprecation notice instead of a result payload; the response shape was never observed."
   },
   "get_supported_languages": {
     "unwrap": [],
@@ -20,25 +20,60 @@
     "fields": {},
     "source": "live",
     "probed_args": {},
-    "_observed_shape": "str",
     "_observed_bytes": 473,
-    "_probe_status": "inconclusive"
+    "_probe_status": "inconclusive",
+    "_note": "Hosted server returned a fixed deprecation notice instead of a result payload; the response shape was never observed."
   },
   "semgrep_findings": {
-    "unwrap": [],
-    "return_model": null,
+    "unwrap": [
+      "findings"
+    ],
+    "return_model": "SemgrepFinding",
     "input_overrides": {},
-    "fields": {},
+    "fields": {
+      "id": "int",
+      "created_at": "str",
+      "ref": "str",
+      "syntactic_id": "str",
+      "match_based_id": "str",
+      "rule_id": "int",
+      "rule_path": "str",
+      "rule_url": "str",
+      "ruleHashId": "str",
+      "ruleOrigin": "str",
+      "status": "str",
+      "relevant_since": "str",
+      "aggregate_state": "str",
+      "file_path": "str",
+      "line_of_code_url": "str",
+      "line": "int",
+      "end_line": "int",
+      "column": "int",
+      "end_column": "int",
+      "severity": "str",
+      "confidence": "str",
+      "message": "str",
+      "category": "str",
+      "issueType": "str",
+      "issueParentId": "str",
+      "isBlocking": "bool",
+      "triageState": "str",
+      "triagePermission": "str",
+      "external_ticket": "Any | None"
+    },
     "source": "live",
     "probed_args": {
+      "issue_type": "ISSUE_TYPE_SAST",
+      "limit": 3,
       "repos": [
-        "semgrep/semgrep"
-      ],
-      "limit": 3
+        "svd/mcp-client-kit"
+      ]
     },
-    "_observed_shape": "str",
-    "_observed_bytes": 19,
-    "_probe_status": "inconclusive"
+    "_observed_bytes": 14651,
+    "return_container": "list",
+    "_discriminator_candidate": "issue_type",
+    "_discriminator_note": "CONFIRMED polymorphic on issue_type: ISSUE_TYPE_SAST records carry sastAttributes/aiTags/ruleset/policySlug/subcategories, ISSUE_TYPE_SCA records carry scaAttributes/vulnGroupKey/relatedIssues/note/activityHistory. ISSUE_TYPE_SECRETS could not be observed (the probe repo has no secrets findings; the server answers with the prose sentinel 'No findings found'). Because one of three variants was never probed, resolved with a generic base model (SKILL step 4 option 2) over the 29 top-level scalars common to the two observed variants, rather than overloads that would misdescribe SECRETS.",
+    "_empty_result_sentinel": "With no matching findings the tool returns the plain string 'No findings found' instead of an empty envelope, so the wrapper's list[SemgrepFinding] is a hint for the populated case only."
   },
   "semgrep_rule_schema": {
     "unwrap": [],
@@ -48,7 +83,8 @@
     "source": "live",
     "probed_args": {},
     "_observed_shape": "str",
-    "_observed_bytes": 37225
+    "_observed_bytes": 37225,
+    "_note": "Returns the Semgrep rule JSON-schema spec as a ~37 KB YAML text document. Not double-encoded JSON (json.loads on the raw payload raised JSONDecodeError) \u2014 genuinely a text-returning tool, left as -> Any."
   },
   "semgrep_scan_remote": {
     "unwrap": [],
@@ -64,9 +100,9 @@
         }
       ]
     },
-    "_observed_shape": "str",
     "_observed_bytes": 473,
-    "_probe_status": "inconclusive"
+    "_probe_status": "inconclusive",
+    "_note": "Hosted server returned a fixed deprecation notice instead of a result payload; the response shape was never observed."
   },
   "semgrep_scan_with_custom_rule": {
     "unwrap": [],
@@ -81,11 +117,11 @@
           "content": "import os\nos.system(input())\n"
         }
       ],
-      "rule": "rules:\n  - id: t\n    pattern: os.system(...)\n    message: m\n    languages: [python]\n    severity: WARNING\n"
+      "rule": "rules:\n  - id: test\n    pattern: os.system(...)\n    message: os.system call\n    languages: [python]\n    severity: WARNING\n"
     },
-    "_observed_shape": "str",
     "_observed_bytes": 473,
-    "_probe_status": "inconclusive"
+    "_probe_status": "inconclusive",
+    "_note": "Hosted server returned a fixed deprecation notice instead of a result payload; the response shape was never observed."
   },
   "semgrep_whoami": {
     "unwrap": [],
@@ -101,6 +137,7 @@
     },
     "source": "live",
     "probed_args": {},
-    "_observed_bytes": 372
+    "_observed_bytes": 372,
+    "_note": "authDetails (list of provider dicts) left out of the model: nested, not a top-level scalar."
   }
 }

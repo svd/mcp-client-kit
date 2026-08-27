@@ -1,52 +1,58 @@
-# Notion — generate-mcp-wrappers session overview
+# Notion MCP — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:49:11Z
-- **Duration:** 7m 18s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:13:04Z
+- **Duration:** 7m 12s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Inventory and selection
+## Tool inventory
 
-`mcpgen list notion --schema` returned **28 tools**. Notion supplies full `annotations`, so
-classification never fell back to keyword heuristics: 14 tools carry `readOnlyHint: true`, and the
-other 14 (`create-pages`, `update-page`, `move-pages`, `create-view`, …) were skipped as mutating
-and never called. Two read-only tools were also dropped because their only required argument is an
-id that a mutating tool must mint first: `download-attachment` needs a `file_upload_id` from
-`create-attachment`, and `get-async-task` needs a `task_id` from an async write. That left
-**12 selected tools**, probed serially with a 2 s pace because the endpoint is hosted HTTP.
+The server exposes **28 tools**. Every tool carries `annotations`, so classification needed no
+keyword guessing: 14 are `readOnlyHint: true`, 14 are writes (four of them `destructiveHint`).
+All 14 writers were skipped without probing. Two read tools were dropped as well —
+`notion-download-attachment` and `notion-get-async-task` both require an id that only a
+mutating tool can mint. That left **12 tools probed**, all live over hosted HTTP with ≥2 s
+between calls. No seed commands were configured.
 
 ## Discriminators
 
-The `list` advisory raised 13 candidates. `page_size` fell to Pass 1 as pagination; ten more span
-only mutating tools and are recorded unresolved rather than probed. Two reached Pass 2 inside the
-selected set. `page_id` on `get-comments` produced identical shapes across two pages — inconclusive,
-not disproven. `page_url` on `search` returned an empty result list, so nothing was established.
+`list --schema` raised 13 candidates, but 11 of them span mutating tools only and were recorded
+unresolved rather than probed. `page_size` was auto-disqualified as pagination. The description
+sweep found the one that mattered: **`query_type` on `notion-search`**, invisible to the
+advisory because it lives on a single tool. Both enum values were probed separately and the
+shapes genuinely differ — `internal` returns ranked records (`id/title/url/type/highlight/
+timestamp`), `user` returns a single blob whose `text` holds a `<users-search-results>` XML
+document. Confirmed, so it was resolved with `discriminator` + `variants`; codegen emitted two
+`@overload`s over `Literal['internal'|'user']` plus a union impl.
 
-The real discriminator was one the advisory could not see, because only one tool declares it:
-`query_type` on `search`. `internal` returns `results[{id, title, url, type, highlight, timestamp}]`;
-`user` returns `results[{text}]`. Both enum values were probed, so option 1 applies — the spec emits
-`discriminator` + `variants`, and codegen renders two `@overload`s returning `list[SearchContentItem]`
-and `list[SearchUserItem]`. One cost: the impl signature now types `query_type` as required, though
-the server schema makes it optional.
+`notion-query-data-sources` is also polymorphic (`data.mode` = `sql` | `view`), but the selector
+sits nested inside an object rather than as a top-level scalar, so overloads cannot key on it —
+resolved as a generic base model per option 2.
 
-`fetch` is polymorphic on `id` in a milder way — `id: "self"` adds a `self` object to the envelope,
-while page, database, and data-source ids all return the same four top-level keys. A magic-string id
-cannot be an enumerable `Literal`, so this took option 2: one `NotionEntity` base model
-(`total=False`) over the unioned probe.
+## Surprises
+
+- `notion-query-meeting-notes` and `notion-search-agents` returned only errors — a Business-plan
+  upsell and an `entitlement_required` validation error respectively. Both carry
+  `_probe_status: "inconclusive"`; nothing about their real shape was observed.
+- Three read tools returned empty containers on this workspace: `get-comments` (`{}`),
+  `get-teams` (both team lists empty), `list-shared-pages` (`results: []`). Their inner shapes
+  are unobservable, so nothing was invented — `get-teams` keeps hand-added `"list"` markers,
+  `list-shared-pages` is unwrap-only `Any`.
+- `notion-fetch` was probed twice, on a page id and a database id, to test whether `id` switches
+  shape. It does not: four keys both times.
 
 ## Shape decisions
 
-`search`, `get-users`, and the three sidebar list tools unwrap `results` into `list[...]`.
-`list-private-pages` and `list-favorite-pages` returned byte-identical record shapes and share
-`SidebarPageSummary`; `list-recent-pages` also carried `icon`, so it got its own `RecentPageSummary`
-rather than widening a shared name. `get-teams` and `query-data-sources` keep their envelope
-(`unwrap: []`) — the former because both team arrays came back empty, the latter because row keys are
-the data source's own column names ("Name", "Status") and no honest `TypedDict` describes them.
+| Tool | unwrap | model |
+|---|---|---|
+| `notion-fetch` | — | `NotionEntity` |
+| `notion-get-users` | `results` | `list[UserSummary]` |
+| `notion-list-favorite-pages` / `-private-pages` | `results` | `list[SidebarPageSummary]` (identical fields, shared) |
+| `notion-list-recent-pages` | `results` | `list[RecentPageSummary]` (adds `icon`) |
+| `notion-get-teams` | — | `TeamsResult` |
+| `notion-query-data-sources` | — | `DataSourceQueryResult` (only `has_more`; rows are per-database columns) |
+| `notion-search` | `results` | `list[SearchContentItem]` / `list[SearchUserItem]` |
 
-Three tools were left deliberately untyped. `get-comments` returned `{}` on both pages — this
-workspace has no discussions, so the record is unobservable, not absent. `query-meeting-notes` and
-`search-agents` returned only entitlement errors (Business plan; Notion AI), so both carry
-`_probe_status: "inconclusive"` rather than a misleading `"str"`.
-
-The regenerated module parses cleanly under `ast.parse`, and every shaped signature reads its model
-instead of `Any`.
+The regenerated module (140 KB, 28 wrappers) parses cleanly under `ast.parse`, and the seven
+shaped tools dig their envelopes through `_dig_list`. `run.py` generation was left to the
+harness verify stage.

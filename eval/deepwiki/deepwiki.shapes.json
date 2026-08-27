@@ -6,11 +6,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repoName": "facebook/react",
-      "question": "What is the fiber reconciler?"
+      "repoName": "modelcontextprotocol/python-sdk",
+      "question": "What transports does the server support?"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2883
+    "_observed_bytes": 2208
   },
   "read_wiki_contents": {
     "unwrap": [],
@@ -19,10 +19,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repoName": "facebook/react"
+      "repoName": "modelcontextprotocol/python-sdk"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 635591
+    "_observed_bytes": 534991
   },
   "read_wiki_structure": {
     "unwrap": [],
@@ -31,9 +31,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repoName": "facebook/react"
+      "repoName": "modelcontextprotocol/python-sdk"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 1441
+    "_observed_bytes": 1900
   }
 }

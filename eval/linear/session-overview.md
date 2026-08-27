@@ -2,63 +2,67 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:49:25Z
-- **Duration:** 10m 18s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:14:35Z
+- **Duration:** 7m 29s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface and selection
+## Surface
 
-`mcpgen list linear --schema` returned **55 tools**, every one carrying `annotations`. The
-split was clean enough that the keyword fallback never ran: **33 `readOnlyHint: true`** and
-**22 `readOnlyHint: false`**, none unannotated. All 33 read-only tools were selected and
-probed; all 22 mutating tools (`save_*`, `delete_*`, `create_*`, `merge_diff`, `share_issue`,
-`submit_diff_review`, `resolve_diff_thread`) were skipped entirely and never called. No seed
-commands were configured for this server, so none ran.
+`mcpgen list linear --schema` returned **55 tools** over the hosted HTTP endpoint
+(`https://mcp.linear.app/mcp`, OAuth — the stored token refreshed silently). Every tool supplies
+`annotations.readOnlyHint`, so classification needed no keyword guessing: **33 read-only, 22
+mutating**. All 22 mutating tools were skipped unprobed.
 
-## Discriminators
-
-The `list` advisory flagged 45 candidates, mostly noise. Pass 1 disqualified `orderBy`,
-`createdAt`/`updatedAt` (date-window filters), and the group spanning only mutating tools.
-Two reached Pass 2:
-
-- **`id`** (8 read-only tools). Probed `get_issue` at three real issue keys; all three shapes
-  were byte-identical. Per the skill this is **inconclusive, not disproven** — recorded as
-  unconfirmed. `Issue` is emitted as the observed shape, not promoted to a confident variant model.
-- **`type`** on `get_status_updates` (required, `enum: [project, initiative]`, only 2 values).
-  `type=project` returned `{statusUpdates: [], hasNextPage}`; `type=initiative` returned an
-  error — *"Initiative status updates are not enabled for this workspace"*. One value observable,
-  the other unobservable, so the candidate stays unconfirmed and `get_status_updates` is left
-  unwrap-only.
+Hosted means serial, paced probes, so the read-only set was pruned to record-carrying tools:
+**22 probed**, 11 unprobed. Nine (`get_document`, `get_project`, `get_release`,
+`get_release_note`, `get_diff`, `get_diff_threads`, `get_agent_skill`, `list_milestones`,
+`get_milestone`) need an id for an object this workspace lacks; an invented id records an error
+shape, not a record. `get_attachment` and `extract_images` return media envelopes, so `-> Any`.
 
 ## Surprises
 
-The workspace is nearly empty, which dominated the run. Only issues, teams, users, labels,
-and issue statuses hold data; projects, documents, releases, release notes, release
-pipelines, diffs, agent skills, project labels, cycles, and comments all returned `[]`. Their **envelope** shape is typed as an unwrap path, but the inner element
-shape is unobservable — no model was fabricated from zero samples.
+The workspace is nearly empty. Eleven list tools returned `[]` — projects, documents, diffs,
+releases, release notes, release pipelines, project labels, agent skills, comments, cycles,
+status updates. The envelope key is known, the record is not, so they are unwrap-only with
+`return_model: null`. Re-probing a populated workspace would type them.
 
-Ten getters had no object to fetch and returned errors, not records. Two error styles appeared: a structured envelope
-(`{error, message, status, requestId}` — `get_document`, `get_attachment`, `get_agent_skill`)
-and a bare prose string (`get_release`, `get_project`, `get_diff`, …). Neither is an observed
-shape, so all ten carry
-`"_probe_status": "inconclusive"`.
+`get_status_updates` is genuinely discriminated on `type`. `project` returned the usual
+`{statusUpdates, hasNextPage}` envelope; `initiative` returned an error string — *"Initiative
+status updates are not enabled for this workspace"*. That variant is unobserved, not disproven,
+so no overloads were emitted.
 
-**Schema lie:** `list_comments` declares `required: []`, but the server rejects an argument-free
-call with *"Provide exactly one of issueId, projectId, initiativeId, documentId, milestoneId, or
-statusUpdateId"*. The constraint lives only in per-field descriptions. Re-probed with a real
-`issueId`.
-
-`extract_images` returned prose ("No Linear upload images found") — a genuine text response,
-not an error, so it stays `Any` unmarked.
+Two shape-controlling params are invisible to the advisory by construction: `list_issues.fields`
+and `list_projects.fields` are **array**-typed projections (36 and 23 enum members). A confirming
+probe (`fields: ["title","assignee"]`) narrowed the record to `{id, title}` and surfaced an extra
+envelope key `cursor`. An array param selects several values at once, so overloads cannot
+describe it — resolved as a **generic base model** (`total=False`). `list_cycles.type` probed
+identical (empty) across `current`/`previous`; recorded unconfirmed.
 
 ## Shape decisions
 
-11 tools were shaped into 9 `TypedDict`s. `get_issue`/`list_issues` split into `Issue` and `IssueSummary`
-because the singular adds `attachments`, `documents`, `stateHistory`; `get_user`/`list_users`
-split the same way over `teams`. `Team` and `IssueStatus` are each shared by a list and a
-singular endpoint with identical fields. Nine date fields seen only as `null` are typed
-`Any | None` rather than guessed as `str`; fields seen only as `[]` stay bare `list`. The nested
-`priority` dict was left out rather than modelled from one probe.
+Every list tool shares one envelope, `{"<key>": [...], "hasNextPage": bool}`; unwrap is that key
+with `return_container: "list"`.
 
-`ast.parse` succeeds on the regenerated module; shaped tools return `list[IssueSummary]`,
-`Issue`, `list[DocumentationHit]` etc. and unwrap via `_dig_list`. `run.py` is the harness
-verify stage's job and was not generated here.
+| Tool | unwrap | model |
+|---|---|---|
+| `get_workspace` | — | `Workspace` |
+| `list_teams` / `get_team` | `teams` / — | `TeamSummary` / `Team` |
+| `list_users` / `get_user` | `users` / — | `UserSummary` / `User` |
+| `list_issues` / `get_issue` | `issues` / — | `IssueSummary` / `Issue` |
+| `list_issue_statuses` / `get_issue_status` | — (bare list) / — | `IssueStatusSummary` / `IssueStatus` |
+| `list_issue_labels` | `labels` | `IssueLabelSummary` |
+| `search_documentation` | — (bare list) | `DocumentationHit` |
+| 11 empty-list tools | their key | `null` (unobservable) |
+
+Per the depth rule `priority` (`{value, name}`), `stateHistory`, and `get_user.teams` stayed out
+of `fields`. `labels`, `attachments`, `documents` were seen only as `[]` and use the allowed
+`"list"` placeholder. Ten `sla*`/`*At` fields probed `None` → `str | None`.
+
+Probed args holding workspace UUIDs were scrubbed to placeholders; the real values live in the
+gitignored `linear.verify.json`.
+
+## Verification
+
+The regenerated module `ast.parse`s cleanly (135,325 bytes). Eval targets spot-checked:
+`list_teams(...) -> list[TeamSummary]` digging `_dig_list(result, ('teams',))`, and
+`get_issue(...) -> Issue`. 11 of 22 probed tools return a `TypedDict` or `list[TypedDict]`;
+the rest unwrap the envelope and honestly return `Any`.

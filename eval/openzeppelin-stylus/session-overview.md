@@ -2,48 +2,53 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:48:56Z
-- **Duration:** 3m 7s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:12:28Z
+- **Duration:** 1m 58s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
 ## Server surface
 
-The server exposes **3 tools**, all contract generators: `stylus-erc20`, `stylus-erc721`,
-`stylus-erc1155`. No tool carries `annotations`, so classification fell back to the keyword
-test plus a semantic read of the description. The verb "Make" reads as mutating, but every
-description ends with "Does not write to disk" — the tools return source code and touch no
-persistent state. All three were cleared as safe-to-probe and **all three were probed**;
-nothing was skipped. No seed commands apply.
+`mcpgen list openzeppelin-stylus --schema` reported **3 tools**, all contract-scaffold
+generators for Arbitrum Stylus: `stylus-erc20`, `stylus-erc721`, `stylus-erc1155`. All three
+were probed; none was skipped. No seed commands were required (`auth: none`, hosted HTTP).
+
+## Mutating classification
+
+No tool carries `annotations`, so classification fell back to the keyword-plus-semantic read.
+Each description opens with "Make a …", which trips the keyword test, but each also states
+explicitly: *"Returns the source code of the generated contract, formatted in a Markdown code
+block. **Does not write to disk.**"* These are pure code generators with no server-side state,
+so all three were cleared as safe to probe. Nothing was flagged `_mutating_suspect`.
 
 ## Discriminator handling
 
-`list --schema` raised one candidate: **`name` → stylus-erc1155, stylus-erc20, stylus-erc721**.
-`name` is not on the engine denylist (only `reponame`/`repo_name`/`repositoryname`/`username`/
-`orgname` are) and is not one of the Pass 1 pagination/sort/path additions, so it survived
-Pass 1 and required Pass 2. Three distinct values were probed against `stylus-erc20` in
-separate paced invocations, reading the part file between each: `MyToken` (2557 B), `Zeta`
-(2539 B), `Q3_Rewards` (2575 B). All three returned the identical shape `"str"`; byte counts
-differ only because the contract name is interpolated into the emitted Rust. That is
-**inconclusive, not disproven** — but it is moot here, because there is no structured model
-for the parameter to switch between. Resolved as **option 3 (unwrap-only)**.
+The `list --schema` advisory flagged `name` as a discriminator candidate spanning all three
+tools. `name` survives Pass 1 (it is not one of the five identity forms the engine drops), so
+Pass 2 ran: three separate paced probes of `stylus-erc20` with `AlphaToken`, `BetaCoin`, and
+`GammaAsset`, reading the part file between each. All three returned `_observed_shape: "str"`,
+differing only in `_observed_bytes` (2575 / 2563 / 2575) — byte counts, not shape. **Verdict:
+inconclusive, not disproven**, so the three tools formally stay polymorphic-suspect. A
+description sweep found no second candidate; `name` is documented as "The name of the contract",
+free text with no `enum`, and it steers the emitted identifier rather than the response shape.
+
+Resolution: **option 3 (unwrap-only / `Any`)**. Since every response is a flat string, there is
+no dict to key overloads on and no shared base model to extract — the honest outcome is the same
+one a confirmed non-discriminator would produce.
 
 ## Shape decisions
 
-Every tool returned `_observed_shape: "str"`. The JSON-in-string test was run on a captured
-raw payload for `stylus-erc20` and came back **`NOT_JSON`**: the body is a Markdown fenced
-block of Rust (`` ```rust `` / `// SPDX-License-Identifier: MIT` / `use openzeppelin_stylus::…`),
-not a double-encoded record. That is an expected outcome, not a probe failure — each probe
-returned a real success payload, so no `_probe_status: inconclusive` marker was added.
+All three tools returned prose. A raw capture via `mcpgen call --out` confirmed the payload is a
+literal Markdown fence containing Rust source (` ```rust ` / `// SPDX-License-Identifier: MIT`),
+i.e. **NOT_JSON** — not a double-encoded record, so no JSON-in-string unwrap applies. Each entry
+therefore keeps `unwrap: []`, `return_model: null`, `fields: {}`, `source: "live"`, and
+`_observed_shape: "str"` as honest evidence of a genuine text return. No `_probe_status:
+inconclusive` marker was added: every probe returned a real success payload.
 
-Consequently all three entries keep `unwrap: []`, `return_model: null`, empty `fields`, and
-`source: "live"`. No `input_overrides` were needed; the input schemas are honest (required
-`name: string`, optional booleans, a nested `info` object). This server is
-**`no_shaped_tool_by_design`** — prose/source in, prose/source out, with no vendor envelope to
-strip. `probed_args` hold only invented contract labels, so the scrub pass had nothing to
-remove.
+This is a `no_shaped_tool_by_design` server — a typed `TypedDict` would misdescribe what every
+tool actually hands back.
 
-## Generation
+## Verification
 
-Codegen re-consumed the merged shapes (`shapes: … (3 tool(s))`) and correctly emitted all
-three wrappers as `-> Any` rather than inventing a `TypedDict`. The module parses cleanly
-(`ast.parse` OK, 6103 bytes) with `__schema__` and Args docstrings embedded on each function.
-Runner generation was left to the harness verify stage per the eval contract.
+Regeneration wrote a 6103-byte module that `ast.parse` accepts cleanly. Signatures are fully
+typed from `inputSchema` (`name: str` required; `burnable`/`permit`/`flashmint`/`enumerable`/
+`supply` as `bool | None`; `info` as a nested dict) and all three return `Any`, which matches the
+observed shapes.

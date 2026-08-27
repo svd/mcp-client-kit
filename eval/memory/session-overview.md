@@ -1,60 +1,60 @@
-# memory — generate-mcp-wrappers session overview
+# memory — session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:30:40Z
-- **Duration:** 9m 44s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:03:14Z
+- **Duration:** 3m 43s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
 ## Seeding
 
-Both seed commands ran before the skill and both succeeded (exit 0), but each returned `[]`
-rather than the created records: the server had been seeded by an earlier run and
-`create_entities` / `create_relations` return only the *newly* created items, deduping the
-rest. A `read_graph` check confirmed the store did hold the two entities (Ada Lovelace,
-Analytical Engine) and the one `programmed` relation, so probing proceeded against real data
-rather than an empty graph.
-
-The folder also held artifacts from that earlier run, including a `memory.shapes.json` that
-`codegen` auto-detected on the first pass. Those were moved aside and the module regenerated
-from bare stubs, so this record reflects one run only.
+Both seed commands ran before the skill was invoked and both exited 0, each returning `[]`.
+The empty arrays are not a failure: the server persists its graph to disk, so the entities
+and the relation already existed from an earlier run and `create_*` is a no-op for
+duplicates. A confirming `read_graph` call showed both entities (`Ada Lovelace`,
+`Analytical Engine`) and the `programmed` relation present, so probing ran against a
+populated store rather than an empty one.
 
 ## Tools and selection
 
-The server exposes **9 tools**. Every one carries explicit `annotations`, so classification
-needed no keyword or semantic fallback: `readOnlyHint: true` on `read_graph`, `search_nodes`,
-and `open_nodes`; `readOnlyHint: false` on the six mutators (`create_entities`,
-`create_relations`, `add_observations`, plus the three `delete_*`, which also set
-`destructiveHint: true`). All three read-only tools were probed; the six mutating tools were
-skipped and left `-> Any`, which suits them — they return acks, not records.
+The server exposes **9 tools**. Every one carries explicit `annotations`, so the
+mutating classification needed no keyword or semantic fallback: `readOnlyHint: true` on
+`read_graph`, `search_nodes`, and `open_nodes`; `readOnlyHint: false` on the other six,
+with `destructiveHint: true` on the three `delete_*` tools. **3 probed, 6 skipped as
+mutating.** The transport is local stdio, so the selected set was kept at every
+non-mutating tool with no pruning.
 
-**Discriminators: N/A.** No parameter is shared by two or more tools under the same name with
-a top-level scalar `type` — every multi-tool parameter (`entities`, `relations`, `names`,
-`deletions`) is an array, and `query` is both single-tool and denylisted. The `list --schema`
-stderr carried no advisory, matching that reading.
+No discriminator advisory fired on `list --schema`, and that matches the schemas: every
+shared parameter is an array type, and the only string scalar (`query`) is both on the
+engine denylist and confined to one tool. A description sweep found no parameter naming a
+response key either, so `discriminators: N/A` and Pass 2 was skipped.
 
 ## Surprises
 
-`search_nodes` with `query: "Ada"` returned one entity but *also* the Ada→Analytical Engine
-relation, whose other endpoint is absent from the returned `entities`. The server filters
-entities by the query and then returns relations touching any match, so callers can receive
-relations pointing at nodes not present in the same payload. Worth knowing; it does not change
-the type.
+The interesting finding is that all three read tools return the **same** envelope —
+`{"entities": [...], "relations": [...]}` — rather than the narrower payloads their names
+suggest. `open_nodes` and `search_nodes` return a filtered *subgraph*, including the
+relations among the matched nodes, not a bare list of nodes. `search_nodes(query="Ada")`
+returned one entity where the other two returned two, confirming filtering works while the
+structure stays fixed.
 
 ## Shape decisions
 
-All three read tools returned the identical top-level record `{entities: [...], relations: [...]}`
-with **no vendor envelope**, so `unwrap` is `[]` for each and no `_dig` helper is emitted.
-Because the three `fields` dicts are identical, they legitimately share one model,
-`KnowledgeGraph` — which is also the honest domain name, since each returns a subgraph.
+All three tools: `unwrap: []` — there is no vendor envelope, the payload is already the
+record. Because the shape is byte-for-byte identical across the three, they share one
+return model, `KnowledgeGraph`, which is permitted since their `fields` dicts match.
 `return_container` is omitted: the record is a single dict, not a list.
 
-`fields` records `entities` and `relations` as `list[dict]`. The element shapes were observed
-and stable (`name`/`entityType`/`observations`, `from`/`to`/`relationType`), but `fields` is a
-flat map and nested `TypedDict`s are not expressible there, so the inner dicts stay `dict`
-rather than over-claiming depth from a two-entity store.
+`fields` is `{"entities": "list[dict]", "relations": "list[dict]"}`. The element shapes
+were observed (`name`/`entityType`/`observations`, and `from`/`to`/`relationType`), but
+those sit at level 2 and the shape-spec has no way to declare auxiliary models, so
+`list[dict]` is the honest ceiling rather than a fabricated nested type.
 
-## Verification
+`probed_args` was left unscrubbed: `Ada Lovelace` and `Analytical Engine` are synthetic
+fixture names from the harness's own seed commands, already checked into `servers.toml`,
+and identify no real person.
 
-The regenerated module parses cleanly (`ast.parse` OK). All three shaped tools read
-`-> KnowledgeGraph` rather than `-> Any`; the six mutating tools remain `Any` as intended.
-`run.py` is the harness's job and was not generated here.
+## Result
+
+The regenerated module parses cleanly (`ast.parse` OK). All three read-only tools read
+`-> KnowledgeGraph` and cast the call result; the six mutating tools correctly remain
+`-> Any`, never having been probed.

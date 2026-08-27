@@ -1,7 +1,7 @@
 {
   "sequentialthinking": {
     "unwrap": [],
-    "return_model": "ThoughtProgress",
+    "return_model": "ThoughtStatus",
     "input_overrides": {},
     "fields": {
       "thoughtNumber": "int",
@@ -13,20 +13,25 @@
     "source": "live",
     "probed_args": [
       {
-        "thought": "Step one: enumerate the constraints of the problem.",
+        "thought": "Evaluate whether the wrapper generation pipeline produces typed records.",
         "thoughtNumber": 1,
         "totalThoughts": 3,
         "nextThoughtNeeded": true
       },
       {
-        "thought": "Step two: branch to explore an alternative framing.",
+        "thought": "Second step: consider the response envelope shape.",
         "thoughtNumber": 2,
         "totalThoughts": 3,
         "nextThoughtNeeded": true,
-        "branchFromThought": 1,
-        "branchId": "alt-a",
-        "isRevision": false,
-        "needsMoreThoughts": false
+        "isRevision": false
+      },
+      {
+        "thought": "Final step: conclude.",
+        "thoughtNumber": 3,
+        "totalThoughts": 3,
+        "nextThoughtNeeded": false,
+        "branchFromThought": 2,
+        "branchId": "alt-a"
       }
     ]
   }

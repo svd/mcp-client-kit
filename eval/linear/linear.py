@@ -23,23 +23,22 @@ class Issue(TypedDict, total=False):
     gitBranchName: str
     createdAt: str
     updatedAt: str
-    archivedAt: Any | None
-    completedAt: Any | None
-    startedAt: Any | None
-    canceledAt: Any | None
-    dueDate: Any | None
-    slaStartedAt: Any | None
-    slaMediumRiskAt: Any | None
-    slaHighRiskAt: Any | None
-    slaBreachesAt: Any | None
+    archivedAt: str | None
+    completedAt: str | None
+    startedAt: str | None
+    canceledAt: str | None
+    dueDate: str | None
+    slaStartedAt: str | None
+    slaMediumRiskAt: str | None
+    slaHighRiskAt: str | None
+    slaBreachesAt: str | None
     status: str
     statusType: str
-    team: str
-    teamId: str
     labels: list
     attachments: list
     documents: list
-    stateHistory: list
+    team: str
+    teamId: str
 
 
 class IssueStatus(TypedDict, total=False):
@@ -67,7 +66,6 @@ class User(TypedDict, total=False):
     createdAt: str
     updatedAt: str
     status: str
-    teams: list
 
 
 class Workspace(TypedDict, total=False):
@@ -76,11 +74,17 @@ class Workspace(TypedDict, total=False):
     url: str
 
 
-class IssueLabel(TypedDict, total=False):
+class IssueLabelSummary(TypedDict, total=False):
     id: str
     name: str
     color: str
-    description: Any | None
+    description: str | None
+
+
+class IssueStatusSummary(TypedDict, total=False):
+    id: str
+    type: str
+    name: str
 
 
 class IssueSummary(TypedDict, total=False):
@@ -91,20 +95,27 @@ class IssueSummary(TypedDict, total=False):
     gitBranchName: str
     createdAt: str
     updatedAt: str
-    archivedAt: Any | None
-    completedAt: Any | None
-    startedAt: Any | None
-    canceledAt: Any | None
-    dueDate: Any | None
-    slaStartedAt: Any | None
-    slaMediumRiskAt: Any | None
-    slaHighRiskAt: Any | None
-    slaBreachesAt: Any | None
+    archivedAt: str | None
+    completedAt: str | None
+    startedAt: str | None
+    canceledAt: str | None
+    dueDate: str | None
+    slaStartedAt: str | None
+    slaMediumRiskAt: str | None
+    slaHighRiskAt: str | None
+    slaBreachesAt: str | None
     status: str
     statusType: str
+    labels: list
     team: str
     teamId: str
-    labels: list
+
+
+class TeamSummary(TypedDict, total=False):
+    id: str
+    name: str
+    createdAt: str
+    updatedAt: str
 
 
 class UserSummary(TypedDict, total=False):
@@ -700,7 +711,7 @@ async def list_documents(caller: McpCaller, *, limit: float | None = None, curso
 list_documents.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'limit': {'default': 50, 'description': 'Max results (default 50, max 250)', 'type': 'number', 'maximum': 250}, 'cursor': {'description': 'Next page cursor', 'type': 'string'}, 'orderBy': {'default': 'updatedAt', 'description': 'Sort: createdAt | updatedAt', 'type': 'string', 'enum': ['createdAt', 'updatedAt']}, 'query': {'description': 'Search query', 'type': 'string'}, 'projectId': {'description': 'Filter by project ID', 'type': 'string'}, 'initiativeId': {'description': 'Filter by initiative ID', 'type': 'string'}, 'teamId': {'description': 'Filter by team ID', 'type': 'string'}, 'creatorId': {'description': 'Filter by creator ID', 'type': 'string'}, 'createdAt': {'description': 'Created after: ISO-8601 date/duration (e.g., -P1D)', 'type': 'string'}, 'updatedAt': {'description': 'Updated after: ISO-8601 date/duration (e.g., -P1D)', 'type': 'string'}, 'includeArchived': {'default': False, 'description': 'Include archived items', 'type': 'boolean'}, 'fields': {'description': 'Fields to include in each result. `id` is always included. Omit or pass an empty array for the default response.', 'type': 'array', 'items': {'type': 'string', 'enum': ['id', 'title', 'content', 'url', 'createdAt', 'updatedAt', 'archivedAt', 'creator', 'updatedBy', 'project', 'initiative', 'team', 'issue']}}}, 'additionalProperties': False}
 
 
-async def list_issue_labels(caller: McpCaller, *, limit: float | None = None, cursor: str | None = None, orderBy: Literal['createdAt', 'updatedAt'] | None = None, name: str | None = None, team: str | None = None) -> list[IssueLabel]:
+async def list_issue_labels(caller: McpCaller, *, limit: float | None = None, cursor: str | None = None, orderBy: Literal['createdAt', 'updatedAt'] | None = None, name: str | None = None, team: str | None = None) -> list[IssueLabelSummary]:
     """List available issue labels in a Linear workspace or team
 
     Args:
@@ -722,19 +733,19 @@ async def list_issue_labels(caller: McpCaller, *, limit: float | None = None, cu
     if team is not None:
         args["team"] = team
     result = await caller.call(SERVER, "list_issue_labels", args)
-    return cast("list[IssueLabel]", _dig_list(result, ('labels', )))
+    return cast("list[IssueLabelSummary]", _dig_list(result, ('labels', )))
 
 list_issue_labels.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'limit': {'default': 50, 'description': 'Max results (default 50, max 250)', 'type': 'number', 'maximum': 250}, 'cursor': {'description': 'Next page cursor', 'type': 'string'}, 'orderBy': {'default': 'updatedAt', 'description': 'Sort: createdAt | updatedAt', 'type': 'string', 'enum': ['createdAt', 'updatedAt']}, 'name': {'description': 'Filter by name', 'type': 'string'}, 'team': {'description': 'Team name or ID', 'type': 'string'}}, 'additionalProperties': False}
 
 
-async def list_issue_statuses(caller: McpCaller, *, team: str) -> list[IssueStatus]:
+async def list_issue_statuses(caller: McpCaller, *, team: str) -> list[IssueStatusSummary]:
     """List available issue statuses in a Linear team
 
     Args:
         team: Team name or ID
     """
     args: dict[str, Any] = {"team": team}
-    return cast("list[IssueStatus]", await caller.call(SERVER, "list_issue_statuses", args))
+    return cast("list[IssueStatusSummary]", await caller.call(SERVER, "list_issue_statuses", args))
 
 list_issue_statuses.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'team': {'type': 'string', 'description': 'Team name or ID'}}, 'required': ['team'], 'additionalProperties': False}
 
@@ -1042,7 +1053,7 @@ async def list_releases(caller: McpCaller, *, limit: float | None = None, cursor
 list_releases.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'limit': {'default': 50, 'description': 'Max results (default 50, max 250)', 'type': 'number', 'maximum': 250}, 'cursor': {'description': 'Next page cursor', 'type': 'string'}, 'orderBy': {'default': 'updatedAt', 'description': 'Sort: createdAt | updatedAt', 'type': 'string', 'enum': ['createdAt', 'updatedAt']}, 'query': {'description': 'Search release name or version', 'type': 'string'}, 'pipeline': {'description': 'Release pipeline ID, slug, or exact name', 'type': 'string'}, 'stage': {'description': 'Release stage ID or exact name', 'type': 'string'}, 'stageType': {'description': 'Filter by stage lifecycle type', 'type': 'string', 'enum': ['planned', 'started', 'completed', 'canceled']}, 'version': {'description': 'Exact version match', 'type': 'string'}, 'hasReleaseNotes': {'description': 'Filter to releases that do (true) or do not (false) have release notes', 'type': 'boolean'}, 'includeReleaseNotes': {'default': False, 'description': 'Include associated release notes', 'type': 'boolean'}, 'createdAt': {'description': 'Created after: ISO-8601 date/duration (e.g., -P1D)', 'type': 'string'}, 'updatedAt': {'description': 'Updated after: ISO-8601 date/duration (e.g., -P1D)', 'type': 'string'}, 'includeArchived': {'default': False, 'description': 'Include archived items', 'type': 'boolean'}}, 'additionalProperties': False}
 
 
-async def list_teams(caller: McpCaller, *, limit: float | None = None, cursor: str | None = None, orderBy: Literal['createdAt', 'updatedAt'] | None = None, query: str | None = None, includeArchived: bool | None = None, createdAt: str | None = None, updatedAt: str | None = None) -> list[Team]:
+async def list_teams(caller: McpCaller, *, limit: float | None = None, cursor: str | None = None, orderBy: Literal['createdAt', 'updatedAt'] | None = None, query: str | None = None, includeArchived: bool | None = None, createdAt: str | None = None, updatedAt: str | None = None) -> list[TeamSummary]:
     """List teams in the user's Linear workspace
 
     Args:
@@ -1070,7 +1081,7 @@ async def list_teams(caller: McpCaller, *, limit: float | None = None, cursor: s
     if updatedAt is not None:
         args["updatedAt"] = updatedAt
     result = await caller.call(SERVER, "list_teams", args)
-    return cast("list[Team]", _dig_list(result, ('teams', )))
+    return cast("list[TeamSummary]", _dig_list(result, ('teams', )))
 
 list_teams.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'limit': {'default': 50, 'description': 'Max results (default 50, max 250)', 'type': 'number', 'maximum': 250}, 'cursor': {'description': 'Next page cursor', 'type': 'string'}, 'orderBy': {'default': 'updatedAt', 'description': 'Sort: createdAt | updatedAt', 'type': 'string', 'enum': ['createdAt', 'updatedAt']}, 'query': {'description': 'Search query', 'type': 'string'}, 'includeArchived': {'default': False, 'description': 'Include archived items', 'type': 'boolean'}, 'createdAt': {'description': 'Created after: ISO-8601 date/duration (e.g., -P1D)', 'type': 'string'}, 'updatedAt': {'description': 'Updated after: ISO-8601 date/duration (e.g., -P1D)', 'type': 'string'}}, 'additionalProperties': False}
 

@@ -1,54 +1,58 @@
-# semgrep — session overview
+# semgrep — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:43:13Z
-- **Duration:** 5m 27s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:07:56Z
+- **Duration:** 6m 42s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
 ## Tool inventory
 
-`mcpgen list semgrep --schema` returned **7 tools**, none carrying `annotations`. Classified
-by keyword plus semantic read: none mutate server state. The three `semgrep_scan*` /
-`get_abstract_syntax_tree` tools analyse code the caller supplies and persist nothing, so they
-were treated as safe to probe. **All 7 were probed; 0 were skipped.**
+`mcpgen list semgrep --schema` returned **7 tools**, none carrying `annotations`. All 7 were
+classified non-mutating (the scan tools analyse code supplied in the call and persist nothing),
+so all 7 were selected and probed; none were skipped. No seed commands apply. OAuth was already
+established — `semgrep_whoami` answered on the first probe with no login prompt.
 
-`discriminators: N/A`. The `list --schema` run emitted no advisory on stderr, and no parameter
-clears the precondition independently: `code_files` is shared by two tools but is declared
-`anyOf[array, null]`, not a top-level scalar, and `rule` / `code` / `language` each appear on a
-single tool.
+Four of the seven are marked `[DEPRECATED]` in their own descriptions.
 
-## Surprising responses
+## Surprises
 
-The dominant finding is that **the hosted endpoint has been tombstoned for scanning**. Four
-tools — `get_supported_languages`, `semgrep_scan_remote`, `semgrep_scan_with_custom_rule`,
-`get_abstract_syntax_tree` — each returned the byte-identical 473-byte notice "This tool is
-deprecated and will be removed soon. The hosted Semgrep MCP server no longer runs scans",
-directing callers to the local `semgrep mcp` server. No result payload was observable behind
-any of them.
+The four deprecated tools — `get_supported_languages`, `get_abstract_syntax_tree`,
+`semgrep_scan_remote`, `semgrep_scan_with_custom_rule` — all returned the **same 473-byte prose
+notice** ("The hosted Semgrep MCP server no longer runs scans"), never a result payload. Their
+shapes were never observed, so each carries `"_probe_status": "inconclusive"` rather than a
+misleading `"_observed_shape": "str"`.
 
-`semgrep_findings` declares `repos` with `default: []`, but calling it without one fails with
-"No repositories provided. User must provide at least one repository to filter by" — the schema
-lies about that argument being optional. Re-probed with `repos: ["semgrep/semgrep"]`, it
-returned the 19-byte prose "No findings found": this deployment has no scanned repositories, so
-the finding-record shape stayed unobservable.
+`semgrep_findings` refused a bare call: *"No repositories provided."* With a real repo
+(`svd/mcp-client-kit`, public) it returned a `{findings: [...], total_findings: int}` envelope.
+When a filter matches nothing it returns the plain string `No findings found` instead of an
+empty envelope — recorded in the shape-spec as `_empty_result_sentinel`.
+
+## Discriminator
+
+The `list --schema` advisory fired nothing (no scalar param is shared across two tools). The
+description sweep flagged `issue_type` on `semgrep_findings`, and Pass 2 **confirmed** it: SAST
+records carry `sastAttributes`/`aiTags`/`ruleset`/`policySlug`/`subcategories`; SCA records carry
+`scaAttributes`/`vulnGroupKey`/`relatedIssues`/`note`/`activityHistory`; 35 keys are shared.
+`ISSUE_TYPE_SECRETS` could not be observed — the probe repo has no secrets findings.
+
+Because one of three variants was never probed, resolution took **step 4 option 2**: a single
+`SemgrepFinding` base model over the 29 top-level scalars common to the two observed variants,
+rather than overloads that would have misdescribed SECRETS.
 
 ## Shape decisions
 
-- **`semgrep_whoami`** — the one tool yielding a real record. The payload is the record: no
-  vendor envelope, so `unwrap: []`. `return_model: SemgrepIdentity`, with the six top-level
-  scalars promoted. `sub` and `client_id` were observed only as `null`, so both are typed
-  `Any | None` rather than guessed. `authDetails` is a list of nested dicts and was left out of
-  `fields` per the don't-model-depth-from-one-probe rule.
-- **`semgrep_rule_schema`** — returns a genuine 37 KB YAML document. A guarded `json.loads`
-  test reported `NOT_JSON`, so this is prose by design: `_observed_shape: "str"` stands and
-  `return_model` stays `null`.
-- **The four deprecated tools plus `semgrep_findings`** — marked
-  `"_probe_status": "inconclusive"`. Every non-empty response was a refusal or an empty-set
-  message, never a result, so nothing about their record shape was established. Leaving them as
-  plain `"str"` would falsely claim they are text-returning by design.
+| Tool | Unwrap | Return | Why |
+|---|---|---|---|
+| `semgrep_findings` | `["findings"]` | `list[SemgrepFinding]` | vendor envelope; base model over confirmed-common scalars |
+| `semgrep_whoami` | `[]` | `SemgrepIdentity` | flat identity record; nested `authDetails` left out |
+| `semgrep_rule_schema` | `[]` | `Any` | genuine ~37 KB YAML text document; `json.loads` on the raw payload raised `JSONDecodeError`, so not double-encoded |
+| 4 deprecated tools | `[]` | `Any` | no result payload ever observed |
 
-## Verification
+Nested `repository`, `first_seen_scan`, and `last_seen_scan` were left unmodelled — one probe is
+not enough to state depth authoritatively.
 
-The regenerated module parses cleanly (`ast.parse` OK). `semgrep_whoami` reads
-`-> SemgrepIdentity`; the six remaining wrappers stay honestly `-> Any`. Enum parameters on
-`semgrep_findings` rendered automatically as `Literal[...]`. No seeds were configured or run.
+## Result
+
+The regenerated module parses cleanly (`ast.parse` OK). `semgrep_findings` reads
+`-> list[SemgrepFinding]` and digs via `_dig_list(result, ('findings',))`; `semgrep_whoami` reads
+`-> SemgrepIdentity`. Enum params rendered as `Literal[...]` automatically.

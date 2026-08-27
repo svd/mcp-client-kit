@@ -6,12 +6,45 @@ caller's concern, not this module's.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Literal, TypedDict, cast
 
 from mcpgen.seam import McpCaller
 
 SERVER = 'semgrep'
 
+
+
+class SemgrepFinding(TypedDict, total=False):
+    id: int
+    created_at: str
+    ref: str
+    syntactic_id: str
+    match_based_id: str
+    rule_id: int
+    rule_path: str
+    rule_url: str
+    ruleHashId: str
+    ruleOrigin: str
+    status: str
+    relevant_since: str
+    aggregate_state: str
+    file_path: str
+    line_of_code_url: str
+    line: int
+    end_line: int
+    column: int
+    end_column: int
+    severity: str
+    confidence: str
+    message: str
+    category: str
+    issueType: str
+    issueParentId: str
+    isBlocking: bool
+    triageState: str
+    triagePermission: str
+    external_ticket: Any | None
 
 
 class SemgrepIdentity(TypedDict, total=False):
@@ -21,6 +54,39 @@ class SemgrepIdentity(TypedDict, total=False):
     client_id: Any | None
     id: str
     login: str
+
+
+def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
+    """Unwrap to a list at the given key path, honouring the list contract.
+
+    A list passes through; a full envelope is dug; otherwise fall back to the last
+    path key at top level, defaulting to [] (never a non-list).
+    If obj or the extracted value is a JSON-encoded string, parses it first."""
+    if isinstance(obj, list):
+        return obj
+    raw = obj
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+            if isinstance(raw, list):
+                return raw
+        except (ValueError, TypeError):
+            pass
+    if not isinstance(raw, dict):
+        return []
+    cur = raw
+    for key in path:
+        if not isinstance(cur, dict) or key not in cur:
+            return raw.get(path[-1], [])
+        cur = cur[key]
+    if isinstance(cur, str):
+        try:
+            parsed = json.loads(cur)
+            if isinstance(parsed, list):
+                return parsed
+        except (ValueError, TypeError):
+            pass
+    return cur
 
 
 async def get_abstract_syntax_tree(caller: McpCaller, *, code: Any | None = None, language: Any | None = None) -> Any:
@@ -47,7 +113,7 @@ async def get_supported_languages(caller: McpCaller) -> Any:
 get_supported_languages.__schema__ = {'properties': {}, 'title': 'get_supported_languagesArguments', 'type': 'object'}
 
 
-async def semgrep_findings(caller: McpCaller, *, issue_type: Literal['ISSUE_TYPE_SAST', 'ISSUE_TYPE_SCA', 'ISSUE_TYPE_SECRETS'] | None = None, repos: list[str] | None = None, status: Literal['ISSUE_TAB_OPEN', 'ISSUE_TAB_CLOSED', 'ISSUE_TAB_IGNORED', 'ISSUE_TAB_REVIEWING', 'ISSUE_TAB_FIXING'] | None = None, severities: Any | None = None, confidence: Any | None = None, source: Any | None = None, reachabilities: Any | None = None, validation_states: Any | None = None, dataflow_only: bool | None = None, interfile_only: bool | None = None, refs: list[str] | None = None, limit: int | None = None) -> Any:
+async def semgrep_findings(caller: McpCaller, *, issue_type: Literal['ISSUE_TYPE_SAST', 'ISSUE_TYPE_SCA', 'ISSUE_TYPE_SECRETS'] | None = None, repos: list[str] | None = None, status: Literal['ISSUE_TAB_OPEN', 'ISSUE_TAB_CLOSED', 'ISSUE_TAB_IGNORED', 'ISSUE_TAB_REVIEWING', 'ISSUE_TAB_FIXING'] | None = None, severities: Any | None = None, confidence: Any | None = None, source: Any | None = None, reachabilities: Any | None = None, validation_states: Any | None = None, dataflow_only: bool | None = None, interfile_only: bool | None = None, refs: list[str] | None = None, limit: int | None = None) -> list[SemgrepFinding]:
     """Fetches findings from the Semgrep AppSec Platform Findings API.
 
         This function retrieves security, code quality, and supply chain findings that have already been
@@ -126,7 +192,8 @@ async def semgrep_findings(caller: McpCaller, *, issue_type: Literal['ISSUE_TYPE
         args["refs"] = refs
     if limit is not None:
         args["limit"] = limit
-    return await caller.call(SERVER, "semgrep_findings", args)
+    result = await caller.call(SERVER, "semgrep_findings", args)
+    return cast("list[SemgrepFinding]", _dig_list(result, ('findings', )))
 
 semgrep_findings.__schema__ = {'properties': {'issue_type': {'default': 'ISSUE_TYPE_SAST', 'description': 'Type of issue to filter by.', 'enum': ['ISSUE_TYPE_SAST', 'ISSUE_TYPE_SCA', 'ISSUE_TYPE_SECRETS'], 'title': 'Issue Type', 'type': 'string'}, 'repos': {'default': [], 'description': "List of repository names to filter by. Include the owner and repository name, e.g. 'owner/repository'", 'items': {'type': 'string'}, 'title': 'Repos', 'type': 'array'}, 'status': {'default': 'ISSUE_TAB_OPEN', 'description': 'Status of the issue to filter by.', 'enum': ['ISSUE_TAB_OPEN', 'ISSUE_TAB_CLOSED', 'ISSUE_TAB_IGNORED', 'ISSUE_TAB_REVIEWING', 'ISSUE_TAB_FIXING'], 'title': 'Status', 'type': 'string'}, 'severities': {'anyOf': [{'items': {'enum': ['SEVERITY_CRITICAL', 'SEVERITY_HIGH', 'SEVERITY_MEDIUM', 'SEVERITY_LOW'], 'type': 'string'}, 'type': 'array'}, {'type': 'null'}], 'default': None, 'description': 'Severities of the issues to filter by.', 'title': 'Severities'}, 'confidence': {'anyOf': [{'items': {'enum': ['CONFIDENCE_HIGH', 'CONFIDENCE_MEDIUM', 'CONFIDENCE_LOW'], 'type': 'string'}, 'type': 'array'}, {'type': 'null'}], 'default': None, 'description': 'Confidences of the issues to filter by.', 'title': 'Confidence'}, 'source': {'anyOf': [{'items': {'enum': ['SOURCE_PRO', 'SOURCE_COMMUNITY', 'SOURCE_CUSTOM'], 'type': 'string'}, 'type': 'array'}, {'type': 'null'}], 'default': None, 'description': "Engine/rule source to filter SAST findings by. Only applies when issue_type is ISSUE_TYPE_SAST. Use ['SOURCE_PRO'] to return only Pro-engine findings; OSS findings use 'SOURCE_COMMUNITY'. If not provided, findings from all sources are returned.", 'title': 'Source'}, 'reachabilities': {'anyOf': [{'items': {'enum': ['REACHABILITY_REACHABLE', 'REACHABILITY_CONDITIONALLY_REACHABLE', 'REACHABILITY_ALWAYS_REACHABLE', 'REACHABILITY_UNREACHABLE', 'REACHABILITY_UNKNOWN'], 'type': 'string'}, 'type': 'array'}, {'type': 'null'}], 'default': None, 'description': "Reachability values to filter supply chain findings by. Only applies when issue_type is ISSUE_TYPE_SCA. Use ['REACHABILITY_REACHABLE'] to return only reachable findings. If not provided, findings of any reachability are returned.", 'title': 'Reachabilities'}, 'validation_states': {'anyOf': [{'items': {'enum': ['VALIDATION_STATE_CONFIRMED_VALID', 'VALIDATION_STATE_CONFIRMED_INVALID', 'VALIDATION_STATE_VALIDATION_ERROR', 'VALIDATION_STATE_NO_VALIDATOR'], 'type': 'string'}, 'type': 'array'}, {'type': 'null'}], 'default': None, 'description': "Validation states to filter secrets findings by. Only applies when issue_type is ISSUE_TYPE_SECRETS. Use ['VALIDATION_STATE_CONFIRMED_VALID'] to return only validated secrets. If not provided, findings of any validation state are returned.", 'title': 'Validation States'}, 'dataflow_only': {'default': False, 'description': 'If true, return only SAST findings that have a dataflow/taint trace (taint-mode findings), excluding single-pattern matches. Only applies when issue_type is ISSUE_TYPE_SAST. Requires an extra API lookup per returned finding, and is applied to the returned page after fetching, so total_findings reflects the server-side filters only (not this one).', 'title': 'Dataflow Only', 'type': 'boolean'}, 'interfile_only': {'default': False, 'description': 'If true, return only SAST findings whose dataflow/taint trace spans more than one file (cross-file / interfile dataflow). Implies dataflow_only. Only applies when issue_type is ISSUE_TYPE_SAST. Requires an extra API lookup per returned finding, and is applied to the returned page after fetching, so total_findings reflects the server-side filters only.', 'title': 'Interfile Only', 'type': 'boolean'}, 'refs': {'default': [], 'description': 'List of git refs (branch names) to filter findings by. If not provided, only findings on the primary branch are returned.', 'items': {'type': 'string'}, 'title': 'Refs', 'type': 'array'}, 'limit': {'default': 10, 'description': 'Maximum number of findings to return', 'title': 'Limit', 'type': 'integer'}}, 'title': 'semgrep_findingsArguments', 'type': 'object'}
 

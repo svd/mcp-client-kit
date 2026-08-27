@@ -6,12 +6,12 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "task": "how does verification work",
+      "task": "how does the verifier check generated wrappers",
       "maxNodes": 5,
       "includeCode": true
     },
     "_observed_shape": "str",
-    "_observed_bytes": 457
+    "_observed_bytes": 4734
   },
   "codegraph_explore": {
     "unwrap": [],
@@ -46,11 +46,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "verify_server",
-      "limit": 5
+      "query": "verify",
+      "limit": 10
     },
     "_observed_shape": "str",
-    "_observed_bytes": 671
+    "_observed_bytes": 1236
   },
   "codegraph_trace": {
     "unwrap": [],
@@ -58,11 +58,17 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "from": "verify_server",
-      "to": "check_ast"
-    },
+    "probed_args": [
+      {
+        "from": "cmd_verify",
+        "to": "verify_server"
+      },
+      {
+        "from": "verify_server",
+        "to": "check_ast"
+      }
+    ],
     "_observed_shape": "str",
-    "_observed_bytes": 3645
+    "_observed_bytes": 12404
   }
 }

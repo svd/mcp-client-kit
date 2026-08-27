@@ -2,54 +2,62 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:45:57Z
-- **Duration:** 2m 7s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:10:10Z
+- **Duration:** 2m 19s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Server surface
+## Environment
 
-`astro-docs` is a hosted HTTP MCP endpoint (`https://mcp.docs.astro.build/mcp`, no auth) that
-exposes exactly **one tool**: `search_astro_docs` — "Search the official Astro framework docs".
-Its `inputSchema` declares a single required `query: string` with `additionalProperties: false`.
-No `annotations` block is supplied, so the read-only verdict came from the fallback path:
-the name and description are unambiguously a search, there is no mutating verb anywhere in the
-surface, and the schema has no field capable of writing state. Tools probed: 1 of 1; skipped: 0.
-No seed commands were configured, and none were needed — the docs corpus is server-side and
-always populated.
+`mcpgen` resolved to `uv run mcpgen` (0.9.0.dev1), above the 0.7.0 floor. The server is a
+hosted streamable-HTTP endpoint (`https://mcp.docs.astro.build/mcp`) with no auth, reached
+through `MCPGEN_SERVERS=.mcp.eval.json` on every live command.
 
-**Discriminators: N/A.** The candidate advisory on `list --schema` was silent, and it could not
-have fired: a candidate needs two or more tools sharing a scalar parameter name, and this server
-has one tool with one parameter, which is `query` — itself on the engine's denylist.
+## Tool inventory
 
-## Probing
+`mcpgen list astro-docs --schema` reports exactly **one** tool: `search_astro_docs`
+(`query: string`, required, `additionalProperties: false`). The server supplies no
+`annotations` block, so the mutating classification fell to the keyword plus semantic read:
+`search` is a pure read verb over a public documentation corpus with no write-shaped
+parameters. Selected set: 1 of 1 tool. Nothing was skipped, and no mutating tool exists to
+skip.
 
-Two paced probes were issued against the hosted endpoint, the second as a multi-`--args`
-invocation so the two responses deep-merged into a single observed shape: `"content collections"`
-and `"view transitions astro:page-load"`. Both returned the same envelope, with no key present in
-one and absent from the other and no type widening:
+**Discriminators: N/A.** The advisory cannot fire on a single-tool server — no parameter is
+shared by two or more tools — and the description sweep found nothing: `query` is free text
+and the description names no response key that varies by argument. Pass 2 was therefore
+skipped outright.
 
-```
-{"search_results": [{"content": str, "source_url": str, "title": str, "source_type": str}, "...x10"]}
-```
+## Surprising response
 
-Nothing surprising surfaced. There was no double-encoding (the payload arrives as a real object,
-not a JSON string), no empty list, no error envelope, and no null in any field across 20 observed
-records. Responses are sizeable — ~27 KB for ten hits, since `content` carries full doc excerpts —
-which is exactly the "big dump" profile the shape-spec is meant to keep out of model context.
+The very first `list --schema` invocation returned the **two Cloudflare docs tools**
+(`search_cloudflare_documentation`, `migrate_pages_to_workers_guide`) instead of the Astro
+tool, while the `codegen` run immediately before it correctly emitted `search_astro_docs`. An
+identical re-run of the same command returned the correct single Astro tool. Both servers are
+hosted HTTP endpoints declared in the same `.mcp.eval.json`; this looks like cross-server
+bleed in a cached HTTP session rather than anything about astro-docs itself. Recorded here
+because it is reproducible only intermittently and would silently type a wrapper against the
+wrong server.
 
 ## Shape decisions
 
-- `search_astro_docs` → **unwrap `["search_results"]`**, `return_container: "list"`,
-  `return_model: AstroDocSearchResult`. The envelope has a single key wrapping the record list,
-  so the unwrap path is unambiguous and the container is a list rather than a dict.
-  All four fields were promoted as plain `str`: each was observed on every record across both
-  queries, all are top-level scalars, and none was ever null. Nothing deeper was modelled — the
-  records are flat, so there is no second level to under-describe. `source: live`.
-- `probed_args` needed no scrubbing: both values are public free-text search queries with no
-  identifier, path, or PII component.
+Two probes were issued (`"content collections"`, `"view transitions astro:page-load"`),
+paced ≥2 s apart against the hosted endpoint. Both returned an identical envelope:
+
+```
+{"search_results": [{"content", "source_url", "title", "source_type"}, ...x10]}
+```
+
+- **unwrap:** `["search_results"]` — a single-key vendor envelope wrapping the real records.
+- **return_container:** `list` — the unwrapped value is a list of chunks, so the wrapper
+  returns `list[SearchDocItem]` and digs via `_dig_list`.
+- **return_model:** `SearchDocItem` — a search endpoint returning per-chunk items, named per
+  the search-endpoint convention rather than reusing a document noun.
+- **fields:** all four top-level scalars are `str` and were present in every element across
+  both probes, so none is marked nullable. Nothing below the top level was modelled — the
+  elements are flat, so there was no depth to over-promote.
+
+`probed_args` are free-text search queries carrying no PII; nothing needed scrubbing.
 
 ## Verification
 
-The regenerated module parses cleanly (`ast.parse` OK) and the eval target holds:
-`search_astro_docs` reads `-> list[AstroDocSearchResult]`, not `Any`, and its body digs the
-envelope through `_dig_list(result, ('search_results',))`. `run.py` was left to the harness's
-verify stage, as instructed.
+Regeneration with the shape-spec in place parsed cleanly under `ast.parse`, and the shaped
+signature reads `search_astro_docs(...) -> list[SearchDocItem]` with a `_dig_list` body over
+`('search_results',)` — no residual `Any`.

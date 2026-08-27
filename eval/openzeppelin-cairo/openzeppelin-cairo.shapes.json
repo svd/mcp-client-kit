@@ -19,10 +19,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "Registry"
+      "name": "MyContract"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 1731
+    "_observed_bytes": 1733
   },
   "cairo-erc1155": {
     "unwrap": [],
@@ -97,13 +97,13 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyVesting",
-      "startDate": "2026-01-01T00:00",
-      "duration": "365 days",
+      "name": "VestingWallet",
+      "startDate": "2026-03-15T14:30",
+      "duration": "1 year",
       "cliffDuration": "90 days",
       "schedule": "linear"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 1663
+    "_observed_bytes": 1665
   }
 }

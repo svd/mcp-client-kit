@@ -2,49 +2,48 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:30:39Z
-- **Duration:** 11m 39s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:03:14Z
+- **Duration:** 3m 22s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Tool surface
+## Tool inventory
 
-`mcpgen list` reported **14 tools**. Every tool carried MCP `annotations`, so mutating
-classification never needed the keyword fallback: `write_file`, `edit_file`, `create_directory`,
-and `move_file` declare `readOnlyHint: false` and were skipped outright. Of the ten remaining
-read-only tools, `read_media_file` was left unprobed — its description is explicitly about
-base64 image and audio blocks, which the prober reduces to an envelope summary rather than the
-record, so modelling it would state a shape no probe saw. That left **9 tools probed, 5 skipped**.
+The server exposes **14 tools**. Every tool carries `annotations`, so mutating classification
+needed no keyword or semantic fallback: `readOnlyHint: false` on `write_file`, `edit_file`,
+`create_directory`, and `move_file` — all four skipped, never called. `read_media_file` is
+read-only but returns base64 image/audio or an embedded resource, so per the media guard it was
+left unprobed and unmodelled rather than typed from an envelope the probe never sees.
 
-**Discriminators: N/A.** The `list --schema` advisory flagged `head` and `tail` as candidates
-spanning `read_file` and `read_text_file`. Both are named in Pass 1's pagination/window
-auto-disqualify list — they window a text response, they do not switch its shape — so Pass 2
-made no live calls and no tool stayed polymorphic-suspect.
+That left **9 tools probed**, all successfully: `read_file`, `read_text_file`,
+`read_multiple_files`, `list_directory`, `list_directory_with_sizes`, `directory_tree`,
+`search_files`, `get_file_info`, `list_allowed_directories`. Local stdio, so the full read-only
+set was kept and probes were batched in one shell invocation with no pacing. No seed commands
+were configured and none were run; `/private/tmp` already held enough files and directories to
+probe against.
 
-## Surprises
+## Discriminators
 
-The interesting finding is how little of this server is shapeable, and that this is correct
-rather than a gap. Eight of the nine probed tools return **human-formatted prose**, not records:
-`get_file_info` answers with `size: 3845\ncreated: …` key-value text, `list_directory` with
-`[DIR] x / [FILE] y` lines, `search_files` with newline-joined paths. A raw `call --out` capture
-confirmed the `get_file_info` payload is genuinely not JSON, so `_observed_shape: "str"` is a
-settled fact and not a probe failure — no `_probe_status: inconclusive` marker was warranted
-anywhere in this run.
-
-The batched probe sweep tripped the harness's 2-minute command ceiling on the ninth tool
-(`list_allowed_directories`); it was re-issued alone and succeeded. Eight parts had already
-been written, so nothing was lost.
+The `list --schema` advisory named `head` and `tail` (spanning `read_file` / `read_text_file`).
+Both are Pass 1 auto-disqualified as window parameters — they truncate the returned text, they do
+not switch its shape. The description sweep turned up one more candidate, `sortBy` on
+`list_directory_with_sizes` (`enum: ["name", "size"]`), also disqualified as a sort parameter.
+**Verdict: discriminators N/A**, so Pass 2 was skipped.
 
 ## Shape decisions
 
-- **`directory_tree` → `list[DirectoryNode]`** (`unwrap: []`, `return_container: "list"`). This
-  is the one tool carrying a real record. The server double-encodes: the MCP text block *is* a
-  JSON array. The seam's own `parse()` runs `json.loads` on text content, so the probe observed a
-  parsed `[{name, type, children}]` — the list is what a caller actually receives, and the
-  annotation is honest rather than a cast over a string. `unwrap` stays empty because the parsed
-  object *is* the record: there is no envelope key to dig, and inventing one would make `_dig`
-  return a field instead of the tree. `children` is held at `"list"` — the nodes recurse, and
-  promoting a nested element model from one probe would over-state depth. Flagged `_json_unwrap`.
-- **The other 8 probed tools → `Any`.** Prose in, prose out. A `TypedDict` over a formatted
-  string would be a fabrication, so `return_model` stays `null` for each.
+Eight of the nine probed tools returned prose text: `_observed_shape: "str"`. `get_file_info`
+returns `size: 206\ncreated: …\npermissions: 644` — line-oriented prose, confirmed `NOT_JSON`
+against the raw payload, not a JSON object. `list_directory` returns `[FILE]`/`[DIR]` prefixed
+lines. These are honest `str` returns, not probe failures, so no `_probe_status: inconclusive`
+markers were recorded and every entry keeps `return_model: null`.
 
-The regenerated module `ast.parse`s cleanly; `directory_tree` is the only signature that reads
-anything other than `Any`.
+`directory_tree` was the one interesting case. Its payload is a **JSON-encoded string** — a
+`JSON_UNWRAP list` of 29 `{name, type}` entries, with directories additionally carrying
+`children`. But the parsed object *is* the record: there is no envelope key to unwrap to. Since
+`_dig_list` is only emitted for a non-empty `unwrap`, inventing a path would have made the
+wrapper claim a dict it never returns, so `unwrap` stays empty and `return_model` stays null,
+with `_json_unwrap: true` and a note recorded as evidence for the next reader.
+
+Net: **zero shaped tools, by design** — this server returns prose, not records.
+`probed_args` were scrubbed (the machine-specific scratchpad path became `/private/tmp/probe-dir`).
+The regenerated module parses cleanly under `ast.parse`; `sortBy` renders as
+`Literal['name', 'size']` automatically. `run.py` is the harness verify stage's job, not this run's.

@@ -1,20 +1,15 @@
 {
   "directory_tree": {
     "unwrap": [],
-    "return_model": "DirectoryNode",
+    "return_model": null,
     "input_overrides": {},
-    "fields": {
-      "name": "str",
-      "type": "str",
-      "children": "list"
-    },
+    "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp/_base"
+      "path": "/private/tmp/probe-dir"
     },
-    "_observed_bytes": 618,
-    "return_container": "list",
-    "_json_unwrap": true
+    "_json_unwrap": true,
+    "_note": "payload is a JSON-encoded list of {name,type[,children]} entries; the parsed object IS the record, so there is no envelope key path \u2014 unwrap stays empty and return_model stays null (no _dig_list is emitted without an unwrap path)"
   },
   "get_file_info": {
     "unwrap": [],
@@ -23,9 +18,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp/_base/eval_harness/versions.py"
-    },
-    "_observed_bytes": 267
+      "path": "/private/tmp/c2.txt"
+    }
   },
   "list_allowed_directories": {
     "unwrap": [],
@@ -33,8 +27,7 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {},
-    "_observed_bytes": 36
+    "probed_args": {}
   },
   "list_directory": {
     "unwrap": [],
@@ -43,9 +36,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp/_base"
-    },
-    "_observed_bytes": 33
+      "path": "/private/tmp/probe-dir"
+    }
   },
   "list_directory_with_sizes": {
     "unwrap": [],
@@ -54,10 +46,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp/_base/eval_harness",
+      "path": "/private/tmp/probe-dir",
       "sortBy": "name"
-    },
-    "_observed_bytes": 408
+    }
   },
   "read_file": {
     "unwrap": [],
@@ -66,9 +57,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp/_base/eval_harness/versions.py"
-    },
-    "_observed_bytes": 4034
+      "path": "/private/tmp/c2.txt"
+    }
   },
   "read_multiple_files": {
     "unwrap": [],
@@ -78,11 +68,10 @@
     "source": "live",
     "probed_args": {
       "paths": [
-        "/private/tmp/_base/eval_harness/versions.py",
-        "/private/tmp/_base/tests/__init__.py"
+        "/private/tmp/c2.txt",
+        "/private/tmp/cli_flags.txt"
       ]
-    },
-    "_observed_bytes": 4130
+    }
   },
   "read_text_file": {
     "unwrap": [],
@@ -92,14 +81,13 @@
     "source": "live",
     "probed_args": [
       {
-        "path": "/private/tmp/_base/eval_harness/versions.py"
+        "path": "/private/tmp/c2.txt"
       },
       {
-        "path": "/private/tmp/_base/eval_harness/manifest.py",
+        "path": "/private/tmp/cli_flags.txt",
         "head": 5
       }
-    ],
-    "_observed_bytes": 4034
+    ]
   },
   "search_files": {
     "unwrap": [],
@@ -108,9 +96,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp/_base",
-      "pattern": "*.py"
-    },
-    "_observed_bytes": 18
+      "path": "/private/tmp/probe-dir",
+      "pattern": "*.json"
+    }
   }
 }

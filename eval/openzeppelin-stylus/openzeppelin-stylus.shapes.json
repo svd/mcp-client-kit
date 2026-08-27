@@ -6,11 +6,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyMulti",
-      "supply": true
+      "name": "AlphaMulti"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2580
+    "_observed_bytes": 2053
   },
   "stylus-erc20": {
     "unwrap": [],
@@ -19,7 +18,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "Q3_Rewards"
+      "name": "GammaAsset"
     },
     "_observed_shape": "str",
     "_observed_bytes": 2575
@@ -31,10 +30,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyNFT",
-      "enumerable": true
+      "name": "AlphaNFT"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 5734
+    "_observed_bytes": 2382
   }
 }

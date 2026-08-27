@@ -6,9 +6,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "message": "eval-probe"
-    },
-    "_note": "Returns the echoed message as prose text. No record structure to model."
+      "message": "eval probe"
+    }
   },
   "get-annotated-message": {
     "unwrap": [],
@@ -16,18 +15,9 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "messageType": "error"
-      },
-      {
-        "messageType": "success"
-      },
-      {
-        "messageType": "debug"
-      }
-    ],
-    "_note": "Prose text for every messageType (error/success/debug all probed); annotations are envelope metadata, not payload."
+    "probed_args": {
+      "messageType": "debug"
+    }
   },
   "get-env": {
     "unwrap": [],
@@ -35,8 +25,7 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {},
-    "_note": "Returns the launched process environment as a flat dict of str->str. Field names are machine-specific and include USER/HOME/PATH, so no TypedDict is emitted; the honest type is an untyped mapping."
+    "probed_args": {}
   },
   "get-resource-links": {
     "unwrap": [],
@@ -46,8 +35,7 @@
     "source": "live",
     "probed_args": {
       "count": 3
-    },
-    "_note": "Returns resource_link blocks; mcpgen drops link metadata to str placeholders, so no payload shape was observed."
+    }
   },
   "get-resource-reference": {
     "unwrap": [],
@@ -58,12 +46,11 @@
     "probed_args": {
       "resourceType": "Blob",
       "resourceId": 2
-    },
-    "_note": "Both enum values of resourceType probed (Text, Blob) with resourceId 1 and 2; both returned the same list-of-3 text/resource blocks with no modellable payload. Discriminator resolved: no shape difference."
+    }
   },
   "get-structured-content": {
     "unwrap": [],
-    "return_model": "WeatherRecord",
+    "return_model": "WeatherReport",
     "input_overrides": {},
     "fields": {
       "temperature": "int",
@@ -71,10 +58,17 @@
       "humidity": "int"
     },
     "source": "live",
-    "probed_args": {
-      "location": "New York"
-    },
-    "_note": "The only tool on this server returning structured content. The server declares an outputSchema and mcpgen surfaced structuredContent directly, so no unwrap path is needed; the three scalars are typed as observed for location=\"New York\"."
+    "probed_args": [
+      {
+        "location": "New York"
+      },
+      {
+        "location": "Chicago"
+      },
+      {
+        "location": "Los Angeles"
+      }
+    ]
   },
   "get-sum": {
     "unwrap": [],
@@ -85,8 +79,7 @@
     "probed_args": {
       "a": 2,
       "b": 3
-    },
-    "_note": "Returns the sum rendered as prose (\"The sum of 2 and 3 is 5.\"); raw payload confirmed NOT_JSON."
+    }
   },
   "get-tiny-image": {
     "unwrap": [],
@@ -94,8 +87,7 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {},
-    "_note": "Image tool: base64 bytes are deliberately dropped by the probe, so only the envelope was observed. Left as Any per the media rule."
+    "probed_args": {}
   },
   "trigger-long-running-operation": {
     "unwrap": [],
@@ -106,7 +98,6 @@
     "probed_args": {
       "duration": 1,
       "steps": 2
-    },
-    "_note": "Returns a prose completion summary after the progress stream; no record."
+    }
   }
 }

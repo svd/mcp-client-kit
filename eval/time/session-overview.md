@@ -1,56 +1,60 @@
-# time — generate-mcp-wrappers session overview
+# Session Overview — `time` MCP server
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T08:30:38Z
-- **Duration:** 8m 48s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T11:03:14Z
+- **Duration:** 2m 34s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+
+## Environment
+
+`mcpgen` resolved to `uv run mcpgen` (0.9.0.dev1); the bare `mcpgen` form is not on `PATH` in
+this uv-managed project. All commands ran with `MCPGEN_SERVERS=.mcp.eval.json`. The folder
+held artifacts from a prior eval run; they were moved aside before probing so this record
+describes exactly one run. No seed commands were required.
 
 ## Tool inventory
 
-`mcpgen list time --schema` reported **2 tools**, both probed, none skipped:
+The server exposes **2 tools**, both probed, none skipped:
 
 - `get_current_time` — Get current time in a specific timezone
 - `convert_time` — Convert time between timezones
 
-Both carry explicit `annotations.readOnlyHint: true` (plus `destructiveHint: false`,
-`idempotentHint: true`), so the mutating-tool classification never needed the keyword or
-semantic fallback and nothing was withheld from the probe set. No seed commands were
-configured, and none were needed — the server computes from the system clock and the IANA
-database rather than from a store.
+Both carry `annotations.readOnlyHint: true` (plus `destructiveHint: false`,
+`idempotentHint: true`), so the mutating-tool classification was a clean annotation read with
+no keyword or semantic fallback needed. Nothing was flagged `_mutating_suspect`.
 
-**Discriminators: N/A.** The `list --schema` stderr carried no advisory, and none could:
-`convert_time` declares `source_timezone`, `time`, `target_timezone` while `get_current_time`
-declares only `timezone`, so no parameter name is shared by two tools. Pass 2 was skipped
-outright.
+**Discriminators: N/A.** The `list --schema` stderr carried no advisory, and the precondition
+confirms why: the two tools share no parameter name at all (`timezone` vs. `source_timezone` /
+`time` / `target_timezone`). The description sweep also came up empty — the timezone params are
+lookup values, not response-key selectors. Pass 2 was skipped as specified.
 
-## Probing
+## Probe results
 
-Two probe invocations, batched in one shell call (local stdio needs no pacing).
-`get_current_time` was multi-probed with `America/New_York` and `Europe/London` to widen
-nullability and catch any DST-dependent field variation; `convert_time` was probed once with
-`America/New_York` → `Asia/Tokyo` at `14:30`.
-
-No surprises. Both tools returned a plain JSON object with no vendor envelope, no
-double-encoding, and no error payloads — the rarer, easier case. The two `get_current_time`
-probes deep-merged to an identical shape, so no field widened to `| None` or `Any`.
+Both probes succeeded on the first attempt with minimal valid args drawn from
+`inputSchema.required`. Neither tool declares an `enum`, so IANA timezone names were chosen
+directly. No surprises: no errors, no empty results, no hangs, and notably **no
+JSON-in-string** double-encoding — `mcpgen` handed back parsed dicts rather than `"str"`, so
+the guarded `json.loads` test was not needed.
 
 ## Shape decisions
 
-- **`get_current_time` → `CurrentTime`.** `unwrap: []` — the record *is* the top-level
-  response. All four observed keys are top-level scalars, so they went in whole:
-  `timezone: str`, `datetime: str`, `day_of_week: str`, `is_dst: bool`.
-- **`convert_time` → `TimeConversion`.** `unwrap: []` for the same reason. Only
-  `time_difference` is a top-level scalar; `source` and `target` are one-level-deep nests
-  repeating the `CurrentTime` field set. Per the depth guard they are typed as `dict` rather
-  than promoted into their own model — a single probe is not enough evidence to state the
-  inner shape authoritatively, and typing the key as `dict` records that it exists without
-  claiming what is under it.
+Neither response is wrapped in a vendor envelope, so **`unwrap` is empty for both** and codegen
+emitted no `_dig` / `_dig_list` helpers. That is correct here, not a gap.
 
-No PII scrubbing was required: `probed_args` holds only IANA timezone names and a literal
-`14:30`, all functional values the roundtrip verifier needs to replay.
+- **`get_current_time` → `CurrentTime`.** The response *is* the record: four stable top-level
+  scalars (`timezone`, `datetime`, `day_of_week` str; `is_dst` bool). Direct promotion.
+- **`convert_time` → `ConvertedTime`.** The record is again the whole response:
+  `time_difference` (str) plus nested `source` and `target` objects, each repeating the same
+  four-scalar shape. Unwrapping to either `source` or `target` would discard the other, so
+  `unwrap` stayed empty. The two nests are typed `dict` per the guard that deeper nests stay
+  `dict`/`Any` — honest about the keys existing without asserting inner structure from one
+  probe. This is the one place the spec format bites: it can express a nested record only
+  through `variants`, so `ConvertedTime` under-describes shapes the probe genuinely observed.
+
+`probed_args` needed no scrubbing — timezone names and `"14:30"` are functional values, not PII.
 
 ## Verification
 
-Regenerated with the sidecar in place; `ast.parse` succeeded. Both wrappers now return their
-`TypedDict` (`-> TimeConversion`, `-> CurrentTime`) with zero `-> Any` returns remaining.
-Runner generation was left to the harness verify stage.
+The regenerated module passes `ast.parse` cleanly. Both signatures read `-> CurrentTime` and
+`-> ConvertedTime` rather than `-> Any`, and `--embed-schema` attached `__schema__` and Args
+docstrings to each. Per the eval-harness rule, `run.py` was left to the verify stage.

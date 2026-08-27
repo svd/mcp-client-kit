@@ -14,7 +14,7 @@ SERVER = 'time'
 
 
 
-class TimeConversion(TypedDict, total=False):
+class ConvertedTime(TypedDict, total=False):
     source: dict
     target: dict
     time_difference: str
@@ -27,7 +27,7 @@ class CurrentTime(TypedDict, total=False):
     is_dst: bool
 
 
-async def convert_time(caller: McpCaller, *, source_timezone: str, time: str, target_timezone: str) -> TimeConversion:
+async def convert_time(caller: McpCaller, *, source_timezone: str, time: str, target_timezone: str) -> ConvertedTime:
     """Convert time between timezones
 
     Args:
@@ -36,7 +36,7 @@ async def convert_time(caller: McpCaller, *, source_timezone: str, time: str, ta
         target_timezone: Target IANA timezone name (e.g., 'Asia/Tokyo', 'America/San_Francisco'). Use 'Europe/Minsk' as local timezone if no target timezone provided by the user.
     """
     args: dict[str, Any] = {"source_timezone": source_timezone, "time": time, "target_timezone": target_timezone}
-    return cast("TimeConversion", await caller.call(SERVER, "convert_time", args))
+    return cast("ConvertedTime", await caller.call(SERVER, "convert_time", args))
 
 convert_time.__schema__ = {'type': 'object', 'properties': {'source_timezone': {'type': 'string', 'description': "Source IANA timezone name (e.g., 'America/New_York', 'Europe/London'). Use 'Europe/Minsk' as local timezone if no source timezone provided by the user."}, 'time': {'type': 'string', 'description': 'Time to convert in 24-hour format (HH:MM)'}, 'target_timezone': {'type': 'string', 'description': "Target IANA timezone name (e.g., 'Asia/Tokyo', 'America/San_Francisco'). Use 'Europe/Minsk' as local timezone if no target timezone provided by the user."}}, 'required': ['source_timezone', 'time', 'target_timezone']}
 
