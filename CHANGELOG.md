@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased] — 0.9.0
+## [Unreleased] — 0.10.0
+
+## [0.9.0] — 2026-08-27
 
 ### Fixed
 
