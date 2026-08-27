@@ -99,24 +99,45 @@ Optionally raise the version floor — but only if the skill now requires a CLI 
 promises a version users can install; publish the engine tag (`vX.Y.Z`) first, then the
 plugin tag. Otherwise the guard fails with nothing to upgrade to.
 
-**2. Commit + PR → main**
+**2. Check what else `dev` would carry into `main`**
+
+A plugin-only PR from `dev` merges *every* commit `dev` is ahead by, not only the plugin
+bump. Right after an engine release that includes step 6's `chore: bump version to X.Y.Z.dev1`
+— so the `.devN` lands on `main`, which is supposed to track released versions only.
+
+```bash
+git fetch origin
+git diff origin/main...dev -- pyproject.toml uv.lock   # must be empty
+```
+
+Empty → PR from `dev` as below. Not empty → do **not** PR `dev`. Branch from `main`, bring
+over only the plugin commits, and PR that branch:
+
+```bash
+git checkout -b release/plugin-v0.1.1 origin/main
+git cherry-pick <the skill/docs commits> <the plugin bump commit>
+```
+
+**3. Commit + PR → main**
 ```bash
 git add .claude-plugin/
 git commit -m "release: plugin v0.1.1 (engine unchanged 0.2.0)"
-git push origin dev
+git push origin dev            # or the release/ branch from step 2
 gh pr create --base main --title "release: plugin v0.1.1"
 # merge the PR
 ```
 
-**3. Tag on main**
+Before merging, confirm the PR's file list holds no `pyproject.toml` / `uv.lock` change.
+
+**4. Tag on main**
 ```bash
 git checkout main && git pull
 git tag plugin-v0.1.1
 git push origin plugin-v0.1.1   # plugin-v* does NOT trigger PyPI publish
 ```
 
-**4. Update the marketplace entry**
-In the `svd-agent-skills` marketplace repo, bump the `mcp-client-kit` entry's `ref` to `plugin-v0.1.1`. This points consumers at the stable `main` tag, not a dev pre-release.
+**5. Update the marketplace entry**
+In the `svd/agent-skills` marketplace repo, bump the `mcp-client-kit` entry's `ref` to `plugin-v0.1.1`. This points consumers at the stable `main` tag, not a dev pre-release.
 
 ---
 
@@ -131,3 +152,4 @@ In the `svd-agent-skills` marketplace repo, bump the `mcp-client-kit` entry's `r
 | Bump `pyproject.toml` for plugin-only | Triggers unnecessary PyPI republish |
 | Bump `marketplace.json` top-level `version` for every plugin release | Top-level is catalog metadata, not plugin version — leave it unless the catalog listing changed |
 | Raise SKILL.md floor preemptively | Floor should only move when the skill actually needs the new engine feature |
+| PR `dev` → `main` for a plugin release while `dev` carries a `.devN` bump | `main` ends up claiming an unreleased engine version, and the plugin tag points at it. Step 2 is the check that catches it |
