@@ -583,6 +583,37 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    a hosted server probe from one agent at a time, or the interval cannot hold. Local
    `stdio` servers need no pacing.
 
+   **Cold-start noise on `uvx` / `npx` stdio servers is expected.** The two launchers
+   differ in where their bootstrap output goes. Anything the npm side writes to
+   **stdout** before the first frame — an `npm install` summary such as
+   `added 40 packages` / `found 0 vulnerabilities`, or a package's own lifecycle
+   output — shares the stream that carries JSON-RPC frames, so the client tries to parse
+   it and logs `Failed to parse JSONRPC message from server` at ERROR, each with a full
+   pydantic `ValidationError` traceback. `uv`/`uvx` writes its own progress (`Downloaded lxml`,
+   `Installed 1 package`) to **stderr**, which is passed straight through unparsed: you
+   see those lines, but they cause no parse error.
+
+   Those tracebacks come from the SDK's own logger, not from `mcpgen` — nothing here
+   configures logging, so they reach stderr through Python's last-resort handler,
+   interleaved with the `[probe] …` lines. A parse failure cannot fault the session: the
+   error is handed to a message handler that discards it, so the handshake completes on
+   the first valid frame.
+
+   That makes them noise **only when the probe went on to succeed** — a written part
+   file. Where one landed, do not re-derive this, retry the probe, or record it.
+
+   The same lines mean something else in two cases. A server whose own logging goes to
+   stdout emits them on every call, not only at cold start — expect them again on the
+   next probe. And a mis-launched server emits them and never sends a valid frame: if
+   the launcher exits, that surfaces as `McpError: Connection closed`; if it stays up,
+   the probe simply never returns after the last `[probe]` line. A stdio server that has
+   **never** framed is not a challenge — no backoff repairs a wrong launch command, so
+   fix the command and re-probe. Framing is the distinguishing question, not the
+   transport: a stdio server that answered earlier probes and then dies on one tool's
+   input has framed, so its `Connection closed` is claimed by the challenge marker above
+   and takes that routing unchanged — the 60 s/120 s backoff, and the rule that stops
+   retrying a marker once one tool has exhausted it.
+
    Part files land at `<shapes-path>.parts/<tool>.json` (git-ignored), with the tool name
    percent-encoded — a `/` in a tool name becomes `%2F`.
    Concurrent probes of *distinct* tools do not clobber each other's parts, the case-only
