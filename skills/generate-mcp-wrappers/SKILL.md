@@ -110,7 +110,9 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    MCPGEN_SERVERS=servers.json <mcpgen> codegen <server> --out <server>/<server>.py --embed-schema
    ```
 
-   **Alternative — pass transport values directly, without a config file:**
+   **Alternative — pass transport values directly, without a config file.** Swap the
+   transport flag per variant; the `--out … --embed-schema` tail is identical in each
+   (written out because an unquoted `$TAIL` would not word-split in `zsh`):
    ```bash
    <mcpgen> codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py --embed-schema
    <mcpgen> codegen <server> --url "https://mcp.example.com/mcp" --out <server>/<server>.py --embed-schema
@@ -702,7 +704,37 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
   `call`, bootstrap, inspect — goes through `mcpgen`. Never shell out to `curl`, `gh`,
   `httpie`, or raw `python` HTTP. mcpgen owns auth (browser OAuth + silent token
   refresh); any other client is unauthenticated, leaks the bearer token, or both.
-  Need a raw payload? That's `mcpgen call … --out *.probe-raw.json` (git-ignored).
+  Need a raw payload? That's `<mcpgen> call … --out *.probe-raw.json` (git-ignored).
+
+- **Never pipe any `mcpgen` command that talks to a server.** Stdout carries the
+  artifact — `list` prints its JSON there, `codegen` the module whenever `--out` is
+  absent — so a pipe over it truncates or discards the very thing you ran the command
+  for. The status misleads on top of that: a pipeline reports the last command's status
+  unless `pipefail` is set, so `… 2>&1 | tail` hands back `tail`'s exit code and a failed
+  run reads as a success. Nor does `pipefail` make `2>&1` safe: the `mcp-remote` bridge
+  logs its handshake to stderr and the `uvx`/`npx` launchers add install and resolution
+  noise, all of it folded into what you read back. Keep the streams apart — send
+  **stderr alone** to a file: `<mcpgen> codegen … 2>codegen.log`, then read
+  `codegen.log` separately.
+
+- **Run one `<mcpgen> call` per shell invocation.** Give two chained calls the same
+  `--out` — the per-tool `<server>.<tool>.probe-raw.json` naming exists to stop exactly
+  that — and the second overwrites the first, leaving only whichever
+  call last succeeded, with nothing in the file to say which that was. Give them distinct
+  names and the payloads survive, but a `;`- or newline-separated chain reports only its
+  *last* command's status, so an earlier failure reads as success. A failing `call` writes nothing at all (every
+  error path returns before the write), which leaves that call's file either missing or
+  holding an earlier run's payload — and a chain that exited 0 gives you no reason to
+  look. If you must chain, give each call **both** its own `--out` and a per-call status
+  label, as step 3's accumulator does. (Independent `probe` invocations still batch — see
+  step 3; probes of *distinct* tools write their own part files, the case-only collision
+  above excepted.)
+
+- **Bound a slow `mcpgen` call with the harness's own timeout, never a `timeout`
+  binary.** Nothing guarantees one is installed: macOS ships none by default, and there
+  the wrapped command never runs at all — the whole line dies with `command not found`
+  and status 127, which reads as the command having failed rather than never having
+  started.
 
 - **Probing is a live call — mutating tools mutate.** The default selects every
   tool, but probing a mutating tool (`create`/`update`/`delete`/`send`/etc., or
