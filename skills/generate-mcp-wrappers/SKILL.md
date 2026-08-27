@@ -406,10 +406,10 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
    **Do NOT replace functional values** — timezone names (`"UTC"`, `"America/New_York"`),
    generic table names (`"users"`, `"products"`), public repo owners/names, ISO timestamps,
-   standard SQL queries, or any value that is not personally identifiable. Replacing these
-   breaks the roundtrip verifier, which passes `probed_args` to the live server. The
-   gitignored `<server>.verify.json` sidecar preserves the pre-scrub args so the verifier
-   can still make a real live call even after `shapes.json` is scrubbed.
+   standard SQL queries, or anything not personally identifiable: the roundtrip verifier
+   — the `run.py` smoke test step 7 generates, which replays `probed_args` live —
+   passes `probed_args` to the live server, and the gitignored `<shapes-stem>.verify.json`
+   sidecar holds the pre-scrub args for it.
 
    When a value *must* be redacted, add `"probe_args_scrubbed": true` to the shape-spec
    entry. The roundtrip verifier checks the sidecar first; `probe_args_scrubbed` is only
@@ -520,24 +520,37 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    signature reads `-> Entity` (not `Any`) and its body digs the envelope. Where a
    hand-built wrapper exists, diff the generated unwrap against it as an oracle.
 
-   > **Dispatch (optional):** dispatch a single verify subagent to isolate the
-   > generated-module read from main context. The agent reads the output `.py`, confirms
-   > signatures, and returns a pass/fail summary. Benefit is modest for small files.
+7. **Generate a smoke-test runner.**
 
-7. **(Optional) Generate a smoke-test runner.**
+   Once the wrappers are shaped and verified, invoke `/mcp-client-kit:generate-mcp-runner`. Generation
+   adds one new file, so it is the default in every non-interactive run — a subagent that
+   cannot reach `AskUserQuestion` generates the runner rather than skipping the step.
+   Runner generation needs `mcpgen >= 0.7.0` — a higher floor than step 0's. Step 0 kept
+   the *first* invocation clearing 0.3.0, so a `0.6.x` on `PATH` can be the resolved one
+   while a `0.7+` sits in the venv. Before skipping, re-run step 0's loop with `min=0.7.0`
+   and use whatever it resolves. Skip *for engine age* only when nothing clears 0.7.0 —
+   say so when you do; the two exceptions below are separate reasons to stop.
+   When the output folder already holds a `run.py`, leave it alone and report that it
+   exists; a hand-edited runner is not regenerated over.
 
-   Once the wrappers are shaped and verified, ask the user whether to also generate a runner:
+   > **Interactive exception:** where 2d's condition holds — a session a user opened
+   > directly — offer
+   > the choice first (single-select, 2 options: **Yes** — invoke `mcp-client-kit:generate-mcp-runner`
+   > now; **No / I'll do it later** — stop here) and honor the answer.
 
-   > Use `AskUserQuestion` (single-select, 2 options):
-   > - **Yes** — invoke `generate-mcp-runner` now
-   > - **No / I'll do it later** — stop here
-   >
-   > **Subagent fallback (when `AskUserQuestion` is unavailable):** skip this step entirely
-   > — do not invoke `generate-mcp-runner` automatically.
+   Pass the following details so the runner skill does not need to re-derive them:
 
-   If the user says yes, invoke `/generate-mcp-runner`. Pass the following details so the
-   runner skill does not need to re-derive them:
-
+   - **The read-only tool set** — name the tools the runner may call, and the ones it must
+     skip; this verdict overrides the runner's own classification. Pass it explicitly:
+     the runner re-derives mutating tools from a fixed keyword list narrower than step
+     2b's — it lacks `add`, `append`, `insert`, `upsert`, `push`, `close`, and `revoke`,
+     and reads neither `annotations` nor the description semantically — so a tool only
+     step 2 catches would otherwise be called for real.
+   - **Resolved `mcpgen` invocation** — the literal string that cleared the 0.7.0 floor
+     above (`mcpgen`, `uv run mcpgen`, or `.venv/bin/mcpgen`), which is not always the
+     one step 0 settled on. Pass it explicitly: the runner skill gates
+     on a bare `mcpgen`, which is absent in a uv-managed project, so without this it
+     reports the engine missing on a machine where step 0 just used it.
    - **Server name** — `<server>` (the name used throughout this skill)
    - **Output folder** — the dir from `--out` (e.g. `<server>/`), which holds `<server>.py`,
      `<server>.shapes.json`, and `<server>.verify.json`
@@ -546,9 +559,6 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      - direct params: `--stdio "<launch>"`, `--url "<url>"` (+ `--bearer "$ENV_VAR"` if applicable)
    - **Transport + auth kind** — the `(transport, auth_kind)` tuple, e.g. `(http, oauth)`,
      `(stdio, none)`, `(http, bearer)` — used by the runner to pick the right connection skeleton
-
-   Example: *"generate runner for `acme`, output dir `acme/`, reached via
-   `MCPGEN_SERVERS=servers.json` (http, oauth)"*
 
    That skill reads the module, `shapes.json`, and `verify.json` you produced and authors a
    workflow-ordered, shape-aware smoke test in one step. See `skills/generate-mcp-runner/SKILL.md`
