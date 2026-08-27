@@ -59,19 +59,16 @@ barrier stays on main.
 
 ## Procedure
 
-0. **Resolve the CLI.** Requires `mcpgen >= 0.3.0`. `list --schema`, `codegen --embed-schema`,
-   and enum `Literal` arrive at 0.2.0; 0.3.0 is the floor because it is where a
-   **string-valued** discriminator works — before it, the overload renderer coerces every
-   variant key with `int()`, so step 4's option 1 on a `string` discriminator (which step 2.e
-   admits) dies in step 5 with `ValueError: invalid literal for int()` after the whole probe
-   sweep has been paid for.
+0. **Resolve the CLI.** Requires `mcpgen >= 0.7.0` — one floor for the whole procedure,
+   step 7's runner included, so no later step re-checks the engine. Do not proceed on an
+   older one.
 
    The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
    Probe the three forms and keep the first that both answers **and** meets the floor — an
    outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
 
    ```bash
-   min=0.3.0; MCPGEN=
+   min=0.7.0; MCPGEN=
    for c in "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
      out=$(eval "$c --version" 2>/dev/null) || continue
      ver=$(printf '%s\n' "$out" | awk '{print $2}')
@@ -84,11 +81,6 @@ barrier stays on main.
    echo "resolved: $MCPGEN ($ver)"
    ```
 
-   `MCPGEN=` clears any inherited value, so a run where nothing qualifies fails instead of
-   echoing a stale one. A candidate counts only when `--version` exits zero **and** its second
-   word opens with a dotted numeric release — a wrapper that prints a diagnostic and fails is
-   otherwise read as a version.
-
 1. **Mechanical stubs.**
 
    `mcpgen` resolves a server **by name** from a config file, pointed to by the
@@ -96,9 +88,8 @@ barrier stays on main.
    `<server>` name maps to its transport and forwards the server's `env` block (API keys, etc.)
    to the launched process.
 
-   `codegen` writes `--out` with a plain `write_text` and does **not** create parent
-   directories, so whenever `--out` names a folder, create it first or the run dies with
-   `FileNotFoundError`.
+   `codegen` does **not** create parent directories, so whenever `--out` names a folder,
+   create it first or the run dies with `FileNotFoundError`.
 
    ```bash
    mkdir -p "<server>"
@@ -365,9 +356,8 @@ barrier stays on main.
    (bounded backoff), and settled facts, and it covers the `uvx`/`npx` cold-start tracebacks
    that are noise on a successful probe.
 
-   **Part files.** They land at `<shapes-path>.parts/<tool>.json` (git-ignored), with the tool
-   name percent-encoded — a `/` becomes `%2F`. Concurrent probes of *distinct* tools do not
-   clobber each other, with one exception: filenames preserve case, so on a case-insensitive
+   **Part files.** They land at `<shapes-path>.parts/<tool>.json` (git-ignored). Concurrent
+   probes of *distinct* tools do not clobber each other, with one exception: filenames preserve case, so on a case-insensitive
    filesystem (macOS's default) two tools differing only in case share one part file and the
    second overwrites the first. Reading between the two probes does not save the first — `merge`
    only ever sees the surviving part. Probe one, run step 3b, then probe the other and merge
@@ -529,8 +519,8 @@ barrier stays on main.
 
    1. **Probe all variants** *(default, ≤20 values)* — emit `discriminator` + `variants`; for
       list tools keep `return_container: "list"` so each overload returns `list[<Variant>]` and
-      the impl returns `list[V1 | V2 | …]`. The codegen `_render_overloaded` path supports
-      `return_container: "list"` + `discriminator` + `variants` combined — no manual edits needed.
+      the impl returns `list[V1 | V2 | …]`. Codegen supports that combination directly — no
+      manual edits needed.
    2. **Generic base model** — a shared `TypedDict` of fields common to all variants
       (`total=False`), when variants are many/unstable or precision isn't worth N live calls.
    3. **Unwrap-only / `Any`** — when values can't be enumerated and a base model isn't justified.
@@ -578,12 +568,9 @@ barrier stays on main.
    Generation adds one new file, so it is the default in every non-interactive run — a subagent
    that cannot reach `AskUserQuestion` generates the runner rather than skipping the step.
 
-   Runner generation needs `mcpgen >= 0.7.0` — a higher floor than step 0's. Step 0 kept the
-   *first* invocation clearing 0.3.0, so a `0.6.x` on `PATH` can be the resolved one while a
-   `0.7+` sits in the venv. Before skipping, re-run step 0's loop with `min=0.7.0` and use
-   whatever it resolves. Skip *for engine age* only when nothing clears 0.7.0 — say so when you
-   do. When the output folder already holds a `run.py`, leave it alone and report that it exists;
-   a hand-edited runner is not regenerated over.
+   Step 0's floor already covers runner generation, so there is no engine check to repeat
+   here. When the output folder already holds a `run.py`, leave it alone and report that it
+   exists; a hand-edited runner is not regenerated over.
 
    > **Interactive exception:** where 2d's condition holds, offer the choice first
    > (single-select, 2 options: **Yes** — invoke `mcp-client-kit:generate-mcp-runner` now;
@@ -597,10 +584,9 @@ barrier stays on main.
      `add`, `append`, `insert`, `upsert`, `push`, `close`, and `revoke`, and reads neither
      `annotations` nor the description semantically — so a tool only step 2 catches would
      otherwise be called for real.
-   - **Resolved `mcpgen` invocation** — the literal string that cleared the 0.7.0 floor, which is
-     not always the one step 0 settled on. Pass it explicitly: the runner skill gates on a bare
-     `mcpgen`, absent in a uv-managed project, so without this it reports the engine missing on a
-     machine where step 0 just used it.
+   - **Resolved `mcpgen` invocation** — the literal string step 0 settled on. Pass it
+     explicitly: the runner skill gates on a bare `mcpgen`, absent in a uv-managed project, so
+     without this it reports the engine missing on a machine where step 0 just used it.
    - **Server name** — `<server>`.
    - **Output folder** — the dir from `--out` (e.g. `<server>/`), holding `<server>.py`,
      `<shapes-path>`, and `<shapes-stem>.verify.json`.
@@ -635,8 +621,8 @@ barrier stays on main.
 - **Run one `<mcpgen> call` per shell invocation.** Give two chained calls the same `--out` — the
   per-tool `<server>.<tool>.probe-raw.json` naming exists to stop exactly that — and the second
   overwrites the first, leaving only whichever call last succeeded, with nothing in the file to
-  say which that was. A failing `call` writes nothing at all (every error path returns before the
-  write), which leaves that call's file either missing or holding an earlier run's payload — and
+  say which that was. A failing `call` writes nothing at all, which leaves that call's file
+  either missing or holding an earlier run's payload — and
   a chain that exited 0 gives you no reason to look. If you must chain, give each call **both**
   its own `--out` and a per-call status label. (Independent `probe` invocations still batch — see
   step 3.)
@@ -666,10 +652,9 @@ barrier stays on main.
   from one `entityType` value misdescribes every response the other values return.
 
 - **Scalar enum params render as `Literal[...]` automatically** — do not hand-widen them to `str`.
-  Codegen's `py_type()` emits `Literal['a', 'b', ...]` for a param whose `inputSchema` carries an
-  `enum` array of PEP 586-safe scalars (no flag required); float and object members fall back to
-  `float` / `dict`. Widen to `str` only if the server actually accepts values outside the declared
-  enum.
+  A param whose `inputSchema` carries an `enum` of scalars gets one with no flag required; float
+  and object members fall back to `float` / `dict`. Widen to `str` only if the server actually
+  accepts values outside the declared enum.
 
 - **Scrub `probed_args` before committing.** The post-merge scrub at step 4 is the single scrub
   point. Parts (`.parts/`) and `<shapes-stem>.verify.json` are gitignored raw counterparts; the
