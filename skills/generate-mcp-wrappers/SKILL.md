@@ -61,14 +61,39 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
 ## Procedure
 
-0. **Check the CLI.** Requires `mcpgen >= 0.1.0` (install: see README). Abort if missing or too old:
+0. **Resolve the CLI.** Requires `mcpgen >= 0.3.0`. `list --schema`,
+   `codegen --embed-schema`, and enum `Literal` arrive at 0.2.0; 0.3.0 is the floor
+   because it is where a **string-valued** discriminator works — before it, the overload
+   renderer coerces every variant key with `int()`, so step 4's option 1 on a `string`
+   discriminator (which step 2.e admits) dies in step 5 with `ValueError: invalid
+   literal for int()` after the whole probe sweep has been paid for. The command is often
+   not on `PATH`: in a `uv`-managed project it lives inside the venv. Probe the three
+   forms and keep the first that both answers **and** meets the floor — an outdated
+   `mcpgen` on `PATH` must not shadow a current one in the venv:
 
    ```bash
-   mcpgen --version >/dev/null 2>&1 || { echo "mcpgen not found — install: uv add mcp-client-kit"; exit 1; }
-   ver=$(mcpgen --version | awk '{print $2}'); min=0.1.0
-   [ "$(printf '%s\n%s\n' "$min" "$ver" | sort -V | head -1)" = "$min" ] || { echo "mcpgen $ver too old — need >= $min"; exit 1; }
+   min=0.3.0; MCPGEN=
+   for c in "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
+     out=$(eval "$c --version" 2>/dev/null) || continue
+     ver=$(printf '%s\n' "$out" | awk '{print $2}')
+     printf '%s' "$ver" | grep -Eq '^[0-9]+(\.[0-9]+)+' || continue
+     [ "$(printf '%s\n%s\n' "$min" "$ver" | sort -V | head -n 1)" = "$min" ] || \
+       { echo "skipping $c ($ver < $min)"; continue; }
+     MCPGEN="$c"; break
+   done
+   [ -n "$MCPGEN" ] || { echo "no mcpgen >= $min found on any invocation"; exit 1; }
+   echo "resolved: $MCPGEN ($ver)"
    ```
 
+   `eval` is required because a bare `$c` does not word-split in `zsh`, so the two-word
+   `uv run mcpgen` form would never match. `MCPGEN=` clears any inherited value, so a
+   run where nothing qualifies fails instead of echoing a stale one. A candidate counts
+   only when `--version` exits zero **and** its second word opens with a dotted numeric release — a
+   wrapper that prints a diagnostic and fails is otherwise read as a version. Shell variables do not survive between shell
+   invocations, so `$MCPGEN` is not available to later steps: state the resolved
+   invocation once in your report, then substitute that literal string wherever a
+   command block below writes `<mcpgen>`. An environment prefix composes with every form —
+   `MCPGEN_SERVERS=servers.json uv run mcpgen …` passes the variable through.
 
 1. **Mechanical stubs.**
 
@@ -78,25 +103,35 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    etc.) to the launched process. `MCPGEN_SERVERS` must prefix the command in the **same
    shell invocation** — it does not persist across calls.
    ```bash
-   MCPGEN_SERVERS=servers.json mcpgen codegen <server> --out <server>/<server>.py --embed-schema
+   mkdir -p "<server>"
+   MCPGEN_SERVERS=servers.json <mcpgen> codegen <server> --out <server>/<server>.py --embed-schema
    ```
 
    **Alternative — pass transport values directly, without a config file:**
    ```bash
-   # stdio (pass the full launch command):
-   mcpgen codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py --embed-schema
-
-   # HTTP no-auth:
-   mcpgen codegen <server> --url "https://mcp.example.com/mcp" --out <server>/<server>.py --embed-schema
-
-   # HTTP Bearer:
-   mcpgen codegen <server> --url "https://api.example.com/mcp/" --bearer "$MY_TOKEN" --out <server>/<server>.py --embed-schema
+   <mcpgen> codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py --embed-schema
+   <mcpgen> codegen <server> --url "https://mcp.example.com/mcp" --out <server>/<server>.py --embed-schema
+   <mcpgen> codegen <server> --url "https://api.example.com/mcp/" --bearer "$MY_TOKEN" --out <server>/<server>.py --embed-schema
    ```
    `codegen`, `list`, `probe`, and `call` each require the same transport flags
    (`--stdio` / `--url` / `--bearer` / `--config`) on every invocation — they do **not**
    inherit flags from a prior run. `merge` and `discover` accept no transport flags.
 
-   Parses; every tool typed from `inputSchema`; returns `Any`. `--embed-schema` (used
+   `codegen`, `list`, `probe`, and `call` each require the same transport flags
+   (`--stdio` / `--url` / `--bearer` / `--env` / `--config`) on every invocation — they do **not**
+   inherit flags from a prior run. `merge` and `discover` need no connection flags
+   (`merge` accepts `--config` and ignores it).
+   Later command blocks elide those flags for brevity: add the same transport form this
+   step used — including the `MCPGEN_SERVERS=` prefix — to every runnable `codegen`,
+   `list`, `probe`, and `call` line below. `merge` lines take none.
+
+   A server name is a config key or a URL, so it can hold spaces, `?`, `&`, or glob
+   characters. When you substitute `<server>` and the paths derived from it, **quote the
+   substituted value** (`"my server"`, `"my server/my server.py"`); an unquoted one word-
+   splits or globs in `sh` and `bash`, and globs in `zsh`.
+
+   Parses; every tool typed from `inputSchema`; returns `Any` until a shape-spec exists
+   beside the output (step 5 regenerates once it does). `--embed-schema` (used
    above) also emits `fn.__schema__ = {<raw inputSchema>}` on each function and an Args
    docstring section listing each param's description, enum values, and default.
 
@@ -217,10 +252,10 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    # so concurrent probe processes cannot clobber each other.
 
    # single probe
-   mcpgen probe <server> <tool> --args '<sample json>' --emit-shape <shapes-path>
+   <mcpgen> probe <server> <tool> --args '<sample json>' --emit-shape <shapes-path>
 
    # multi-probe: repeat --args for each input; shapes are deep-merged within one probe
-   mcpgen probe <server> <tool> \
+   <mcpgen> probe <server> <tool> \
      --args '{"entityId":"<id1>","entityType":1}' \
      --args '{"entityId":"<id2>","entityType":1}' \
      --emit-shape <shapes-path>
@@ -314,12 +349,13 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    from zero samples — leave the field typed as `list`. Note in `session-overview.md`
    that the inner model is unobservable at probe time, and recommend re-running
    `mcpgen probe` after seeding the server with representative data (e.g. via
-   `mcpgen call <mutating-tool>`) to capture inner field shapes.
+   `<mcpgen> call <server> <mutating-tool> --args '<json>' --out <server>.<mutating-tool>.probe-raw.json`)
+   to capture inner field shapes.
 
    Sample args may need bootstrapping (e.g. a real id before probing `get_entity`).
    Find a no-arg / discovery tool on *this* server that returns user or entity ids (there
    is no universal tool for this — infer from `mcpgen list` output). Call it via
-   `mcpgen call <server> <discovery-tool> --out <server>.probe-raw.json` to capture the
+   `<mcpgen> call <server> <discovery-tool> --out <server>.<discovery-tool>.probe-raw.json` to capture the
    **raw** payload, then read the ids from that file. `mcpgen probe` emits only the
    response *shape* (no values) and cannot supply ids. (When dispatching subagents use
    the recon agent instead — see Execution model above.)
@@ -354,7 +390,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
 3b. **Consolidate parts → shapes.json.**
    ```
-   mcpgen merge <server> --out <shapes-path>
+   <mcpgen> merge <server> --out <shapes-path>
    ```
    **`--out <shapes-path>` is required when `<shapes-path>` is not in CWD** (e.g. a
    subfolder).  It must exactly match the `--emit-shape` value from step 3 — this is
@@ -426,14 +462,28 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      shape instead of a live call (never let a fixture fallback read as a live probe).
    - Delete `_observed_shape` once you've extracted the real shape.
 
-5. **Regenerate.** (same transport flags as step 1)
+5. **Regenerate.** Reach the server exactly the way step 1 did — one form, not both:
    ```bash
-   mcpgen codegen <server> --stdio "uvx mcp-server-time" --out <server>/<server>.py --shapes <server>/<server>.shapes.json --embed-schema
-   # or: --url / --bearer for HTTP servers
+   # config form: the env prefix is part of the command, not an argument
+   MCPGEN_SERVERS=servers.json <mcpgen> codegen <server> --out <server>/<server>.py --embed-schema
+   # direct form: substitute step 1's own --stdio / --url (+ --bearer) values
+   <mcpgen> codegen <server> --stdio "<launch command>" --out <server>/<server>.py --embed-schema
+   # non-default shapes filename only: add --shapes <path>
    ```
-   (`<server>.shapes.json` sitting beside `--out` is auto-detected; `--shapes` is the
-   explicit form.) Now shaped tools return their `TypedDict` (or `list[<model>]`),
-   unwrapping via `_dig` / `_dig_list`.
+   Never combine the two: `--stdio` outranks a config entry, so a command carrying both
+   silently reaches a different server than step 1 probed.
+   No `--shapes` is needed in the layout this skill uses. Auto-detection looks for
+   `<server>.shapes.json` — built from the **server name**, not from the `--out`
+   filename — in the `--out` directory, which is exactly where step 3b wrote it. For a
+   URL-form server argument the stem is only the host, so the name will not match the
+   paths you built from the URL: pass `--shapes` explicitly there. Pass
+   `--shapes` only when the shapes file carries some other name. Two constraints when
+   you do: it takes the file, never the `.parts/` directory, and passing it disables the
+   in-memory parts fallback, so `codegen --shapes <path>` on a not-yet-merged run fails
+   with `FileNotFoundError`.
+
+   Now shaped tools return their `TypedDict` (or `list[<model>]`), unwrapping via
+   `_dig` / `_dig_list`.
 
 6. **Verify.** `ast.parse` the module; confirm the eval target — the shaped tool's
    signature reads `-> Entity` (not `Any`) and its body digs the envelope. Where a
