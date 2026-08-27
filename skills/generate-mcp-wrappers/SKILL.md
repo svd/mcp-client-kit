@@ -26,7 +26,7 @@ The parts-based probe infrastructure (`_atomic_write_text`, `<shapes>.parts/<too
 **Hard constraint:** subagents cannot call `AskUserQuestion`. That line divides main
 from subagent:
 
-- **Main thread** — every interactive gate (tool selection, >20-variant cap,
+- **Main thread** — every interactive gate (the step-2d selection offer, >20-variant cap,
   base-model-vs-`Any` choice, discriminator resolution that spans batches), and every
   deterministic barrier (codegen, merge, regenerate).
 - **Subagents** — everything data-heavy and non-interactive: recon discovery dumps,
@@ -35,7 +35,7 @@ from subagent:
 | Phase | Executor | Why |
 |---|---|---|
 | 1 codegen stubs | inline | one command, barrier |
-| 2 select + discriminator detect | **main** | interactive — the hard line |
+| 2 select + discriminator detect | **main** | deterministic barrier; owns 2d's gate when a user is present |
 | Recon | **1 subagent** | isolates discovery dumps; returns compact id + enum catalog |
 | Discriminator Pass 2 | **main** | few calls, decides the sweep's variant count |
 | 3 probe + draft | **batched parallel subagents** (local `stdio`); one agent for hosted HTTP | context economy + parallelism, bounded by the probe interval |
@@ -142,7 +142,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    above) also emits `fn.__schema__ = {<raw inputSchema>}` on each function and an Args
    docstring section listing each param's description, enum values, and default.
 
-2. **Select tools to probe (interactive gate).**
+2. **Select tools to probe.**
 
    Keep a running `session-overview.md` beside the generated module (the `--out` dir).
    It is the human-readable log for everything the shape-spec cannot hold: skipped
@@ -253,27 +253,31 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
       Prune before sizing the run: the Execution model picks single-driver vs fan-out
       from how many tools are *selected*, so the prune has to come first.
 
-   c. Ask the user how to proceed via `AskUserQuestion` (single-select, 3 options):
-      - **Probe all** *(recommended)* — probe every tool from `tools/list`.
-      - **Confirm in batches** — walk through 4-at-a-time multi-select questions.
-      - **I'll specify the tools** — user names them (free-text via "Other").
+   c. **Select the set — default path.** The default selection is **every non-mutating
+      tool** (optionally pruned per the focus note above), using step 2b's fallback
+      order (`readOnlyHint` first, then the keyword test + semantic read). Mutating
+      tools are skipped entirely — never probed without an explicit human yes. This is
+      the else-branch of 2d: take it whenever 2d's condition is not met. Decide the
+      prune on the transport, which you know before sizing anything: against a hosted
+      HTTP server every probe is serial and paced, so prune to the record-carrying
+      tools. Against a local `stdio` server keep the full set — probes there are cheap
+      and may fan out.
 
-      > **Subagent fallback (when `AskUserQuestion` is unavailable):** Probe all
-      > non-mutating tools, using the same fallback order as step 2b (`readOnlyHint`
-      > first, then the keyword list + semantic read). Skip mutating tools entirely.
+   d. **Interactive exception.** Take this path only when you are the main thread of a
+      session a user opened directly — not a subagent prompt, not a `-p` batch run.
+      `AskUserQuestion` being *available* is not the test: it sits in the roster on a
+      headless run too, where nothing answers it. If you ask and the question comes
+      back unanswered, fall back to 2c and say so in `session-overview.md`. Ask first
+      (single-select, 3 options); every option draws from the step-2b-cleared set, and
+      any mutating tool wanted in any of them takes a separate explicit yes:
+      - **Probe all non-mutating** *(recommended)* — every tool step 2b cleared.
+      - **Confirm in batches** — 4-at-a-time multi-select questions; `label` = tool
+        name, `description` = tool description. After 16 options, ask whether to
+        continue. The union of checked options is the selected set.
+      - **I'll specify the tools** — user names them (free-text via "Other"); confirm
+        any ambiguous name before probing, and any named tool step 2b flagged.
 
-   d. If **"Confirm in batches"**: emit `AskUserQuestion` multi-select questions,
-      **≤4 options per question**, each option `label = tool name` and
-      `description = tool description`. After 16 options (4 questions), ask whether
-      to continue with the next batch. The union of all checked options is the
-      selected set.
-
-   e. If **"Probe all"**: selected set = every tool from the list.
-
-   f. If **"I'll specify"**: parse the free-text response as tool names; confirm
-      any ambiguous names before probing.
-
-   The selected set (from any path) drives steps 3 and 4.
+   The selected set (from either path) drives steps 3 and 4.
 
    e. **Detect discriminators.** The advisory is stderr of the *same* `list --schema`
       run step 2.a already made, so the answer is in hand before any analysis.
@@ -651,7 +655,9 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    Enumerate discriminator values from: (a) the param's `enum` in `inputSchema`;
    (b) discovery tools / glossary / tool descriptions (e.g. `get_filters` /
    `get_entity_fields` per `entityType`, `get_acme_glossary`); (c) `AskUserQuestion`
-   if not discoverable from available tools.
+   if not discoverable from available tools — and where 2d's condition is not met,
+   there is no (c): probe the values you did discover, and record the candidate as
+   unconfirmed with the values you could not enumerate.
 
    **Check `inputSchema.required` before constructing probe args** (read from `list --schema`
    output). If the array is non-empty, never probe with `'{}'` — call the tool with minimal
@@ -822,10 +828,12 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
         isn't justified.
      Use `AskUserQuestion` when unsure which applies.
 
-     > **Subagent fallback (when `AskUserQuestion` is unavailable):** Default to a
-     > **generic base model** (option 2) — never emit a variant-specific `return_model`
-     > from a single-variant probe alone. Fall back to unwrap-only `Any` only when
-     > variants are too diverse or structurally incompatible.
+     > **Non-interactive fallback — when 2d's condition is not met *and* the variants
+     > were not all probed** (more than 20 values, or values step 2.e could not
+     > enumerate): default to a **generic base model** (option 2), and to unwrap-only
+     > `Any` only when variants are too diverse or structurally incompatible. Where
+     > every variant *was* probed, option 1 stands: emit the variants. Either way,
+     > never emit a variant-specific `return_model` from a single-variant probe alone.
    - **`input_overrides`**: fix types the schema lied about. JSON Schema `number` is
      `float`, but some servers use `int` for id/type fields → `{"entityType": "int"}`.
    - **`fields`**: keep **only top-level stable scalars the probe actually saw**. Mark
