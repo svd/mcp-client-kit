@@ -1,6 +1,21 @@
 # Changelog
 
-## [Unreleased] — 0.9.0
+## [Unreleased] — 0.10.0
+
+## [0.9.0] — 2026-08-27
+
+### Fixed
+
+- **An optional discriminator no longer becomes mandatory.** `_render_overloaded` emitted the
+  discriminator with no default whether or not `inputSchema.required` listed it, so a parameter
+  the server treats as optional was forced on every call and forwarded even when the caller had
+  not chosen a value. Nothing caught it: the parameters are keyword-only, so Python accepts a
+  non-defaulted one after defaulted ones and the module parses cleanly — the only symptom was a
+  call that used to type-check and no longer did. An optional discriminator now renders an
+  additional overload covering its omission, which returns the variant union because the schema
+  cannot say which variant the server picks by default; the impl takes `| None = None` and
+  forwards the argument only when it is supplied. A discriminator listed in `required` renders
+  exactly as before.
 
 ## [0.8.0] — 2026-08-26
 

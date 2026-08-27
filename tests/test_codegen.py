@@ -377,8 +377,14 @@ def test_generated_discriminated_fallback_for_unmodeled_variant():
     assert got == {"entityType": 99, "_id": "x"}
 
 
-def test_discriminator_always_required_in_body():
-    """Discriminator not in schema required → still treated as required in body (no None-check)."""
+def test_optional_discriminator_stays_optional():
+    """Discriminator absent from schema `required` keeps its optional call signature.
+
+    Each @overload pins the discriminator to one Literal, so omission gets its own
+    overload returning the union rather than a default on the pinned ones. Forcing it
+    to be mandatory would silently narrow the wrapper's API: the params are
+    keyword-only, so Python accepts the signature and `ast.parse` passes.
+    """
     tool = {
         "name": "get_entity",
         "description": "x",
@@ -398,9 +404,37 @@ def test_discriminator_always_required_in_body():
         "input_overrides": {"entityType": "int"},
     }
     src = codegen.render_tool(tool, shape)
-    # impl must have entityType: int with no default (required)
+    # impl signature carries the optional form
+    assert "entityType: int | None = None" in src
+    # an omission overload exists: no entityType at all, returning the union
+    assert "async def get_entity(caller: McpCaller, *, entityId: str) -> Person: ..." in src
+    # body forwards it only when the caller supplied it
+    assert "if entityType is not None" in src
+
+
+def test_required_discriminator_has_no_default():
+    """A discriminator the schema marks required stays mandatory, forwarded unconditionally."""
+    tool = {
+        "name": "get_entity",
+        "description": "x",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "entityId": {"type": "string"},
+                "entityType": {"type": "number"},
+            },
+            "required": ["entityId", "entityType"],
+        },
+    }
+    shape = {
+        "unwrap": ["data", "entity"],
+        "discriminator": "entityType",
+        "variants": {"1": {"return_model": "Person", "fields": {}}},
+        "input_overrides": {"entityType": "int"},
+    }
+    src = codegen.render_tool(tool, shape)
     assert "entityType: int" in src
-    # body must NOT have conditional None-check for entityType
+    assert "entityType: int | None = None" not in src
     assert "if entityType is not None" not in src
 
 
