@@ -8,20 +8,61 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "regions": [
-        "us-east-1"
-      ],
-      "resource_type": "product"
-    },
-    "_shape_note": "content.result is a map keyed by AWS product name -> {status: str}. The keys are data, not schema, so no TypedDict applies. The tool description states the outer key is products | service_apis | cfn_resources depending on resource_type, so the unwrap deliberately stops at content.result, which is stable across all three."
+    "probed_args": [
+      {
+        "regions": [
+          "us-east-1"
+        ],
+        "resource_type": "product"
+      },
+      {
+        "regions": [
+          "us-east-1"
+        ],
+        "resource_type": "api"
+      },
+      {
+        "regions": [
+          "us-east-1"
+        ],
+        "resource_type": "cfn"
+      }
+    ],
+    "_observed_bytes": 7285,
+    "discriminator": "resource_type",
+    "variants": {
+      "product": {
+        "return_model": "RegionalProductAvailability",
+        "fields": {
+          "products": "dict[str, dict[str, str] | None]",
+          "next_token": "str",
+          "failed_regions": "Any | None"
+        }
+      },
+      "api": {
+        "return_model": "RegionalApiAvailability",
+        "fields": {
+          "service_apis": "dict[str, str | None]",
+          "next_token": "str",
+          "failed_regions": "Any | None"
+        }
+      },
+      "cfn": {
+        "return_model": "RegionalCfnAvailability",
+        "fields": {
+          "cfn_resources": "dict[str, str | None]",
+          "next_token": "str",
+          "failed_regions": "Any | None"
+        }
+      }
+    }
   },
   "aws___list_regions": {
     "unwrap": [
       "content",
       "result"
     ],
-    "return_model": "Region",
+    "return_model": "AwsRegion",
     "input_overrides": {},
     "fields": {
       "region_id": "str",
@@ -29,6 +70,7 @@
     },
     "source": "live",
     "probed_args": {},
+    "_observed_bytes": 2781,
     "return_container": "list"
   },
   "aws___read_documentation": {
@@ -36,7 +78,7 @@
       "content",
       "result"
     ],
-    "return_model": "DocumentationPage",
+    "return_model": "DocPage",
     "input_overrides": {},
     "fields": {
       "status": "str",
@@ -46,20 +88,20 @@
       "start_index": "int",
       "end_index": "int",
       "truncated": "bool",
-      "redirected_url": "Any | None",
-      "error_code": "Any | None"
+      "redirected_url": "str | None",
+      "error_code": "str | None"
     },
     "source": "live",
     "probed_args": {
       "requests": [
         {
-          "url": "https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html",
+          "url": "https://docs.aws.amazon.com/lambda/latest/dg/welcome.html",
           "max_length": 2000
         }
       ]
     },
-    "return_container": "list",
-    "_shape_note": "redirected_url and error_code were observed only as null on a successful, non-redirected fetch, so their non-null type is unobserved and stays `Any | None`."
+    "_observed_bytes": 2448,
+    "return_container": "list"
   },
   "aws___retrieve_skill": {
     "unwrap": [
@@ -71,9 +113,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "skill_name": "aws-serverless"
+      "skill_name": "debugging-lambda-timeouts"
     },
-    "_shape_note": "The unwrapped value is the SKILL.md markdown as a plain string, not a record, so return_model stays null per the no-primitive-name rule; the unwrap still strips the content envelope."
+    "_observed_bytes": 1692,
+    "_scalar_payload": "content.skill_content is a markdown string; unwrap-only, no TypedDict (return_model must not name a primitive)."
   },
   "aws___search_documentation": {
     "unwrap": [
@@ -93,21 +136,19 @@
     "source": "live",
     "probed_args": [
       {
-        "search_phrase": "S3 bucket versioning",
-        "limit": 3,
-        "topics": [
-          "general"
-        ]
+        "search_phrase": "Lambda function timeout configuration",
+        "limit": 3
       },
       {
-        "search_phrase": "deploy serverless application skill workflow",
-        "limit": 5,
+        "search_phrase": "Lambda timeout error",
         "topics": [
-          "agent_skills"
-        ]
+          "troubleshooting"
+        ],
+        "limit": 3
       }
     ],
+    "_observed_bytes": 4544,
     "return_container": "list",
-    "_shape_note": "Record shape varies with the `topics` argument: doc topics return {rank_order, title, context, url}; topics=['agent_skills'] returns {rank_order, title, skill_description, skill_name}. Both variants were probed and unioned into one total=False model. `topics` is an array, not a top-level scalar, so it is not a codegen discriminator and no variants block applies."
+    "_heterogeneous_list": "One response mixes two record kinds: doc hits carry context+url, agent-skill hits carry skill_description+skill_name. Not selected by any argument, so modelled as one total=False union rather than a discriminated variant set."
   }
 }
