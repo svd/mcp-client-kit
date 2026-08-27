@@ -1,0 +1,203 @@
+{
+  "browser_console_messages": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": [
+      {
+        "level": "error"
+      },
+      {
+        "level": "info",
+        "all": true
+      }
+    ],
+    "_observed_shape": "str",
+    "_observed_bytes": 524
+  },
+  "browser_find": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "text": "Playwright"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 9654
+  },
+  "browser_hide_highlight": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "element": "page body",
+      "target": "body"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 323
+  },
+  "browser_highlight": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "element": "page body",
+      "target": "body"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 317
+  },
+  "browser_network_request": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "index": 1
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 1714
+  },
+  "browser_network_requests": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": [
+      {
+        "static": false
+      },
+      {
+        "static": true
+      }
+    ],
+    "_observed_shape": "str",
+    "_observed_bytes": 1558
+  },
+  "browser_pdf_save": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {},
+    "_observed_shape": "str",
+    "_observed_bytes": 509
+  },
+  "browser_snapshot": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {},
+    "_observed_shape": "str",
+    "_observed_bytes": 14585
+  },
+  "browser_start_tracing": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {},
+    "_observed_shape": "str",
+    "_observed_bytes": 269
+  },
+  "browser_start_video": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {},
+    "_observed_shape": "str",
+    "_observed_bytes": 38
+  },
+  "browser_stop_tracing": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {},
+    "_probe_status": "inconclusive"
+  },
+  "browser_stop_video": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {},
+    "_observed_shape": "str",
+    "_observed_bytes": 38
+  },
+  "browser_take_screenshot": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "scale": "css"
+    },
+    "_observed_shape": [
+      "str",
+      "...x2"
+    ],
+    "_observed_bytes": 729,
+    "_media_tool": true
+  },
+  "browser_video_chapter": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "title": "Eval chapter",
+      "description": "probe"
+    },
+    "_probe_status": "inconclusive"
+  },
+  "browser_video_hide_actions": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {},
+    "_probe_status": "inconclusive"
+  },
+  "browser_video_show_actions": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {},
+    "_probe_status": "inconclusive"
+  },
+  "browser_wait_for": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "time": 1
+    },
+    "_probe_status": "inconclusive"
+  }
+}

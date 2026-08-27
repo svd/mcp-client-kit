@@ -1,0 +1,28 @@
+{
+  "server": "playwright",
+  "transport": "stdio",
+  "auth": "none",
+  "checks": {
+    "ast": "pass",
+    "signatures": "skip",
+    "idempotency": "pass",
+    "pii": "pass",
+    "roundtrip": "skip"
+  },
+  "check_details": {
+    "ast": "",
+    "signatures": "probe_inconclusive: 5 tool(s) had no observable success payload \u2014 shapes unknown: browser_stop_tracing, browser_video_chapter, browser_video_hide_actions, browser_video_show_actions, browser_wait_for",
+    "idempotency": "offline determinism check (real tool schemas from playwright.mcpgen.json)",
+    "pii": "",
+    "roundtrip": "probe_inconclusive: 5 tool(s) had no observable success payload \u2014 shapes unknown: browser_stop_tracing, browser_video_chapter, browser_video_hide_actions, browser_video_show_actions, browser_wait_for"
+  },
+  "modes_hit": [
+    "A"
+  ],
+  "verdict": "partial",
+  "versions": {
+    "engine": "0.9.0.dev1",
+    "skill_ref": "v0.0.4-156-gfd9eda8",
+    "skill_path": "~/src/mcp-client-kit"
+  }
+}

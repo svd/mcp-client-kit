@@ -1,0 +1,214 @@
+{
+  "notion-search": {
+    "unwrap": [
+      "results"
+    ],
+    "return_container": "list",
+    "return_model": null,
+    "discriminator": "query_type",
+    "variants": {
+      "internal": {
+        "return_model": "SearchResultItem",
+        "fields": {
+          "id": "str",
+          "title": "str",
+          "url": "str",
+          "type": "str",
+          "highlight": "str",
+          "timestamp": "str"
+        }
+      },
+      "user": {
+        "return_model": "SearchPersonItem",
+        "fields": {
+          "text": "str"
+        }
+      }
+    },
+    "input_overrides": {},
+    "source": "live",
+    "probed_args": {
+      "query": "task",
+      "query_type": "internal",
+      "page_size": 5
+    },
+    "probe_args_scrubbed": false,
+    "_note": "Envelope is {results: [...], type: str}; unwrap drops the redundant `type` echo. `query_type` is a CONFIRMED response-shape discriminator, both enum values probed: internal returns ranked page hits (id/title/url/type/highlight/timestamp), user returns person cards carrying a single `text` blob. It was NOT flagged by the step-2.e advisory because only one tool declares it. The advisory's own candidate for this tool, `page_url`, was probed against the internal variant and returned the same {results, type} envelope with results empty — it scopes the search, it does not switch the shape; recorded inconclusive-consistent. `page_size` was disqualified in Pass 1 as pagination. `highlight` is absent when max_highlight_length=0, which total=False covers."
+  },
+  "notion-fetch": {
+    "unwrap": [],
+    "return_model": "NotionEntity",
+    "input_overrides": {},
+    "fields": {
+      "title": "str",
+      "url": "str",
+      "text": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "id": "<example-page-id>"
+    },
+    "probe_args_scrubbed": true,
+    "_note": "No vendor envelope — the record is the top-level object, so unwrap stays empty. Probed twice, once against a page and once against a database id; both returned the identical four-key shape, so the model holds across entity types. `metadata` is a nested dict ({type: str}) and is left out of `fields` per the depth guard. `text` carries the whole page rendered as XML-ish markup, which is why this tool is worth typing: the caller gets a named record instead of Any."
+  },
+  "notion-get-users": {
+    "unwrap": [
+      "results"
+    ],
+    "return_container": "list",
+    "return_model": "UserSummary",
+    "input_overrides": {},
+    "fields": {
+      "type": "str",
+      "id": "str",
+      "name": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "page_size": 5
+    },
+    "_note": "Envelope is {results: [...], has_more: bool}; unwrap drops has_more and start_cursor paging state. `email` is documented as optional and was not present for any observed member, so it is deliberately not modelled."
+  },
+  "notion-query-data-sources": {
+    "unwrap": [
+      "results"
+    ],
+    "return_container": "list",
+    "return_model": "DataSourceRow",
+    "input_overrides": {},
+    "fields": {
+      "id": "str",
+      "url": "str",
+      "createdTime": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "data": {
+        "mode": "sql",
+        "data_source_urls": [
+          "<example-data-source-url>"
+        ],
+        "query": "SELECT * FROM \"<example-data-source-url>\" LIMIT 3"
+      }
+    },
+    "probe_args_scrubbed": true,
+    "_note": "Envelope is {results: [...], has_more: bool, data_source_ids: [str]}. Only id/url/createdTime are structural — every other key in a row is a user-defined database column (this workspace returned `Name`, `Status`, `Date Created`, all null), so the row shape is per-data-source and those columns are deliberately not modelled. total=False lets them ride along untyped. Probed in `sql` mode only; `view` mode is the other anyOf branch of `data` and was not exercised."
+  },
+  "notion-list-private-pages": {
+    "unwrap": [
+      "results"
+    ],
+    "return_container": "list",
+    "return_model": "SidebarPageEntry",
+    "input_overrides": {},
+    "fields": {
+      "type": "str",
+      "url": "str",
+      "title": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "limit": 5
+    },
+    "_note": "Envelope is {results: [...], nextCursor: str}; unwrap drops the cursor. Shares SidebarPageEntry with notion-list-favorite-pages — the two observed field sets are identical, which is the only condition under which a model name may be reused."
+  },
+  "notion-list-favorite-pages": {
+    "unwrap": [
+      "results"
+    ],
+    "return_container": "list",
+    "return_model": "SidebarPageEntry",
+    "input_overrides": {},
+    "fields": {
+      "type": "str",
+      "url": "str",
+      "title": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "limit": 5
+    },
+    "_note": "Same three-key entry as notion-list-private-pages, hence the shared model. This response carried no nextCursor (fewer results than the limit)."
+  },
+  "notion-list-recent-pages": {
+    "unwrap": [
+      "results"
+    ],
+    "return_container": "list",
+    "return_model": "RecentPageEntry",
+    "input_overrides": {},
+    "fields": {
+      "type": "str",
+      "url": "str",
+      "title": "str",
+      "icon": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "limit": 5
+    },
+    "_note": "Structurally the sidebar entry plus `icon`, which is absent on entries that have no emoji — a distinct field set, so it gets its own model rather than reusing SidebarPageEntry. total=False covers the absent icon."
+  },
+  "notion-list-shared-pages": {
+    "unwrap": [
+      "results"
+    ],
+    "return_container": "list",
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "limit": 5
+    },
+    "_note": "Envelope confirmed as {results: [...]}, but this workspace has nothing in its Shared sidebar section, so `results` came back empty and the element shape is unobservable. Unwrap is recorded (it is established); return_model is withheld rather than borrowed from the sibling list tools, since nothing was seen. Re-probe against a workspace with shared content to type the element."
+  },
+  "notion-get-teams": {
+    "unwrap": [],
+    "return_model": "TeamsResult",
+    "input_overrides": {},
+    "fields": {
+      "joinedTeams": "list",
+      "otherTeams": "list",
+      "hasMore": "bool"
+    },
+    "source": "live",
+    "probed_args": {},
+    "_note": "Top-level record, no envelope to strip. Both team lists came back empty in this workspace, so their element shape is unobservable; the fields are kept as bare `list` (the one allowed non-scalar) so callers still see them rather than having them silently dropped. Re-probe from a workspace with teamspaces to type the element."
+  },
+  "notion-get-comments": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "page_id": "<example-page-id>"
+    },
+    "probe_args_scrubbed": true,
+    "_note": "Step-2.e Pass 2 for the `page_id` candidate ran here: three distinct page ids, every other arg held fixed, all three returned the identical empty object {}. Inconclusive, not disproven — none of the three pages carries a discussion, so the populated shape was never seen and page_id stays polymorphic-suspect. A fourth probe with include_resolved and include_all_blocks both true also returned {}. return_model stays null: an empty object establishes the tool answers, not what it answers with."
+  },
+  "notion-query-meeting-notes": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {},
+    "_probe_status": "inconclusive",
+    "_note": "Every response was an error rather than a result, so no shape was ever observed."
+  },
+  "notion-search-agents": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "scope": "workspace",
+      "limit": 5
+    },
+    "_probe_status": "inconclusive",
+    "_note": "Both enum values of `scope` (favorites, workspace) were probed and both returned an error object rather than a result, so neither variant's shape was observed. The `scope` enum is therefore recorded as an unresolved candidate, not as a discriminator."
+  }
+}
