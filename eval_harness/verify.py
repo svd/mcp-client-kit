@@ -56,6 +56,8 @@ _RE_LONG_NUM = re.compile(r"\b\d{8,}\b")
 _RE_UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
 )
+# Exactly 32, word-bounded: Notion-style dashless ids match, a 40-char sha does not.
+_RE_UUID_DASHLESS = re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)
 _RE_HOME_PATH = re.compile(r"/(?:Users|home)/[^/\s]+")
 _RE_PUBLIC_ID = re.compile(r"\b(?:pmid|pmc|doi|arxiv|isbn|orcid):\S+", re.IGNORECASE)
 
@@ -259,6 +261,11 @@ def _is_placeholder(value: str) -> bool:
     return "<" in value and ">" in value
 
 
+def _is_uniform_hex_run(body: str) -> bool:
+    """Return True when body is a single hex character repeated (empty counts)."""
+    return len(set(body)) <= 1
+
+
 def _is_placeholder_uuid(value: str) -> bool:
     """Return True for a synthetic UUID such as 11111111-2222-4333-8444-555555555559.
 
@@ -273,9 +280,20 @@ def _is_placeholder_uuid(value: str) -> bool:
         return False
     for i, group in enumerate(groups):
         body = group[1:] if i in (2, 3) else group[:-1] if i == 4 else group
-        if len(set(body)) > 1:
+        if not _is_uniform_hex_run(body):
             return False
     return True
+
+
+def _is_placeholder_uuid_dashless(value: str) -> bool:
+    """Return True for a synthetic dashless 32-hex id such as 00000000...0000.
+
+    Notion-style ids carry no dashes, and the scrub keeps the format its server
+    accepts, so the same uniformity rule applies to the run as a whole instead of
+    per group. As with the last dashed group, a trailing character may differ to
+    distinguish sibling placeholders.
+    """
+    return _is_uniform_hex_run(value[:-1].lower())
 
 
 def _find_pii(value: str) -> str | None:
@@ -283,14 +301,19 @@ def _find_pii(value: str) -> str | None:
 
     Two kinds of value are blanked out before the scan, because the remaining
     patterns would trip over digit runs that carry no personal data. Placeholder
-    UUIDs are scrub output, excused by the UUID pattern itself. Prefixed public
-    ids (`pmid:34515826`, `doi:10.1038/...`) are functional bibliographic
+    ids are scrub output, excused in both the dashed UUID form and the dashless
+    32-hex form servers such as Notion require. Prefixed public ids
+    (`pmid:34515826`, `doi:10.1038/...`) are functional bibliographic
     identifiers; only the explicit prefix earns the exemption, so a bare numeric
     id still fails the long-number pattern.
     """
     scrubbed = _RE_PUBLIC_ID.sub(" ", value)
     scrubbed = _RE_UUID.sub(
         lambda m: " " if _is_placeholder_uuid(m.group()) else m.group(), scrubbed
+    )
+    scrubbed = _RE_UUID_DASHLESS.sub(
+        lambda m: " " if _is_placeholder_uuid_dashless(m.group()) else m.group(),
+        scrubbed,
     )
     for pattern in (_RE_EMAIL, _RE_LONG_NUM, _RE_UUID, _RE_HOME_PATH):
         m = pattern.search(scrubbed)

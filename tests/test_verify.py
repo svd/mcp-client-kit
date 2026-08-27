@@ -262,6 +262,62 @@ def test_check_pii_pass_placeholder_uuid(tmp_path: Path) -> None:
     assert result.status == "pass", f"Expected pass, got {result.status!r}: {result.detail}"
 
 
+def test_check_pii_pass_placeholder_uuid_dashless(tmp_path: Path) -> None:
+    """Dashless 32-hex placeholders (Notion id format) are scrub output, so status='pass'."""
+    shapes = {
+        "notion-fetch": {
+            "return_model": "Page",
+            "probed_args": {"id": "00000000000000000000000000000000"},
+        },
+        "get-comments": {
+            "return_model": "Comment",
+            "probed_args": {"page_id": "11111111111111111111111111111111"},
+        },
+    }
+    shapes_path = tmp_path / "server.shapes.json"
+    shapes_path.write_text(json.dumps(shapes), encoding="utf-8")
+
+    result = check_pii(shapes_path)
+    assert result.status == "pass", f"Expected pass, got {result.status!r}: {result.detail}"
+
+
+def test_check_pii_fail_real_dashless_id(tmp_path: Path) -> None:
+    """A real (varied) dashless 32-hex id is not exempted, so status='fail'.
+
+    The value is all digits, exactly like the all-zeros placeholder it must be
+    told apart from — being 32 chars long does not buy the exemption; only the
+    repeated-character shape does.
+    """
+    shapes = {
+        "notion-fetch": {
+            "return_model": "Page",
+            "probed_args": {"id": "10293847560192837465019283746501"},
+        },
+    }
+    shapes_path = tmp_path / "server.shapes.json"
+    shapes_path.write_text(json.dumps(shapes), encoding="utf-8")
+
+    result = check_pii(shapes_path)
+    assert result.status == "fail", f"Expected fail, got {result.status!r}: {result.detail}"
+
+
+def test_check_pii_git_sha_unaffected(tmp_path: Path) -> None:
+    """A 40-char git sha is not a 32-hex placeholder; the dashless rule leaves it alone."""
+    from eval_harness.verify import _RE_UUID_DASHLESS
+
+    sha = "9c1e2ab3f45d6789e0123456789abcdef0123456"
+    assert _RE_UUID_DASHLESS.search(sha) is None
+
+    shapes = {
+        "get_commit": {"return_model": "Commit", "probed_args": {"sha": sha}},
+    }
+    shapes_path = tmp_path / "server.shapes.json"
+    shapes_path.write_text(json.dumps(shapes), encoding="utf-8")
+
+    result = check_pii(shapes_path)
+    assert result.status == "pass", f"Expected pass, got {result.status!r}: {result.detail}"
+
+
 def test_check_pii_fail_real_uuid(tmp_path: Path) -> None:
     """A real UUID in probed_args still causes status='fail'."""
     shapes = {
