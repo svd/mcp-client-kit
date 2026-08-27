@@ -50,8 +50,10 @@ from subagent:
 
 **Batching rule for step 3:** every discriminator-sibling set lands in the **same** batch
 so variant consistency is resolved inside one agent's context, not across blind agents.
-Independent tools are bucketed by relatedness and size. Dispatch only user-approved
-non-mutating tools; the agent prompt must forbid touching anything off its assigned list.
+Independent tools are bucketed by relatedness and size. Dispatch only the non-mutating
+tools in the step-2 selected set; the agent prompt must forbid touching anything off its
+assigned list. A mutating tool the user explicitly approved is probed inline on the main
+thread, never handed to a batch agent.
 
 **Rich agent contract:** each batch agent (a) probes its tools with ids from the recon
 catalog, (b) reads raw payloads in its own context, (c) drafts the step-4 shape entry
@@ -142,9 +144,14 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
 2. **Select tools to probe (interactive gate).**
 
-   a. Run `mcpgen list <server> --schema` → get `[{name, description, inputSchema,
-      annotations}]` for every tool. **Probe only tools that appear in this output.**
-      Do not add tools from system-prompt context, documentation, or prior knowledge.
+   Keep a running `session-overview.md` beside the generated module (the `--out` dir).
+   It is the human-readable log for everything the shape-spec cannot hold: skipped
+   mutating tools, unprobed tools and why, and discriminator verdicts.
+
+   a. Run `<mcpgen> list <server> --schema` → get `[{name, description, inputSchema}]`
+      for every tool, plus `annotations` on the tools whose server supplies it — the key
+      is absent when it does not. **Probe only tools that appear in this output.** Do not
+      add tools from system-prompt context, documentation, or prior knowledge.
       The `inputSchema` field in this output is the authoritative source for step 3's
       required-arg and enum-constraint checks — no separate schema fetch is needed.
 
@@ -157,21 +164,87 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
         ⚠ create_entity — Create a new entity [MUTATING]
         ...
       ```
-      Flag likely-mutating tools with `⚠ ... [MUTATING]` using this **fallback order**:
+      Flag likely-mutating tools with `⚠ ... [MUTATING]` using the **fallback order**
+      below. Both items use one shared test, defined here so the two cannot drift:
+
+      > **The keyword test.** Words: `create`, `update`, `delete`, `remove`, `send`,
+      > `set`, `write`, `post`, `patch`, `put`, `cancel`, `approve`, `submit`, `assign`,
+      > `add`, `append`, `insert`, `upsert`, `push`, `close`, `revoke`.
+      >
+      > Match the **name only, never the description** — prose routinely names mutating
+      > verbs while describing a read ("returns recently created records"). Split the
+      > name on `_`, `-`, and camelCase boundaries and compare **whole words**, so
+      > `created` does not match `create` and `get_address` does not match `add`. The
+      > test **passes** (the tool looks mutating) when any whole word is on the list.
+      >
+      > **Read-verb exemption — the one judgment call.** When a read verb (`get`, `list`,
+      > `read`, `search`, `find`, `fetch`, `query`, `describe`, `show`, `count`) leads
+      > the name — after any server or object prefix, since `board_list_items` and
+      > `sharepoint_folder_search` are the same shape as `list_items` — ask what the
+      > matched word is doing in the name.
+      > Naming *what is read* does not make the tool write it — `list_add_ons`,
+      > `get_close_reasons`, `search_push_events` are reads whose match is a noun.
+      > Naming a *second action* does — `get_or_create_entity`, `find_or_create_page`,
+      > `getOrCreateThread` each really can write. Exempt the first kind; flag the
+      > second. This is the only place in the test where you reason rather than match,
+      > so when the reading is genuinely unclear, flag it — an over-flagged tool costs
+      > one line in `mutating-skipped`, an under-flagged one gets called for real.
 
       1. **Primary — `annotations.readOnlyHint`.** If a tool's `annotations` object
-         (from step 2a's `mcpgen list --schema` output) has `readOnlyHint`, trust it
-         outright: `readOnlyHint: true` → safe to probe; `readOnlyHint: false` (or a
-         write-shaped tool with the hint absent) → mutating. Do not second-guess this
-         signal with the keyword heuristic below.
+         (from step 2a's `mcpgen list --schema` output) has `readOnlyHint`, trust it:
+         `readOnlyHint: true` → safe to probe; `readOnlyHint: false` → mutating. Do not
+         re-litigate an agreeing hint with
+         the keyword test above — that over-flags read-only tools and suppresses
+         probing.
+
+         **Contradiction check — the one time you do look twice.** Trust the hint unless
+         the server's own metadata or the tool's name argues against it. Run both tests
+         on every `readOnlyHint: true` tool; neither costs a live call:
+         - **Self-contradicting annotations** — `destructiveHint: true` or
+           `idempotentHint: false` alongside `readOnlyHint: true`. The server contradicts
+           itself. (`list --schema` passes through every annotation field the server
+           sets, so these are already in hand.)
+         - **Name contradicts hint** — run the keyword test above. The hint is disputed
+           when it passes; otherwise the hint stands. `create_item`, `user_delete` and
+           `get_or_create_entity` are disputed; `list_recently_created_items` and
+           `getDeletedRecords` are not.
+
+         On either hit, do **not** silently probe and do **not** silently skip: treat the
+         tool as mutating, flag it `⚠ ... [MUTATING — hint disputed]` in the report, and
+         record the reason `readOnlyHint: true contradicted by <what>` — the recording
+         rule below covers this path and says where it lands. It becomes
+         probeable only on an explicit user yes, exactly like any other mutating tool.
+         An agreeing hint stays trusted and needs no marker.
       2. **Fallback — keyword heuristic + semantic read.** Only when `annotations` is
-         absent or lacks `readOnlyHint` (common — many servers don't set it): flag
-         names or descriptions containing `create`, `update`, `delete`, `remove`,
-         `send`, `set`, `write`, `post`, `patch`, `put`, `cancel`, `approve`, `submit`,
-         `assign` — **and** read the description semantically for mutating verbs the
-         keyword list misses (e.g. "records changes", "switches branches", "writes a
-         memo"). The keyword list is a last resort, not a sufficient safety net on its
-         own — probing makes a **real** live call, so when in doubt, treat as mutating.
+         absent or lacks `readOnlyHint` (common — many servers don't set it). Run the
+         keyword test above; a pass flags the tool. Its whole-word, name-only matching
+         is what keeps `get_address` and `list_closed_issues` unflagged, and that
+         matters in both directions: step 2c skips every flagged tool, so a false flag
+         drops coverage — the mirror of the miss the list exists to prevent.
+         **Then** read the description semantically for mutating verbs no keyword
+         catches (e.g. "records changes", "switches branches", "writes a memo"). The
+         test is a last resort, not a sufficient safety net on its own — probing makes a
+         **real** live call, so when in doubt, treat as mutating.
+
+         **Record the verdict, do not resolve it silently.** This applies to any tool
+         flagged as mutating without a `readOnlyHint: false` to say so — by this
+         fallback, or by 2.b.1's contradiction check. A tool whose annotations carry no
+         hint has no third route: it is this fallback's population, and the keyword test
+         is what decides it. A tool cleared by
+         `readOnlyHint: true` needs no marker.
+
+         - **Probed** — it carries `"_mutating_suspect": true` and a one-line
+           `"_mutating_reason"` in its shape-spec entry:
+           `{"_mutating_suspect": true, "_mutating_reason": "name contains 'append'; no readOnlyHint"}`.
+           Add both **in step 4, after `mcpgen merge`**. Merge replaces a re-probed
+           tool's entry wholesale rather than unioning its keys, so anything hand-added
+           beforehand is dropped without a word — and must be re-added after any later
+           partial re-probe.
+         - **Skipped** — there is no shape entry to hold it. Record it under a
+           `## mutating-skipped` heading in `session-overview.md` with that same
+           one-line reason.
+
+         Either way the verdict survives the run.
 
       Note for focus: the goal is to shape-spec tools that carry real records and
       whose payloads you want out of model context ("big dump" tools). Mutations and
@@ -729,6 +802,9 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    - **`source`**: `"live"`, or `"fixture"` + a note if you authored from a recorded
      shape instead of a live call (never let a fixture fallback read as a live probe).
    - Delete `_observed_shape` once you've extracted the real shape.
+   - **Add** `_mutating_suspect` / `_mutating_reason` for every probed tool step 2b
+     flagged. Here is the first point they can be added — merge would have replaced the
+     entry — and they are never deleted afterwards.
 
 5. **Regenerate.** Reach the server exactly the way step 1 did — one form, not both:
    ```bash
@@ -840,11 +916,11 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
   started.
 
 - **Probing is a live call — mutating tools mutate.** The default selects every
-  tool, but probing a mutating tool (`create`/`update`/`delete`/`send`/etc., or
+  *non-mutating* tool — pruned or not, per step 2c — and probing a mutating tool (`create`/`update`/`delete`/`send`/etc., or
   `annotations.readOnlyHint: false`) executes it for real against the server. Flag
   likely-mutating tools in the step 2 report — `readOnlyHint` first, keyword+semantic
-  heuristic as fallback, per step 2b — and recommend the user deselect them unless
-  they explicitly want to probe them. Never probe a destructive tool "to see its
+  heuristic as fallback, per step 2b — and keep them out of the selected set unless the
+  user explicitly opts one in. Never probe a destructive tool "to see its
   shape" without explicit user confirmation.
 
 - **The type is a hint, not validation.** A `TypedDict` from one probe is partial
