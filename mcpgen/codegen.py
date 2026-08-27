@@ -400,17 +400,25 @@ def _render_overloaded(
 
     disc, numeric = _discriminator_context(tool, shape)
     disc_type = "int" if numeric else "str"
+    disc_required = disc in required
 
     ordered = sorted(props.items(), key=lambda kv: kv[0] not in required)
     coerced_variants = sorted(((_variant_key(k, disc, numeric), v) for k, v in variants.items()), key=lambda kv: kv[0])
 
-    def _build_params(disc_type: str) -> list[str]:
+    def _build_params(disc_type: str | None) -> list[str]:
+        """Render the parameter list; `disc_type=None` omits the discriminator entirely.
+
+        The discriminator carries no default even when the schema marks it optional,
+        because each @overload pins it to one `Literal` value. Omission is expressed
+        as its own overload (see `disc_required`), not as a default on this one.
+        """
         out = []
         for pname, pschema in ordered:
             py = sanitize(pname)
             ann = overrides.get(pname) or py_type(pschema)
             if pname == disc:
-                out.append(f"{py}: {disc_type}")
+                if disc_type is not None:
+                    out.append(f"{py}: {disc_type}")
             elif pname in required:
                 out.append(f"{py}: {ann}")
             else:
@@ -434,13 +442,23 @@ def _render_overloaded(
         blocks.append(f"@overload\nasync def {fn}({_sig(params)}) -> {ret}: ...")
 
     impl_ret = f"list[{union_ret}]" if container == "list" else union_ret
-    impl_lines = [f"async def {fn}({_sig(_build_params(disc_type))}) -> {impl_ret}:"]
+
+    # A discriminator the schema marks optional may be omitted, and the server then
+    # picks a variant. Which one is not knowable from the schema, so the omission
+    # overload returns the union rather than guessing.
+    if not disc_required:
+        blocks.append(f"@overload\nasync def {fn}({_sig(_build_params(None))}) -> {impl_ret}: ...")
+
+    impl_disc = disc_type if disc_required else f"{disc_type} | None = None"
+    impl_lines = [f"async def {fn}({_sig(_build_params(impl_disc))}) -> {impl_ret}:"]
     if embed_schema:
         impl_lines.append(_docstring_with_args(tool, ordered, "    ", shape=shape))
     else:
         impl_lines.append(_docstring(_with_size_note(tool.get("description"), shape), "    "))
 
-    body_args = [(sanitize(pname), pname, pname in required or pname == disc) for pname, _ in ordered]
+    body_args = [
+        (sanitize(pname), pname, pname in required or (pname == disc and disc_required)) for pname, _ in ordered
+    ]
     req_pairs = [(py, pname) for py, pname, is_req in body_args if is_req]
     opt_pairs = [(py, pname) for py, pname, is_req in body_args if not is_req]
 
