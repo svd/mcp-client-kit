@@ -1,73 +1,55 @@
-# astro-docs — eval session overview
+# astro-docs — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T06:05:18Z
-- **Duration:** 1m 41s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T08:45:57Z
+- **Duration:** 2m 7s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Engine
+## Server surface
 
-Resolved `mcpgen` invocation: `uv run mcpgen` (0.9.0.dev1). The bare `mcpgen` form is
-absent in this uv-managed project. Server reached through the config form,
-`MCPGEN_SERVERS=.mcp.eval.json`, which maps `astro-docs` to the streamable-HTTP endpoint
-`https://mcp.docs.astro.build/mcp`. No auth, no seed commands.
+`astro-docs` is a hosted HTTP MCP endpoint (`https://mcp.docs.astro.build/mcp`, no auth) that
+exposes exactly **one tool**: `search_astro_docs` — "Search the official Astro framework docs".
+Its `inputSchema` declares a single required `query: string` with `additionalProperties: false`.
+No `annotations` block is supplied, so the read-only verdict came from the fallback path:
+the name and description are unambiguously a search, there is no mutating verb anywhere in the
+surface, and the schema has no field capable of writing state. Tools probed: 1 of 1; skipped: 0.
+No seed commands were configured, and none were needed — the docs corpus is server-side and
+always populated.
 
-## Tool surface
-
-`mcpgen list astro-docs --schema` returned exactly **one** tool:
-
-```
-Tools on astro-docs:
-  search_astro_docs — Search the official Astro framework docs
-```
-
-The server supplies no `annotations` block, so the mutating check fell back to the
-keyword heuristic: `search` leads the name, no mutating whole word appears, and the
-description describes a read. Selected — 1 of 1 tools probed, 0 skipped, no
-`mutating-skipped` entries.
-
-**discriminators: N/A.** A candidate needs two or more tools declaring the same scalar
-parameter; with a single tool the precondition cannot be met, and `query` sits on the
-engine's own denylist regardless. Pass 2 was skipped outright.
+**Discriminators: N/A.** The candidate advisory on `list --schema` was silent, and it could not
+have fired: a candidate needs two or more tools sharing a scalar parameter name, and this server
+has one tool with one parameter, which is `query` — itself on the engine's denylist.
 
 ## Probing
 
-Three live probes, paced ≥ 2 s apart as the hosted-HTTP rule requires:
-
-1. `query="view transitions"` — 23,866 bytes observed.
-2. `query="zzzqxnonexistenttopic"` — 19,889 bytes observed.
-3. `query="view transitions"` again, so the merged `probed_args` carries the meaningful
-   query for the roundtrip verifier.
-
-**The surprise was the nonsense query.** A term that matches nothing in the Astro docs
-still returned ten results with an identical field set — the backend is a dense/vector
-search that always fills its result window rather than returning `[]`. That is useful
-for shaping: there is no empty-list path to leave an inner element shape unobservable,
-and the `...x10` element count was identical across both queries, so the normalization
-rule (ignore `...xN`) was not even needed to call the two shapes equal.
-
-## Shape decision
-
-One entry, one decision. The payload is a clean single-level envelope:
+Two paced probes were issued against the hosted endpoint, the second as a multi-`--args`
+invocation so the two responses deep-merged into a single observed shape: `"content collections"`
+and `"view transitions astro:page-load"`. Both returned the same envelope, with no key present in
+one and absent from the other and no type widening:
 
 ```
-{"search_results": [{"content", "source_url", "title", "source_type"}, ...x10]}
+{"search_results": [{"content": str, "source_url": str, "title": str, "source_type": str}, "...x10"]}
 ```
 
-- **unwrap:** `["search_results"]` — one vendor key strips to the record list.
-- **return_container:** `"list"` — the unwrapped value is a list of records, so the body
-  digs via `_dig_list` and defaults to `[]`.
-- **return_model:** `AstroDocSearchResult` — a new capitalized name, no collision risk
-  with only one tool in the module.
-- **fields:** all four top-level scalars, every one observed as `str` in both probes and
-  never null, so none is marked nullable. No depth was modelled beyond the record itself
-  because there is none to model — the elements are flat.
-- **probed_args:** `{"query": "view transitions"}`. Nothing here matches a PII pattern —
-  a search string is a functional value — so the scrub pass changed nothing.
+Nothing surprising surfaced. There was no double-encoding (the payload arrives as a real object,
+not a JSON string), no empty list, no error envelope, and no null in any field across 20 observed
+records. Responses are sizeable — ~27 KB for ten hits, since `content` carries full doc excerpts —
+which is exactly the "big dump" profile the shape-spec is meant to keep out of model context.
+
+## Shape decisions
+
+- `search_astro_docs` → **unwrap `["search_results"]`**, `return_container: "list"`,
+  `return_model: AstroDocSearchResult`. The envelope has a single key wrapping the record list,
+  so the unwrap path is unambiguous and the container is a list rather than a dict.
+  All four fields were promoted as plain `str`: each was observed on every record across both
+  queries, all are top-level scalars, and none was ever null. Nothing deeper was modelled — the
+  records are flat, so there is no second level to under-describe. `source: live`.
+- `probed_args` needed no scrubbing: both values are public free-text search queries with no
+  identifier, path, or PII component.
 
 ## Verification
 
-The regenerated module parses cleanly under `ast.parse`, and the eval target holds:
-`search_astro_docs` reads `-> list[AstroDocSearchResult]` rather than `Any`, and its body
-digs `('search_results',)`. `run.py` is the harness verify stage's job and was not
-generated here.
+The regenerated module parses cleanly (`ast.parse` OK) and the eval target holds:
+`search_astro_docs` reads `-> list[AstroDocSearchResult]`, not `Any`, and its body digs the
+envelope through `_dig_list(result, ('search_results',))`. `run.py` was left to the harness's
+verify stage, as instructed.

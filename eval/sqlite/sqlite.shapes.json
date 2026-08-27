@@ -24,7 +24,7 @@
   },
   "list_tables": {
     "unwrap": [],
-    "return_model": "TableName",
+    "return_model": "TableRef",
     "return_container": "list",
     "input_overrides": {},
     "fields": {
@@ -40,17 +40,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "SELECT * FROM users"
-    },
-    "_observed_shape": [
-      {
-        "id": "int",
-        "name": "str",
-        "email": "str",
-        "active": "int",
-        "score": "float"
-      }
-    ],
-    "_shape_note": "Row keys are the caller's SELECT projection, not a server-fixed record. The observed shape above is one query's columns, not a type. Left as Any deliberately."
+      "query": "SELECT * FROM users LIMIT 3"
+    }
   }
 }

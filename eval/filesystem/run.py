@@ -26,19 +26,20 @@ async def main() -> None:
         # Skipped read-only tool without probed args: read_media_file (needs a real
         # image/audio file inside the allowed root; none was probed).
         # All args below come from filesystem.verify.json (real, pre-scrub probe args).
-        # No tool in this server has a discriminated return shape, so one call each.
+        # No tool has a discriminated return shape; read_text_file was probed with two
+        # arg variants (full read, head=5), so both are exercised.
 
         # list_allowed_directories -> Any
         allowed = await filesystem.list_allowed_directories(caller)
         print(f"list_allowed_directories: {type(allowed).__name__}")
 
         # list_directory -> Any
-        listing = await filesystem.list_directory(caller, path="/private/tmp")
+        listing = await filesystem.list_directory(caller, path="/private/tmp/_base")
         print(f"list_directory: {type(listing).__name__}")
 
         # list_directory_with_sizes -> Any
         sized = await filesystem.list_directory_with_sizes(
-            caller, path="/private/tmp", sortBy="name"
+            caller, path="/private/tmp/_base/eval_harness", sortBy="name"
         )
         print(f"list_directory_with_sizes: {type(sized).__name__}")
 
@@ -55,25 +56,41 @@ async def main() -> None:
 
         # search_files -> Any
         matches = await filesystem.search_files(
-            caller, path="/private/tmp", pattern="m.txt"
+            caller, path="/private/tmp/_base", pattern="*.py"
         )
         print(f"search_files: {type(matches).__name__}")
 
         # get_file_info -> Any
-        info = await filesystem.get_file_info(caller, path="/private/tmp/m.txt")
+        info = await filesystem.get_file_info(
+            caller, path="/private/tmp/_base/eval_harness/versions.py"
+        )
         print(f"get_file_info: {type(info).__name__}")
 
-        # read_text_file -> Any
-        text = await filesystem.read_text_file(caller, path="/private/tmp/m.txt")
+        # read_text_file -> Any  (variant 1: whole file)
+        text = await filesystem.read_text_file(
+            caller, path="/private/tmp/_base/eval_harness/versions.py"
+        )
         print(f"read_text_file: {type(text).__name__}")
 
+        # read_text_file -> Any  (variant 2: head=5)
+        head = await filesystem.read_text_file(
+            caller, path="/private/tmp/_base/eval_harness/manifest.py", head=5
+        )
+        print(f"read_text_file(head=5): {type(head).__name__}")
+
         # read_file -> Any
-        raw = await filesystem.read_file(caller, path="/private/tmp/m.txt")
+        raw = await filesystem.read_file(
+            caller, path="/private/tmp/_base/eval_harness/versions.py"
+        )
         print(f"read_file: {type(raw).__name__}")
 
         # read_multiple_files -> Any
         multi = await filesystem.read_multiple_files(
-            caller, paths=["/private/tmp/m.txt", "/private/tmp/e.txt"]
+            caller,
+            paths=[
+                "/private/tmp/_base/eval_harness/versions.py",
+                "/private/tmp/_base/tests/__init__.py",
+            ],
         )
         print(f"read_multiple_files: {type(multi).__name__}")
 

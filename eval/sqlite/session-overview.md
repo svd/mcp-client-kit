@@ -2,67 +2,66 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T05:57:28Z
-- **Duration:** 2m 26s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T08:30:39Z
+- **Duration:** 7m 59s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Setup
+## Tool inventory
 
-Resolved CLI: `uv run mcpgen` (0.9.0.dev1) — clears both the 0.3.0 floor and the 0.7.0
-runner floor. Transport: stdio via `MCPGEN_SERVERS=.mcp.eval.json`. No seed commands were
-configured; the `/tmp/eval.db` store already held two tables (`users`, `products`, one row
-each) left by an earlier run, so probing found real data without any mutating call.
-A stale `sqlite.shapes.json` from that earlier run was deleted before step 1 so the stubs
-were generated blind, as a fresh run requires.
+`mcpgen list sqlite --schema` returned **6 tools**. The server supplies no `annotations`, so
+classification fell back to the keyword test plus a semantic read of each description:
 
-## Tool selection
+- `read_query` — SELECT only, read-only
+- `list_tables` — read-only
+- `describe_table` — read-only
+- `write_query` — **MUTATING** (INSERT/UPDATE/DELETE)
+- `create_table` — **MUTATING** (DDL)
+- `append_insight` — **MUTATING** ("Add … to the memo"; `append` is on the mutating keyword list)
 
-The server exposes **6 tools**, none carrying `annotations` — so the keyword + semantic
-fallback decided every verdict.
+Selected set: the three read-only tools; the three mutating tools were skipped entirely and
+never probed. No seed commands were configured; `/tmp/eval.db` already held `users` and
+`products` from an earlier run, so every read tool had real rows to return. Three selected
+tools is under the fan-out threshold, so the run stayed single-driver.
 
-- Probed (3): `read_query`, `list_tables`, `describe_table`
-- Skipped (3): see `## mutating-skipped`
+**Discriminators: N/A.** `list --schema` emitted no advisory on stderr, and the precondition
+confirms why: the only parameter shared by two or more tools is `query` (`read_query`,
+`write_query`, `create_table`), which sits on the engine denylist. `table_name` and `insight`
+each appear on a single tool. Pass 2 was therefore skipped.
 
-`discriminators: N/A`. The only cross-tool shared parameter is `query`
-(`read_query`/`write_query`/`create_table`), which is on the engine's own denylist, so no
-candidate could clear the precondition and no advisory fired. Step 2.e Pass 2 was skipped.
+## Probes and responses
 
-## mutating-skipped
+Bootstrapping used `mcpgen call sqlite list_tables --out …probe-raw.json`, which returned
+`[{"name": "users"}, {"name": "products"}]` — real table names to feed `describe_table`. Three
+probes then went out batched in one local-stdio invocation (no pacing needed): `list_tables`
+with `{}`, `describe_table` multi-probed against both `users` and `products`, and `read_query`
+with `SELECT * FROM users LIMIT 3`.
 
-- `write_query` — name contains `write`; no readOnlyHint
-- `create_table` — name contains `create`; no readOnlyHint
-- `append_insight` — name contains `append`; no readOnlyHint
-
-## Observations
-
-Every response is a bare JSON array at the top level — no vendor envelope anywhere on this
-server, so `unwrap` is empty for all three tools and no `_dig_list` helper is emitted. That
-is the honest result, not a missed unwrap.
-
-`describe_table` was multi-probed against both tables. Its rows are `PRAGMA table_info`
-output: `cid`, `name`, `type`, `notnull`, `dflt_value`, `pk`. `dflt_value` came back null in
-all ten observed columns, so it merged to `Any | None` — the type is genuinely unobserved,
-and widening it to `str | None` from zero non-null samples would have been a guess.
-`notnull` and `pk` are SQLite integers, not booleans, and are typed as such.
+The one surprise was a pleasant one: **this server wraps nothing.** All three payloads arrived
+as bare top-level JSON lists of row dicts — no `data`/`results`/`content` envelope, and no
+double-encoded JSON string. Every `unwrap` is therefore `[]`, and the generated bodies are
+plain casts rather than `_dig_list` calls.
 
 ## Shape decisions
 
-- **`list_tables`** → `list[TableName]`, unwrap `[]`, fields `{name: str}`. Trivial and
-  stable; the array is the record.
-- **`describe_table`** → `list[ColumnInfo]`, unwrap `[]`, six fields as above. Distinct
-  name from `TableName` despite both carrying `name`, since the field sets differ.
-- **`read_query`** → deliberately left `-> Any`. Its row keys are the caller's own `SELECT`
-  projection, not a server-fixed record: the probe observed
-  `{id, name, email, active, score}` only because the query was `SELECT * FROM users`. Any
-  `TypedDict` minted from that would misdescribe every other query. The observed shape is
-  kept in the spec under `_observed_shape` with a `_shape_note` recording why it was not
-  promoted to a model.
+- **`list_tables` → `list[TableRef]`** (`name: str`). Unwrap `[]`; the response is already the
+  record list. One field, fully observed.
+- **`describe_table` → `list[ColumnInfo]`** (`cid: int`, `name: str`, `type: str`,
+  `notnull: int`, `dflt_value: Any | None`, `pk: int`). Unwrap `[]`. This is `PRAGMA
+  table_info` output, so the shape is stable across tables — the two-table multi-probe merged
+  to an identical key set, which is the evidence for that claim. `dflt_value` was `None` in
+  every observed column, so its non-null type is genuinely unknown and stays `Any | None`
+  rather than being guessed as `str`.
+- **`read_query` → `Any`** (deliberate, not a coverage gap). The probe did return a clean
+  `list[{id: int, name: str, email: str, active: int, score: float}]`, but those columns are an
+  artifact of the SQL the caller passed, not of the tool. Typing `read_query` as
+  `list[UserRow]` would misdescribe every other SELECT, so `return_model` stays `null` with
+  empty `fields`. This is the "don't state authoritative lies" guard applied to a tool whose
+  response shape is caller-determined by construction.
 
-`probed_args` hold table names and a standard SQL statement — functional values, no PII, so
-nothing was scrubbed.
+`probed_args` needed no scrubbing: table names, an empty dict, and a plain SELECT are all
+functional values, not PII.
 
 ## Verification
 
-Regeneration succeeded; `ast.parse` clean. `describe_table` reads
-`-> list[ColumnInfo]` and `list_tables` reads `-> list[TableName]`; the three mutating
-tools remain untouched `-> Any` stubs. `sqlite.verify.json` carries args for
-`describe_table` and `read_query` (`list_tables` takes none, so merge omits it).
+Regeneration picked up the sidecar (`shapes: … (3 tool(s))`) and `ast.parse` succeeded.
+`describe_table` and `list_tables` now read `-> list[ColumnInfo]` / `-> list[TableRef]`; the
+three mutating tools and `read_query` remain `-> Any` as intended.

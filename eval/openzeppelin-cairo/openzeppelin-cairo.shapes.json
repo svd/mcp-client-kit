@@ -19,10 +19,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyContract"
+      "name": "Registry"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 1733
+    "_observed_bytes": 1731
   },
   "cairo-erc1155": {
     "unwrap": [],
@@ -32,10 +32,10 @@
     "source": "live",
     "probed_args": {
       "name": "MyMultiToken",
-      "baseUri": "https://example.com/tokens/"
+      "baseUri": "https://example.com/metadata/{id}.json"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2988
+    "_observed_bytes": 2999
   },
   "cairo-erc20": {
     "unwrap": [],
@@ -45,8 +45,7 @@
     "source": "live",
     "probed_args": {
       "name": "MyToken",
-      "symbol": "MTK",
-      "decimals": "18"
+      "symbol": "MTK"
     },
     "_observed_shape": "str",
     "_observed_bytes": 2285
@@ -99,12 +98,12 @@
     "source": "live",
     "probed_args": {
       "name": "MyVesting",
-      "startDate": "2026-01-01T00:00:00",
-      "duration": "90 day",
-      "cliffDuration": "30 day",
+      "startDate": "2026-01-01T00:00",
+      "duration": "365 days",
+      "cliffDuration": "90 days",
       "schedule": "linear"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 1659
+    "_observed_bytes": 1663
   }
 }

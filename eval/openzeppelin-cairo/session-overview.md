@@ -2,53 +2,54 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T06:06:59Z
-- **Duration:** 3m 36s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T08:48:14Z
+- **Duration:** 4m 7s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface
+## Tool inventory
 
-`mcpgen list --schema` returned **8 tools**, all of them contract-source generators:
+The server exposes **8 tools**, all of them Cairo contract-source generators:
 `cairo-erc20`, `cairo-erc721`, `cairo-erc1155`, `cairo-account`, `cairo-multisig`,
-`cairo-governor`, `cairo-vesting`, `cairo-custom`. No tool carries an `annotations`
-block, so the keyword + semantic fallback decided mutability. **Nothing was flagged
-mutating**: no tool name contains a mutating whole word (`cairo-*` prefix plus a
-standard name), and every description ends with the same sentence — *"Returns the
-source code of the generated contract, formatted in a Markdown code block. Does not
-write to disk."* All 8 were selected and all 8 were probed; none skipped.
+`cairo-governor`, `cairo-vesting`, `cairo-custom`.
 
-Enum-constrained params were probed with their first declared value
-(`cairo-account.type="stark"`, `cairo-vesting.schedule="linear"`). Codegen rendered
-those and `cairo-governor`'s four enums as `Literal[...]` automatically.
+No tool carries `annotations`, so classification fell back to the keyword plus semantic read.
+Every description ends with the same sentence — *"Returns the source code of the generated
+contract, formatted in a Markdown code block. Does not write to disk."* The `cairo-*` verbs
+("Make a …") read as mutating on keywords alone, but the explicit *does not write to disk*
+contract settles it: these are pure template renderers. **All 8 were selected and probed; none
+were skipped.** No seed commands were configured, and none were needed.
 
 ## Discriminators
 
-The `list` advisory raised six candidates: `appName`, `appVersion`, `baseUri`,
-`decimals`, `name`, `symbol`. All six survived Pass 1 — none is on the engine denylist
-and none matches the camelCase pagination/sort/path additions. Pass 2 probed
-`cairo-erc20` at three distinct `decimals` values (`"6"`, `"18"`, `"0"`), holding
-`name` and `symbol` fixed: **all three observed identically as `"str"`** (2344 / 2285 /
-2344 bytes — a byte-count difference, not a shape difference). That is *inconclusive,
-not disproven*, so the sibling tools stay polymorphic-suspect on paper. Resolution is
-**option 3 (unwrap-only / `Any`)** and is not a compromise here: these parameters
-change the *content* of the emitted Cairo source, never its container. A plain scalar
-return has no dict variants to discriminate over.
+The `list --schema` advisory flagged six candidates: `name` (all 8 tools), `symbol`, `appName`,
+`appVersion` (3 tools each), `baseUri`, and `decimals` (2 each). Pass 1 disqualified none by
+name.
+
+Pass 2 ran on `name` — the broadest candidate — against `cairo-custom`, probing three distinct
+values (`MyContract`, `Vault`, `Registry`) as separate paced invocations. All three returned
+`_observed_shape: "str"` (1733 / 1728 / 1731 bytes; the byte deltas track the contract name's
+length, not the shape). By the strict rule this is **inconclusive, not disproven** — but it is
+moot here: the response is a bare scalar string, so there is no structure for any discriminator
+to switch. All six candidates are content parameters that steer the rendered source text, not
+the response shape. Resolved as **option 3, unwrap-only**, and recorded as unconfirmed.
 
 ## Shape decisions
 
-Every probe returned a genuine success payload — a fenced ` ```cairo ` block of real
-Starknet contract source, 1.6 KB to 5.9 KB. The `_observed_shape == "str"` path
-triggered the JSON-in-string test; a raw `call --out` capture on `cairo-erc20` came back
-`NOT_JSON` (`JSONDecodeError`), confirming prose rather than a double-encoded record.
-So for all 8 entries: `unwrap: []`, `return_model: null`, `fields: {}`, `source:
-"live"`, `_observed_shape: "str"` retained as evidence. No `_probe_status:
-"inconclusive"` marker applies — these are observed successes, not error-only responses.
+Identical for all 8 tools: `unwrap: []`, `return_model: null`, `fields: {}`.
 
-Nothing needed scrubbing: `probed_args` hold only invented contract names (`MyToken`,
-`MyGovernor`), an `example.com` base URI, and functional scalars.
+The JSON-in-string test on the raw `cairo-custom` payload returned `NOT_JSON` — the body is a
+literal ` ```cairo ` fenced block of Starknet source, not a double-encoded record. That is an
+expected outcome, not a probe failure, so `_observed_shape: "str"` stands and no model was
+invented. `_observed_shape` / `_observed_bytes` were kept as evidence that these are genuine
+text-returning tools rather than inconclusive probes.
+
+Every probe returned a real success payload (1663–5936 bytes). `cairo-vesting`, the smallest,
+was spot-checked raw and contains `LinearVestingSchedule`, matching its probed `schedule:
+"linear"`. **No `_probe_status: inconclusive` markers were needed.** `probed_args` are synthetic
+placeholders throughout — no PII to scrub.
 
 ## Verification
 
-The regenerated module is 41 470 bytes, `ast.parse` clean, exporting 8 async wrappers
-that all correctly read `-> Any` with zero `TypedDict` classes. This is the honest
-outcome — a server whose entire surface returns prose is a true `no_shaped_tool_by_design`
-N/A for roundtrip, not a coverage gap.
+`ast.parse` clean. All 8 wrappers are `-> Any`, no `TypedDict`s and no `_dig` emitted — correct,
+since nothing has an envelope. Input typing did benefit: enum params render as
+`Literal['stark', 'eth']` and `Literal['linear', 'custom']`. This server is
+**`no_shaped_tool_by_design`**: every tool returns prose, so `Any` is the honest return type.

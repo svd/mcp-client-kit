@@ -6,7 +6,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repo_path": "<example-repo-path>",
+      "repo_path": "/path/to/repo",
       "branch_type": "local"
     },
     "_observed_shape": "str",
@@ -20,11 +20,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repo_path": "<example-repo-path>",
-      "target": "main"
+      "repo_path": "/path/to/repo",
+      "target": "HEAD~1"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2040927,
+    "_observed_bytes": 651171,
     "probe_args_scrubbed": true
   },
   "git_diff_staged": {
@@ -34,7 +34,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repo_path": "<example-repo-path>"
+      "repo_path": "/path/to/repo"
     },
     "_observed_shape": "str",
     "_observed_bytes": 19,
@@ -47,10 +47,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repo_path": "<example-repo-path>"
+      "repo_path": "/path/to/repo"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 206116,
+    "_observed_bytes": 215318,
     "probe_args_scrubbed": true
   },
   "git_log": {
@@ -60,11 +60,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repo_path": "<example-repo-path>",
-      "max_count": 3
+      "repo_path": "/path/to/repo",
+      "max_count": 5
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2549,
+    "_observed_bytes": 4182,
     "probe_args_scrubbed": true
   },
   "git_show": {
@@ -74,11 +74,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repo_path": "<example-repo-path>",
+      "repo_path": "/path/to/repo",
       "revision": "HEAD"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 3331,
+    "_observed_bytes": 436613,
     "probe_args_scrubbed": true
   },
   "git_status": {
@@ -88,10 +88,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repo_path": "<example-repo-path>"
+      "repo_path": "/path/to/repo"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2187,
+    "_observed_bytes": 2302,
     "probe_args_scrubbed": true
   }
 }

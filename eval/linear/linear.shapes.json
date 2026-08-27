@@ -1,93 +1,68 @@
 {
-  "get_workspace": {
+  "extract_images": {
     "unwrap": [],
-    "return_model": "Workspace",
+    "return_model": null,
     "input_overrides": {},
-    "fields": {
-      "id": "str",
-      "name": "str",
-      "url": "str"
-    },
-    "source": "live",
-    "probed_args": {}
-  },
-  "get_team": {
-    "unwrap": [],
-    "return_model": "Team",
-    "input_overrides": {},
-    "fields": {
-      "id": "str",
-      "name": "str",
-      "createdAt": "str",
-      "updatedAt": "str"
-    },
+    "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "<example-team-name>"
-    },
-    "probe_args_scrubbed": true
+      "markdown": "![alt](https://example.com/a.png)"
+    }
   },
-  "list_teams": {
-    "unwrap": [
-      "teams"
-    ],
-    "return_model": "Team",
-    "input_overrides": {},
-    "fields": {
-      "id": "str",
-      "name": "str",
-      "createdAt": "str",
-      "updatedAt": "str"
-    },
-    "source": "live",
-    "probed_args": {},
-    "return_container": "list"
-  },
-  "get_user": {
+  "get_agent_skill": {
     "unwrap": [],
-    "return_model": "User",
+    "return_model": null,
     "input_overrides": {},
-    "fields": {
-      "id": "str",
-      "name": "str",
-      "email": "str",
-      "displayName": "str",
-      "avatarUrl": "str",
-      "isAdmin": "bool",
-      "isGuest": "bool",
-      "isActive": "bool",
-      "createdAt": "str",
-      "updatedAt": "str",
-      "status": "str"
-    },
+    "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "<example-user-query>"
+      "id": "00000000-0000-0000-0000-000000000000"
     },
-    "probe_args_scrubbed": true
+    "_probe_status": "inconclusive"
   },
-  "list_users": {
-    "unwrap": [
-      "users"
-    ],
-    "return_model": "User",
+  "get_attachment": {
+    "unwrap": [],
+    "return_model": null,
     "input_overrides": {},
-    "fields": {
-      "id": "str",
-      "name": "str",
-      "email": "str",
-      "displayName": "str",
-      "avatarUrl": "str",
-      "isAdmin": "bool",
-      "isGuest": "bool",
-      "isActive": "bool",
-      "createdAt": "str",
-      "updatedAt": "str",
-      "status": "str"
-    },
+    "fields": {},
     "source": "live",
-    "probed_args": {},
-    "return_container": "list"
+    "probed_args": {
+      "id": "00000000-0000-0000-0000-000000000000"
+    },
+    "_probe_status": "inconclusive"
+  },
+  "get_diff": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "urlOrId": "https://github.com/microsoft/vscode/pull/1"
+    },
+    "_probe_status": "inconclusive"
+  },
+  "get_diff_threads": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "urlOrId": "https://github.com/microsoft/vscode/pull/1"
+    },
+    "_probe_status": "inconclusive"
+  },
+  "get_document": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "id": "00000000-0000-0000-0000-000000000000"
+    },
+    "_probe_status": "inconclusive"
   },
   "get_issue": {
     "unwrap": [],
@@ -116,13 +91,243 @@
       "teamId": "str",
       "labels": "list",
       "attachments": "list",
-      "documents": "list"
+      "documents": "list",
+      "stateHistory": "list"
     },
     "source": "live",
     "probed_args": {
       "id": "<example-issue-id>"
     },
     "probe_args_scrubbed": true
+  },
+  "get_issue_status": {
+    "unwrap": [],
+    "return_model": "IssueStatus",
+    "input_overrides": {},
+    "fields": {
+      "id": "str",
+      "type": "str",
+      "name": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "id": "<example-status-id>",
+      "name": "Done",
+      "team": "<example-team>"
+    },
+    "probe_args_scrubbed": true
+  },
+  "get_milestone": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "project": "test",
+      "query": "test"
+    },
+    "_probe_status": "inconclusive"
+  },
+  "get_project": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "query": "test"
+    },
+    "_probe_status": "inconclusive"
+  },
+  "get_release": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "id": "00000000-0000-0000-0000-000000000000"
+    },
+    "_probe_status": "inconclusive"
+  },
+  "get_release_note": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "id": "00000000-0000-0000-0000-000000000000"
+    },
+    "_probe_status": "inconclusive"
+  },
+  "get_status_updates": {
+    "unwrap": [
+      "statusUpdates"
+    ],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "type": "project",
+      "limit": 3
+    },
+    "return_container": "list"
+  },
+  "get_team": {
+    "unwrap": [],
+    "return_model": "Team",
+    "input_overrides": {},
+    "fields": {
+      "id": "str",
+      "name": "str",
+      "createdAt": "str",
+      "updatedAt": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "<example-team>"
+    },
+    "probe_args_scrubbed": true
+  },
+  "get_user": {
+    "unwrap": [],
+    "return_model": "User",
+    "input_overrides": {},
+    "fields": {
+      "id": "str",
+      "name": "str",
+      "email": "str",
+      "displayName": "str",
+      "avatarUrl": "str",
+      "isAdmin": "bool",
+      "isGuest": "bool",
+      "isActive": "bool",
+      "createdAt": "str",
+      "updatedAt": "str",
+      "status": "str",
+      "teams": "list"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "<example-team>"
+    },
+    "probe_args_scrubbed": true
+  },
+  "get_workspace": {
+    "unwrap": [],
+    "return_model": "Workspace",
+    "input_overrides": {},
+    "fields": {
+      "id": "str",
+      "name": "str",
+      "url": "str"
+    },
+    "source": "live",
+    "probed_args": {}
+  },
+  "list_agent_skills": {
+    "unwrap": [
+      "agentSkills"
+    ],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "limit": 3
+    },
+    "return_container": "list"
+  },
+  "list_comments": {
+    "unwrap": [
+      "comments"
+    ],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "issueId": "<example-issue-id>",
+      "limit": 3
+    },
+    "probe_args_scrubbed": true,
+    "return_container": "list"
+  },
+  "list_cycles": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "teamId": "<example-team-id>",
+      "type": "current"
+    },
+    "probe_args_scrubbed": true,
+    "return_container": "list"
+  },
+  "list_diffs": {
+    "unwrap": [
+      "diffs"
+    ],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "limit": 3
+    },
+    "return_container": "list"
+  },
+  "list_documents": {
+    "unwrap": [
+      "documents"
+    ],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "limit": 3
+    },
+    "return_container": "list"
+  },
+  "list_issue_labels": {
+    "unwrap": [
+      "labels"
+    ],
+    "return_model": "IssueLabel",
+    "input_overrides": {},
+    "fields": {
+      "id": "str",
+      "name": "str",
+      "color": "str",
+      "description": "Any | None"
+    },
+    "source": "live",
+    "probed_args": {
+      "limit": 3
+    },
+    "return_container": "list"
+  },
+  "list_issue_statuses": {
+    "unwrap": [],
+    "return_model": "IssueStatus",
+    "input_overrides": {},
+    "fields": {
+      "id": "str",
+      "type": "str",
+      "name": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "team": "<example-team>"
+    },
+    "probe_args_scrubbed": true,
+    "return_container": "list"
   },
   "list_issues": {
     "unwrap": [
@@ -159,68 +364,27 @@
     },
     "return_container": "list"
   },
-  "list_issue_labels": {
+  "list_milestones": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "project": "test"
+    },
+    "_probe_status": "inconclusive"
+  },
+  "list_project_labels": {
     "unwrap": [
       "labels"
     ],
-    "return_model": "IssueLabel",
+    "return_model": null,
     "input_overrides": {},
-    "fields": {
-      "id": "str",
-      "name": "str",
-      "color": "str",
-      "description": "Any | None"
-    },
-    "source": "live",
-    "probed_args": {},
-    "return_container": "list"
-  },
-  "list_issue_statuses": {
-    "unwrap": [],
-    "return_model": "IssueStatus",
-    "input_overrides": {},
-    "fields": {
-      "id": "str",
-      "type": "str",
-      "name": "str"
-    },
+    "fields": {},
     "source": "live",
     "probed_args": {
-      "team": "<example-team-name>"
-    },
-    "return_container": "list",
-    "probe_args_scrubbed": true
-  },
-  "get_issue_status": {
-    "unwrap": [],
-    "return_model": "IssueStatus",
-    "input_overrides": {},
-    "fields": {
-      "id": "str",
-      "type": "str",
-      "name": "str"
-    },
-    "source": "live",
-    "probed_args": {
-      "id": "<example-issue-status-id>",
-      "name": "In Review",
-      "team": "<example-team-name>"
-    },
-    "probe_args_scrubbed": true
-  },
-  "search_documentation": {
-    "unwrap": [],
-    "return_model": "DocumentationSearchResult",
-    "input_overrides": {},
-    "fields": {
-      "id": "str",
-      "title": "str",
-      "url": "str",
-      "snippet": "str"
-    },
-    "source": "live",
-    "probed_args": {
-      "query": "issue statuses"
+      "limit": 3
     },
     "return_container": "list"
   },
@@ -232,84 +396,10 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {},
-    "return_container": "list",
-    "_inner_unobserved": "store empty at probe time"
-  },
-  "list_project_labels": {
-    "unwrap": [
-      "labels"
-    ],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {},
-    "return_container": "list",
-    "_inner_unobserved": "store empty at probe time"
-  },
-  "list_documents": {
-    "unwrap": [
-      "documents"
-    ],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {},
-    "return_container": "list",
-    "_inner_unobserved": "store empty at probe time"
-  },
-  "list_comments": {
-    "unwrap": [
-      "comments"
-    ],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
     "probed_args": {
-      "issueId": "<example-issue-id>"
+      "limit": 3
     },
-    "return_container": "list",
-    "probe_args_scrubbed": true,
-    "_inner_unobserved": "store empty at probe time"
-  },
-  "list_diffs": {
-    "unwrap": [
-      "diffs"
-    ],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {},
-    "return_container": "list",
-    "_inner_unobserved": "store empty at probe time"
-  },
-  "list_agent_skills": {
-    "unwrap": [
-      "agentSkills"
-    ],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {},
-    "return_container": "list",
-    "_inner_unobserved": "store empty at probe time"
-  },
-  "list_releases": {
-    "unwrap": [
-      "releases"
-    ],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {},
-    "return_container": "list",
-    "_inner_unobserved": "store empty at probe time"
+    "return_container": "list"
   },
   "list_release_notes": {
     "unwrap": [
@@ -319,9 +409,10 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {},
-    "return_container": "list",
-    "_inner_unobserved": "store empty at probe time"
+    "probed_args": {
+      "limit": 3
+    },
+    "return_container": "list"
   },
   "list_release_pipelines": {
     "unwrap": [
@@ -331,68 +422,81 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {},
-    "return_container": "list",
-    "_inner_unobserved": "store empty at probe time"
-  },
-  "list_cycles": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
     "probed_args": {
-      "teamId": "<example-team-id>",
-      "type": "next"
-    },
-    "return_container": "list",
-    "probe_args_scrubbed": true,
-    "_inner_unobserved": "store empty at probe time"
-  },
-  "get_status_updates": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "type": "project",
       "limit": 3
-    }
+    },
+    "return_container": "list"
   },
-  "get_project": {
-    "unwrap": [],
+  "list_releases": {
+    "unwrap": [
+      "releases"
+    ],
     "return_model": null,
     "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "<example-team-name>"
+      "limit": 3
     },
-    "probe_args_scrubbed": true,
-    "_probe_status": "inconclusive"
+    "return_container": "list"
   },
-  "list_milestones": {
-    "unwrap": [],
-    "return_model": null,
+  "list_teams": {
+    "unwrap": [
+      "teams"
+    ],
+    "return_model": "Team",
     "input_overrides": {},
-    "fields": {},
+    "fields": {
+      "id": "str",
+      "name": "str",
+      "createdAt": "str",
+      "updatedAt": "str"
+    },
     "source": "live",
     "probed_args": {
-      "project": "<example-team-name>"
+      "limit": 3
     },
-    "probe_args_scrubbed": true,
-    "_probe_status": "inconclusive"
+    "return_container": "list"
   },
-  "get_document": {
-    "unwrap": [],
-    "return_model": null,
+  "list_users": {
+    "unwrap": [
+      "users"
+    ],
+    "return_model": "UserSummary",
     "input_overrides": {},
-    "fields": {},
+    "fields": {
+      "id": "str",
+      "name": "str",
+      "email": "str",
+      "displayName": "str",
+      "avatarUrl": "str",
+      "isAdmin": "bool",
+      "isGuest": "bool",
+      "isActive": "bool",
+      "createdAt": "str",
+      "updatedAt": "str",
+      "status": "str"
+    },
     "source": "live",
     "probed_args": {
-      "id": "nonexistent-doc"
+      "limit": 3
     },
-    "_probe_status": "inconclusive"
+    "return_container": "list"
+  },
+  "search_documentation": {
+    "unwrap": [],
+    "return_model": "DocumentationHit",
+    "input_overrides": {},
+    "fields": {
+      "id": "str",
+      "title": "str",
+      "url": "str",
+      "snippet": "str"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "webhooks"
+    },
+    "return_container": "list"
   }
 }

@@ -1,23 +1,4 @@
 {
-  "get_content": {
-    "unwrap": ["Items"],
-    "return_container": "list",
-    "return_model": "ContentItem",
-    "input_overrides": {},
-    "fields": {
-      "Site": "str",
-      "Type": "str",
-      "Id": "str",
-      "Data": "dict",
-      "OriginalRequest": "str"
-    },
-    "source": "live",
-    "probed_args": [
-      {"query": "SO_Q54987361"},
-      {"query": "SO_A54987732"},
-      {"query": "SO_Q54987361, SO_A75156486"}
-    ]
-  },
   "so_search": {
     "unwrap": ["items"],
     "return_container": "list",
@@ -33,12 +14,31 @@
       "answer_count": "int",
       "is_answered": "bool",
       "accepted_answer_id": "int",
-      "creation_date": "int"
+      "creation_date": "int",
+      "tags": "list",
+      "answers": "list",
+      "owner": "dict"
     },
     "source": "live",
-    "probed_args": [
-      {"query": "python asyncio gather exception handling"},
-      {"query": "rust borrow checker lifetime elision"}
-    ]
+    "probed_args": {
+      "query": "python asyncio gather exception handling"
+    }
+  },
+  "get_content": {
+    "unwrap": ["Items"],
+    "return_container": "list",
+    "return_model": "ContentItem",
+    "input_overrides": {},
+    "fields": {
+      "Site": "str",
+      "Type": "str",
+      "Id": "str",
+      "OriginalRequest": "str",
+      "Data": "dict"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "SO_Q54987361 SO_A54987732"
+    }
   }
 }

@@ -2,59 +2,54 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T05:57:27Z
-- **Duration:** 3m 54s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T08:30:39Z
+- **Duration:** 8m 38s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Tool inventory
+## Surface
 
-`mcpgen list deepwiki --schema` returned **3 tools**, all probed, none skipped:
+`mcpgen list deepwiki --schema` reported **3 tools**: `ask_question`, `read_wiki_contents`,
+`read_wiki_structure`. The server publishes no `annotations` block, so classification fell back
+to the keyword plus semantic read: all three are pure reads over a public documentation index —
+`ask`/`read` verbs, no create/update/delete surface — so **all 3 were selected and probed, 0
+skipped**. No seed commands were configured, and none were needed: DeepWiki's store is the
+public GitHub corpus, already populated.
 
-```
-Tools on deepwiki:
-  ask_question         — Ask any question about a GitHub repository and get an AI-powered, context-grounded response.
-  read_wiki_contents   — View documentation about a GitHub repository.
-  read_wiki_structure  — Get a list of documentation topics for a GitHub repository.
-```
+**Discriminators: N/A.** All three tools share `repoName`, but the engine's Pass-1 denylist drops
+`reponame` on a lowercased exact match, so no advisory fired on the `list --schema` stderr and no
+candidate cleared the precondition. Nothing was left polymorphic-suspect.
 
-No tool carries an `annotations` block, so mutation classification fell through to the
-keyword test plus a semantic read of each description. Splitting the names on `_` yields
-`ask`/`question`, `read`/`wiki`/`contents`, `read`/`wiki`/`structure` — no whole word is on
-the mutating list, and all three descriptions describe reads. Nothing was flagged, so no
-`_mutating_suspect` markers were added and `mutating-skipped` is empty.
+Probe argument for every tool was the real public repo `facebook/react`; `ask_question` also took
+the free-text question "What is the fiber reconciler?". Probes were issued as separate, paced
+invocations because this is a hosted HTTP endpoint.
 
-**discriminators: N/A.** `repoName` is the only parameter shared by more than one tool, and
-it fails the advisory precondition twice over: `reponame` is one of the five identity forms
-the engine denylists, and on `ask_question` it is expressed through `anyOf` rather than a
-top-level scalar `"type"`. The `list --schema` stderr carried no advisory, confirming this.
-Pass 2 was therefore skipped outright.
+## Responses
 
-All three tools were probed against the public repo `modelcontextprotocol/servers` — a real,
-well-documented target — with the ≥ 2 s hosted-endpoint pacing between calls.
+Every tool returned a bare `str`, at three very different sizes: 1,441 bytes for
+`read_wiki_structure`, 2,883 for `ask_question`, and **635,591** for `read_wiki_contents` — the
+full rendered wiki for one repository in a single response, easily the most notable observation of
+the run.
 
-## Surprises
-
-Every probe came back `_observed_shape: "str"`. Because a text payload collapses to a bare
-`"str"` and the words are lost, each tool's raw payload was captured with `mcpgen call --out`
-and run through the JSON-in-string guard: all three returned `NOT_JSON` (`JSONDecodeError`).
-Reading the payload heads confirmed they are genuine successes — a Markdown topic outline, a
-Markdown prose answer, and a 373 KB Markdown wiki dump — not quota, auth, or 404 error text.
-So `_observed_shape: "str"` is left as plain evidence of a real text-returning tool; no
-`_probe_status: inconclusive` marker was warranted.
-
-The size spread is the notable result: `read_wiki_structure` 1.2 KB, `ask_question` 2.0 KB,
-`read_wiki_contents` 394 KB. Codegen picked the last one up from `_observed_bytes` and emitted
-a payload-size warning into its docstring.
+Because `_observed_shape == "str"` is also the signature of a double-encoded payload, each tool's
+raw response was captured with `mcpgen call --out` and JSON-tested. All three came back
+`NOT_JSON`: `read_wiki_structure` is a plain indented topic outline, `read_wiki_contents` is
+Markdown with `# Page:` headers and `<details>` blocks, and `ask_question` is an AI-authored prose
+answer with inline citations. There is no vendor envelope anywhere on this server — nothing to
+unwrap, and no record to promote.
 
 ## Shape decisions
 
-deepwiki has **no shapeable tool by design**. For all three: `unwrap: []` (no vendor envelope
-exists — the MCP content block holds the Markdown directly), `return_model: null`, `fields: {}`,
-`return_container` omitted. Setting a `TypedDict` on any of them would claim a dict the wrapper
-never returns; `-> Any` over a `str` is the honest signature. No `input_overrides` were needed —
-`ask_question`'s `anyOf` correctly renders `repoName: Any`, since the server genuinely accepts
-either a string or a list of up to ten.
+Identical for all three tools: `unwrap` empty, `return_model` `null`, `fields` empty,
+`source: "live"`. Minting a `TypedDict` here would state an authoritative lie about a payload that
+is genuinely free text. `_observed_shape: "str"` is retained as evidence, and deliberately *not*
+recorded as `_probe_status: "inconclusive"` — every probe returned a real success payload, so the
+`str` is an observed fact, not an unobserved shape.
 
-`probed_args` needed no scrubbing: a public repo slug and an authored question string are
-functional values, not PII.
+One honest `Any` remains: `ask_question`'s `repoName` is declared `anyOf: [string, array<string>]`,
+so codegen types it `Any`. No `input_override` was added — the schema is not lying, it really does
+accept both, and narrowing it would be invention rather than a correction.
 
-The regenerated module parsed cleanly (`ast.parse` OK).
+## Result
+
+The regenerated module parses cleanly (`ast.parse` OK) and exposes all 3 async wrappers, each
+returning `Any` by design. This server is a `no_shaped_tool_by_design` case: zero shaped tools is
+the correct outcome, not a coverage gap.

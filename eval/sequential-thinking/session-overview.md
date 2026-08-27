@@ -1,54 +1,59 @@
-# sequential-thinking — session overview
+# sequential-thinking — eval session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T06:01:39Z
-- **Duration:** 3m 0s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T08:40:22Z
+- **Duration:** 4m 21s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Server surface
+## Surface
 
-`sequential-thinking` exposes exactly **one tool**, `sequentialthinking`, and it was probed.
-Nothing was skipped: the tool carries agreeing annotations (`readOnlyHint: true`,
-`destructiveHint: false`, `idempotentHint: true`), and the keyword test finds no mutating
-word in the name, so the hint stands undisputed and the tool entered the selected set on
-the default path. `mutating-skipped`: none. `discriminators: N/A` — a candidate needs a
-scalar parameter shared by two or more tools, and this server has only one tool, so the
-`list --schema` advisory could not fire.
+The server exposes **one tool**, `sequentialthinking`. It carries full MCP annotations —
+`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true` — so step 2b cleared it
+on the annotation alone, with no keyword or semantic fallback needed. Selected set: 1/1 tools
+probed, 0 skipped. No mutating tools exist on this server, so nothing was withheld.
+
+**Discriminators: N/A.** The candidate precondition needs two or more tools declaring the same
+scalar parameter; with a single tool it cannot be met, and `list --schema` emitted no advisory
+on stderr. Nothing was polymorphic-suspect.
 
 ## Probing
 
-Three live calls in one `probe` invocation, all against the same server process so the
-server's own state accumulated across them: a plain first thought, a branch
-(`branchFromThought: 1`, `branchId: "alt-a"`), and a closing thought with
-`nextThoughtNeeded: false`. The multi-probe was deliberate — it is the only way to see
-`branches` non-empty, since the first call returns it as `[]`.
+One `probe` invocation with two `--args` sets, deep-merged: a plain thought
+(`thoughtNumber: 1`), and a branched thought carrying `branchFromThought`, `branchId`,
+`isRevision`, and `needsMoreThoughts`. The second set exists purely to make `branches`
+non-empty — the first probe alone returns `branches: []`, leaving its element type
+unobservable.
 
-The one surprise is what the tool returns. Its description is entirely about prose
-reasoning, so a text payload would be the obvious guess; instead every call returns a
-small JSON **status object** describing the thinking session — the thought counter, the
-caller's own `nextThoughtNeeded` echoed back, the list of branch ids, and a running
-`thoughtHistoryLength`. The prose the tool is named for goes to the server's stderr as a
-boxed banner, not into the response. Payload size was 117 bytes. A second surprise, minor:
-`nextThoughtNeeded` is described as a core parameter yet is absent from
-`inputSchema.required`, so the generated signature makes it optional.
-
-No errors, no empty results, no rate limiting. The `npx` cold start printed the server's
-own stdout banner between frames; the probe succeeded, so that is noise.
+Two things were worth noting. First, the tool renders an ASCII thought box to **stderr** on
+every call; that is display noise, never part of the payload, and it is why the run kept
+stdout and stderr strictly separate throughout. Second, the response is transported as a
+JSON-encoded string inside the MCP text block, but the seam parses it before handing it back —
+`_observed_shape` came back as a dict, and the raw `call --out` capture was already an object.
+So this is **not** the JSON-in-string case: no `unwrap` path is needed to trigger runtime
+parsing, and `return_model` is legitimate with an empty `unwrap`.
 
 ## Shape decision
 
-- **`sequentialthinking` → `ThoughtStatus`** (single dict, no `return_container`).
-  `unwrap` stays `[]`: the parsed payload *is* the record, with no vendor envelope over
-  it, so inventing a key path would make `_dig` return a field instead of the record.
-  `fields` keeps the four observed top-level scalars plus `branches: list[str]` — the
-  element type is not a guess, it was observed carrying the `"alt-a"` branch id in probes
-  2 and 3. `input_overrides` is empty; the schema's `integer`/`boolean` declarations
-  matched what came back, so nothing was lied about. `probed_args` needed no scrubbing:
-  the thoughts are invented free text and the branch id is a label, with no ids, paths, or
-  PII anywhere.
+Single tool, single model:
 
-## Outcome
+- **`unwrap`: `[]`** — the record arrives at the top level; there is no vendor envelope.
+- **`return_model`: `ThoughtProgress`** — a new, non-colliding name for the progress receipt
+  the tool returns (it acknowledges bookkeeping, it does not echo the thought back).
+- **`return_container`**: omitted — the record is a single dict, not a list.
+- **`fields`**: the four observed top-level scalars (`thoughtNumber`, `totalThoughts`,
+  `nextThoughtNeeded`, `thoughtHistoryLength`) plus a hand-added `"branches": "list"`. The
+  skeleton drops non-scalars; `branches` was observed as a list of strings (branch ids), but
+  `fields` admits only the bare `"list"` escape, so the element type is recorded here rather
+  than in the spec.
+- **`input_overrides`**: `{}` — the input schema is honest. `integer` and `boolean` map
+  cleanly; nothing was mistyped.
 
-Regeneration with the shape-spec parsed cleanly (`ast.parse` OK). The wrapper now reads
-`-> ThoughtStatus` instead of `-> Any`, with `ThoughtStatus` rendered as a `total=False`
-`TypedDict`. `run.py` was intentionally not generated — the harness's verify stage owns it.
+No scrubbing was required: `probed_args` holds only authored prose and the literal branch id
+`alt-a`, none of it PII.
+
+## Result
+
+Regeneration picked the sidecar up by auto-detection. The module `ast.parse`s cleanly, emits
+`class ThoughtProgress(TypedDict, total=False)`, and the wrapper signature reads
+`-> ThoughtProgress` with a `cast(...)` over `caller.call` — the correct emission for an empty
+`unwrap`, where no `_dig` is warranted. Runner generation was left to the harness verify stage.

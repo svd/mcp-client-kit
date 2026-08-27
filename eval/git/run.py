@@ -55,8 +55,8 @@ async def main() -> None:
         print(f"git_branch(local): {type(branches).__name__}, {len(str(branches))} char(s)")
 
         # git_log -> Any  (observed: str)
-        log = await git_wrappers.git_log(caller, repo_path=REPO_PATH, max_count=3)
-        print(f"git_log(max_count=3): {type(log).__name__}, {len(str(log))} char(s)")
+        log = await git_wrappers.git_log(caller, repo_path=REPO_PATH, max_count=5)
+        print(f"git_log(max_count=5): {type(log).__name__}, {len(str(log))} char(s)")
 
         # git_show -> Any  (observed: str)
         show = await git_wrappers.git_show(caller, repo_path=REPO_PATH, revision="HEAD")
@@ -71,8 +71,8 @@ async def main() -> None:
         print(f"git_diff_staged: {len(str(staged))} char(s)")
 
         # git_diff -> Any  (observed: str)
-        diff = await git_wrappers.git_diff(caller, repo_path=REPO_PATH, target="main")
-        print(f"git_diff(target=main): {len(str(diff))} char(s)")
+        diff = await git_wrappers.git_diff(caller, repo_path=REPO_PATH, target="HEAD~1")
+        print(f"git_diff(target=HEAD~1): {len(str(diff))} char(s)")
 
 
 if __name__ == "__main__":

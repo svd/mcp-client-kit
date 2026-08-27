@@ -5,8 +5,8 @@ Auth: none
 
 Args come from eval/fetch/fetch.verify.json (real, pre-scrub probe args).
 No tool in fetch.shapes.json declares a discriminator, but `fetch` was probed
-with two argument variants (markdown extraction vs. `raw=True` HTML), so it is
-called once per probed variant.
+with three argument variants (markdown extraction, `raw=True` HTML, and a
+`start_index` continuation), so it is called once per probed variant.
 
 Usage:
     python eval/fetch/run.py
@@ -42,11 +42,20 @@ async def main() -> None:
 
         # fetch -> Any  (observed shape: str — raw=True, unsimplified HTML)
         raw_html = await fetch.fetch(
-            caller, url="https://example.com", raw=True, max_length=2000
+            caller, url="https://example.com", max_length=2000, raw=True
         )
         print(
             f"fetch(raw): {type(raw_html).__name__} "
             f"({len(str(raw_html))} chars)"
+        )
+
+        # fetch -> Any  (observed shape: str — start_index continuation window)
+        window = await fetch.fetch(
+            caller, url="https://example.com", max_length=200, start_index=100
+        )
+        print(
+            f"fetch(start_index=100): {type(window).__name__} "
+            f"({len(str(window))} chars)"
         )
 
 

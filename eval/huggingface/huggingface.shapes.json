@@ -5,18 +5,30 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "operations": [
-        {
-          "cmd": "ls",
-          "args": [
-            "hf://models/trending",
-            "--limit",
-            "5"
-          ]
-        }
-      ]
-    },
+    "probed_args": [
+      {
+        "operations": [
+          {
+            "cmd": "ls",
+            "args": [
+              "hf://models/trending",
+              "--limit",
+              "5"
+            ]
+          }
+        ]
+      },
+      {
+        "operations": [
+          {
+            "cmd": "stat",
+            "args": [
+              "hf://models/openai/gpt-oss-120b"
+            ]
+          }
+        ]
+      }
+    ],
     "_observed_shape": "str",
     "_observed_bytes": 1035
   },
@@ -36,21 +48,31 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "repo_ids": [
-        "openai/gpt-oss-120b"
-      ],
-      "repo_type": "model"
-    },
+    "probed_args": [
+      {
+        "repo_ids": [
+          "openai/gpt-oss-120b"
+        ],
+        "repo_type": "model"
+      },
+      {
+        "repo_ids": [
+          "stanfordnlp/imdb"
+        ],
+        "repo_type": "dataset",
+        "operations": [
+          "overview",
+          "dataset_structure"
+        ]
+      }
+    ],
     "_observed_shape": "str",
-    "_observed_bytes": 1961
+    "_observed_bytes": 4337
   },
   "hub_repo_search": {
     "unwrap": [],
     "return_model": null,
-    "input_overrides": {
-      "limit": "int"
-    },
+    "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {

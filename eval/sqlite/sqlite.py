@@ -23,7 +23,7 @@ class ColumnInfo(TypedDict, total=False):
     pk: int
 
 
-class TableName(TypedDict, total=False):
+class TableRef(TypedDict, total=False):
     name: str
 
 
@@ -63,9 +63,9 @@ async def describe_table(caller: McpCaller, *, table_name: str) -> list[ColumnIn
 describe_table.__schema__ = {'type': 'object', 'properties': {'table_name': {'type': 'string', 'description': 'Name of the table to describe'}}, 'required': ['table_name']}
 
 
-async def list_tables(caller: McpCaller) -> list[TableName]:
+async def list_tables(caller: McpCaller) -> list[TableRef]:
     """List all tables in the SQLite database"""
-    return cast("list[TableName]", await caller.call(SERVER, "list_tables", {}))
+    return cast("list[TableRef]", await caller.call(SERVER, "list_tables", {}))
 
 list_tables.__schema__ = {'type': 'object', 'properties': {}}
 

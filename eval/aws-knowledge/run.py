@@ -3,11 +3,15 @@ Smoke-test runner for generated aws-knowledge/ wrappers.
 Transport: Streamable HTTP  (https://knowledge-mcp.global.api.aws)
 Auth: none (public endpoint)
 
-Args come from aws-knowledge.verify.json (real, pre-scrub probe args).
-aws___get_regional_availability declares a discriminator (resource_type) with
-three variants; only "cfn" was probed, so the "api" and "product" calls below
-use no `filters` — the catalog-listing form the tool docs prescribe when exact
-filter names are unknown — rather than guessed filter values.
+Args come from aws-knowledge.verify.json (real, pre-scrub probe args), falling
+back to aws-knowledge.shapes.json probed_args where verify.json records only one
+of several probed forms.
+
+No tool in aws-knowledge.shapes.json declares a `discriminator`/`variants` block,
+so each tool gets one call — except aws___search_documentation, whose shape entry
+records two probed arg sets (`topics=['general']` and `topics=['agent_skills']`)
+that return different record shapes unioned into one total=False model. Both are
+called so each probed response shape is exercised.
 
 Usage:
     python eval/aws-knowledge/run.py
@@ -42,7 +46,7 @@ async def main() -> None:
     async with caller.connected():
         # Skipped mutating tools: none — every aws-knowledge tool is read-only.
 
-        # aws___list_regions -> list[Region]
+        # aws___list_regions -> list[Region]  (no args)
         regions = await aws_knowledge.aws___list_regions(caller)
         print(f"list_regions: {len(regions)} region(s)")
         if regions:
@@ -52,41 +56,74 @@ async def main() -> None:
                 f"region_long_name={first.get('region_long_name')!r}"
             )
 
-        # aws___search_documentation -> list[SearchResultItem]  (general topic)
-        docs_hits = await aws_knowledge.aws___search_documentation(
+        # aws___get_regional_availability -> Any
+        # unwrap stops at content.result: a map keyed by AWS product name ->
+        # {status: str}. The outer key under `result` varies with resource_type
+        # (products | service_apis | cfn_resources), so nothing below result is
+        # typed. Args from verify.json.
+        availability = await aws_knowledge.aws___get_regional_availability(
+            caller,
+            resource_type="product",
+            regions=["us-east-1"],
+        )
+        print(f"get_regional_availability(product): {type(availability).__name__}")
+        if isinstance(availability, dict):
+            keys = list(availability)
+            print(f"  {len(keys)} key(s); first: {keys[:3]!r}")
+
+        # aws___search_documentation -> list[SearchResultItem]
+        # Probed form 1 (shapes.json probed_args[0]): doc topics -> records carry
+        # {rank_order, title, context, url}.
+        doc_hits = await aws_knowledge.aws___search_documentation(
             caller,
             search_phrase="S3 bucket versioning",
             limit=3,
+            topics=["general"],
         )
-        print(f"search_documentation(general): {len(docs_hits)} result(s)")
-        if docs_hits:
-            top = docs_hits[0]
+        print(f"search_documentation(general): {len(doc_hits)} result(s)")
+        if doc_hits:
+            top = doc_hits[0]
             print(
                 f"  top: rank_order={top.get('rank_order')!r} "
                 f"title={top.get('title')!r} url={top.get('url')!r}"
             )
 
-        # aws___search_documentation -> list[SearchResultItem]  (agent_skills topic)
+        # aws___search_documentation -> list[SearchResultItem]
+        # Probed form 2 (verify.json): topics=['agent_skills'] -> records carry
+        # {rank_order, title, skill_description, skill_name} instead.
         skill_hits = await aws_knowledge.aws___search_documentation(
             caller,
-            search_phrase="lambda best practices skill",
+            search_phrase="deploy serverless application skill workflow",
+            limit=5,
             topics=["agent_skills"],
-            limit=3,
         )
         print(f"search_documentation(agent_skills): {len(skill_hits)} result(s)")
         if skill_hits:
             top_skill = skill_hits[0]
             print(
-                f"  top: skill_name={top_skill.get('skill_name')!r} "
+                f"  top: rank_order={top_skill.get('rank_order')!r} "
+                f"skill_name={top_skill.get('skill_name')!r} "
                 f"skill_description={top_skill.get('skill_description')!r}"
             )
 
+        # aws___retrieve_skill -> Any
+        # unwrap is content.skill_content: the SKILL.md markdown as a plain
+        # string, not a record. Args from verify.json.
+        skill = await aws_knowledge.aws___retrieve_skill(
+            caller,
+            skill_name="aws-serverless",
+        )
+        print(f"retrieve_skill: {type(skill).__name__}")
+        if isinstance(skill, str):
+            print(f"  {len(skill)} char(s); starts: {skill[:60]!r}")
+
         # aws___read_documentation -> list[DocumentationPage]
+        # Args from verify.json.
         pages = await aws_knowledge.aws___read_documentation(
             caller,
             requests=[
                 {
-                    "url": "https://docs.aws.amazon.com/code-library/latest/ug/java_2_s3_code_examples.html",
+                    "url": "https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html",
                     "max_length": 2000,
                 }
             ],
@@ -96,60 +133,11 @@ async def main() -> None:
             page = pages[0]
             print(
                 f"  page: status={page.get('status')!r} "
+                f"url={page.get('url')!r} "
                 f"total_length={page.get('total_length')} "
                 f"truncated={page.get('truncated')} "
                 f"error_code={page.get('error_code')!r}"
             )
-
-        # aws___retrieve_skill -> Any  (skill_name is an opaque registry ID)
-        skill = await aws_knowledge.aws___retrieve_skill(
-            caller,
-            skill_name="aws-lambda-durable-functions",
-        )
-        print(f"retrieve_skill: {type(skill).__name__}")
-
-        # aws___get_regional_availability -> CfnResourceAvailability  (resource_type='cfn')
-        cfn = await aws_knowledge.aws___get_regional_availability(
-            caller,
-            resource_type="cfn",
-            regions=["us-east-1"],
-            filters=["AWS::Lambda::Function"],
-        )
-        print(
-            f"get_regional_availability(cfn): "
-            f"{len(cfn.get('cfn_resources') or {})} resource(s) "
-            f"next_token={cfn.get('next_token')!r} "
-            f"failed_regions={cfn.get('failed_regions')!r}"
-        )
-
-        # aws___get_regional_availability -> ServiceApiAvailability  (resource_type='api')
-        # Variant not probed: single region, no `filters` — the catalog-listing
-        # form the tool docs prescribe when exact filter names are unknown.
-        api = await aws_knowledge.aws___get_regional_availability(
-            caller,
-            resource_type="api",
-            regions=["us-east-1"],
-        )
-        print(
-            f"get_regional_availability(api): "
-            f"{len(api.get('service_apis') or {})} api(s) "
-            f"next_token={api.get('next_token')!r} "
-            f"failed_regions={api.get('failed_regions')!r}"
-        )
-
-        # aws___get_regional_availability -> ProductAvailability  (resource_type='product')
-        # Variant not probed: single region, no `filters` (see note above).
-        product = await aws_knowledge.aws___get_regional_availability(
-            caller,
-            resource_type="product",
-            regions=["us-east-1"],
-        )
-        print(
-            f"get_regional_availability(product): "
-            f"{len(product.get('products') or {})} product(s) "
-            f"next_token={product.get('next_token')!r} "
-            f"failed_regions={product.get('failed_regions')!r}"
-        )
 
 
 if __name__ == "__main__":

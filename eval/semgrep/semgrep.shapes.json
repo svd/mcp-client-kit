@@ -6,12 +6,12 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "code": "def f(x):\n    return x + 1\n",
+      "code": "def f():\n    return 1\n",
       "language": "python"
     },
     "_observed_shape": "str",
     "_observed_bytes": 473,
-    "_note": "[DEPRECATED] The hosted server no longer runs scans; every call returns the same 473-byte plain-text deprecation notice. The str return is permanent and fully observed, not a transient failure."
+    "_probe_status": "inconclusive"
   },
   "get_supported_languages": {
     "unwrap": [],
@@ -22,101 +22,23 @@
     "probed_args": {},
     "_observed_shape": "str",
     "_observed_bytes": 473,
-    "_note": "[DEPRECATED] Returns the same 473-byte plain-text deprecation notice as the other three deprecated tools; the language list is no longer served."
+    "_probe_status": "inconclusive"
   },
   "semgrep_findings": {
-    "unwrap": [
-      "findings"
-    ],
-    "return_container": "list",
+    "unwrap": [],
     "return_model": null,
-    "discriminator": "issue_type",
-    "variants": {
-      "ISSUE_TYPE_SAST": {
-        "return_model": "SastFinding",
-        "fields": {
-          "id": "int",
-          "created_at": "str",
-          "ref": "str",
-          "syntactic_id": "str",
-          "match_based_id": "str",
-          "rule_id": "int",
-          "status": "str",
-          "relevant_since": "str",
-          "aggregate_state": "str",
-          "line_of_code_url": "str",
-          "file_path": "str",
-          "line": "int",
-          "end_line": "int",
-          "column": "int",
-          "end_column": "int",
-          "severity": "str",
-          "message": "str",
-          "rule_path": "str",
-          "confidence": "str",
-          "rule_url": "str",
-          "external_ticket": "Any | None",
-          "triageState": "str",
-          "isBlocking": "bool",
-          "ruleOrigin": "str",
-          "ruleHashId": "str",
-          "ruleset": "str",
-          "policySlug": "str",
-          "category": "str",
-          "issueType": "str",
-          "issueParentId": "str",
-          "triagePermission": "str"
-        }
-      },
-      "ISSUE_TYPE_SCA": {
-        "return_model": "ScaFinding",
-        "fields": {
-          "id": "int",
-          "created_at": "str",
-          "ref": "str",
-          "syntactic_id": "str",
-          "match_based_id": "str",
-          "rule_id": "int",
-          "status": "str",
-          "relevant_since": "str",
-          "aggregate_state": "str",
-          "line_of_code_url": "str",
-          "file_path": "str",
-          "line": "int",
-          "end_line": "int",
-          "column": "int",
-          "end_column": "int",
-          "severity": "str",
-          "message": "str",
-          "rule_path": "str",
-          "confidence": "str",
-          "rule_url": "str",
-          "external_ticket": "Any | None",
-          "triageState": "str",
-          "note": "str",
-          "vulnGroupKey": "str",
-          "isBlocking": "bool",
-          "ruleOrigin": "str",
-          "ruleHashId": "str",
-          "category": "str",
-          "issueType": "str",
-          "issueParentId": "str",
-          "triagePermission": "str"
-        }
-      }
-    },
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probe_args_scrubbed": true,
     "probed_args": {
       "repos": [
-        "<example-owner>/<example-repo>"
+        "semgrep/semgrep"
       ],
-      "issue_type": "ISSUE_TYPE_SAST",
-      "limit": 5
+      "limit": 3
     },
-    "_note": "Envelope is {findings: [...], total_findings: int}; unwrap drops total_findings. issue_type is a confirmed response-shape discriminator (SAST carries ruleset/policySlug/sastAttributes, SCA carries note/vulnGroupKey/scaAttributes/relatedIssues); it was NOT flagged by the step-2.e advisory because only one tool declares it. ISSUE_TYPE_SECRETS was probed and returned the bare string 'No findings found' (no secrets findings exist in this deployment), so its variant shape is unobserved and deliberately omitted. Nested dicts (repository, first_seen_scan, last_seen_scan, aiTags, sastAttributes, scaAttributes) and list fields are left untyped per the depth guard. An empty result is prose, not [], so _dig_list normalises it to []."
+    "_observed_shape": "str",
+    "_observed_bytes": 19,
+    "_probe_status": "inconclusive"
   },
   "semgrep_rule_schema": {
     "unwrap": [],
@@ -126,8 +48,7 @@
     "source": "live",
     "probed_args": {},
     "_observed_shape": "str",
-    "_observed_bytes": 37225,
-    "_note": "Genuine text-returning tool: the payload is a ~35 KB YAML/JSON-schema document served as a plain string. JSON-in-string test returned NOT_JSON (it is commented YAML), so no unwrap applies."
+    "_observed_bytes": 37225
   },
   "semgrep_scan_remote": {
     "unwrap": [],
@@ -138,14 +59,14 @@
     "probed_args": {
       "code_files": [
         {
-          "filename": "app.py",
+          "filename": "a.py",
           "content": "import os\nos.system(input())\n"
         }
       ]
     },
     "_observed_shape": "str",
     "_observed_bytes": 473,
-    "_note": "[DEPRECATED] Returns the same 473-byte plain-text deprecation notice; no scan result shape is observable from the hosted server."
+    "_probe_status": "inconclusive"
   },
   "semgrep_scan_with_custom_rule": {
     "unwrap": [],
@@ -156,20 +77,19 @@
     "probed_args": {
       "code_files": [
         {
-          "filename": "app.py",
+          "filename": "a.py",
           "content": "import os\nos.system(input())\n"
         }
       ],
-      "rule": "rules:\n  - id: os-system\n    pattern: os.system(...)\n    message: os.system call\n    languages: [python]\n    severity: WARNING\n"
+      "rule": "rules:\n  - id: t\n    pattern: os.system(...)\n    message: m\n    languages: [python]\n    severity: WARNING\n"
     },
     "_observed_shape": "str",
     "_observed_bytes": 473,
-    "_note": "[DEPRECATED] Returns the same 473-byte plain-text deprecation notice; no scan result shape is observable from the hosted server."
+    "_probe_status": "inconclusive"
   },
   "semgrep_whoami": {
     "unwrap": [],
     "return_model": "SemgrepIdentity",
-    "return_container": null,
     "input_overrides": {},
     "fields": {
       "sub": "Any | None",
@@ -181,6 +101,6 @@
     },
     "source": "live",
     "probed_args": {},
-    "_note": "Record is returned unwrapped at top level. authDetails is a list of provider dicts, left untyped per the depth guard. sub and client_id were observed only as null."
+    "_observed_bytes": 372
   }
 }

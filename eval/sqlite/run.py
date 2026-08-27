@@ -26,22 +26,22 @@ async def main() -> None:
     async with caller.connected():
         # Skipped mutating tools: append_insight, create_table, write_query
 
-        # list_tables -> list[TableName]  (no args)
+        # list_tables -> list[TableRef]  (no args)
         tables = await sqlite.list_tables(caller)
         print(f"list_tables: {len(tables)} table(s)")
 
-        # describe_table -> list[ColumnInfo]  (probed args: table_name='users')
+        # describe_table -> list[ColumnInfo]  (probe 1: table_name='users')
         cols_users = await sqlite.describe_table(caller, table_name="users")
         print(f"describe_table(users): {len(cols_users)} column(s)")
 
-        # describe_table -> list[ColumnInfo]  (probed args: table_name='products')
+        # describe_table -> list[ColumnInfo]  (probe 2: table_name='products')
         cols_products = await sqlite.describe_table(caller, table_name="products")
         print(f"describe_table(products): {len(cols_products)} column(s)")
 
-        # read_query -> Any  (probed args: query='SELECT * FROM users')
+        # read_query -> Any  (probed args: query='SELECT * FROM users LIMIT 3')
         # Row keys follow the caller's SELECT projection, so the shape spec
         # leaves this Any on purpose.
-        rows = await sqlite.read_query(caller, query="SELECT * FROM users")
+        rows = await sqlite.read_query(caller, query="SELECT * FROM users LIMIT 3")
         print(f"read_query: {type(rows).__name__} with {len(rows)} row(s)")
 
 

@@ -13,8 +13,13 @@
       "source_type": "str"
     },
     "source": "live",
-    "probed_args": {
-      "query": "view transitions"
-    }
+    "probed_args": [
+      {
+        "query": "content collections"
+      },
+      {
+        "query": "view transitions astro:page-load"
+      }
+    ]
   }
 }

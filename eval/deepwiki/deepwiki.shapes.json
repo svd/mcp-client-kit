@@ -6,11 +6,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repoName": "modelcontextprotocol/servers",
-      "question": "What transports does the MCP specification define?"
+      "repoName": "facebook/react",
+      "question": "What is the fiber reconciler?"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 1986
+    "_observed_bytes": 2883
   },
   "read_wiki_contents": {
     "unwrap": [],
@@ -19,10 +19,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repoName": "modelcontextprotocol/servers"
+      "repoName": "facebook/react"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 394357
+    "_observed_bytes": 635591
   },
   "read_wiki_structure": {
     "unwrap": [],
@@ -31,9 +31,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "repoName": "modelcontextprotocol/servers"
+      "repoName": "facebook/react"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 1190
+    "_observed_bytes": 1441
   }
 }

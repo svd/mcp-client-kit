@@ -23,9 +23,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp/m.txt"
+      "path": "/private/tmp/_base/eval_harness/versions.py"
     },
-    "_observed_bytes": 266
+    "_observed_bytes": 267
   },
   "list_allowed_directories": {
     "unwrap": [],
@@ -43,9 +43,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp"
+      "path": "/private/tmp/_base"
     },
-    "_observed_bytes": 13742
+    "_observed_bytes": 33
   },
   "list_directory_with_sizes": {
     "unwrap": [],
@@ -54,10 +54,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp",
+      "path": "/private/tmp/_base/eval_harness",
       "sortBy": "name"
     },
-    "_observed_bytes": 22585
+    "_observed_bytes": 408
   },
   "read_file": {
     "unwrap": [],
@@ -66,9 +66,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp/m.txt"
+      "path": "/private/tmp/_base/eval_harness/versions.py"
     },
-    "_observed_bytes": 331
+    "_observed_bytes": 4034
   },
   "read_multiple_files": {
     "unwrap": [],
@@ -78,11 +78,11 @@
     "source": "live",
     "probed_args": {
       "paths": [
-        "/private/tmp/m.txt",
-        "/private/tmp/e.txt"
+        "/private/tmp/_base/eval_harness/versions.py",
+        "/private/tmp/_base/tests/__init__.py"
       ]
     },
-    "_observed_bytes": 713
+    "_observed_bytes": 4130
   },
   "read_text_file": {
     "unwrap": [],
@@ -90,10 +90,16 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "path": "/private/tmp/m.txt"
-    },
-    "_observed_bytes": 331
+    "probed_args": [
+      {
+        "path": "/private/tmp/_base/eval_harness/versions.py"
+      },
+      {
+        "path": "/private/tmp/_base/eval_harness/manifest.py",
+        "head": 5
+      }
+    ],
+    "_observed_bytes": 4034
   },
   "search_files": {
     "unwrap": [],
@@ -102,9 +108,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp",
-      "pattern": "m.txt"
+      "path": "/private/tmp/_base",
+      "pattern": "*.py"
     },
-    "_observed_bytes": 20
+    "_observed_bytes": 18
   }
 }

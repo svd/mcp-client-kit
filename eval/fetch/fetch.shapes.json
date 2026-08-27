@@ -12,8 +12,13 @@
       },
       {
         "url": "https://example.com",
-        "raw": true,
-        "max_length": 2000
+        "max_length": 2000,
+        "raw": true
+      },
+      {
+        "url": "https://example.com",
+        "max_length": 200,
+        "start_index": 100
       }
     ],
     "_observed_shape": "str",

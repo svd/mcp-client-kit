@@ -2,66 +2,67 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T06:00:34Z
-- **Duration:** 17m 23s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T08:39:55Z
+- **Duration:** 18m 20s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Coverage
+## Surface and selection
 
-The server exposes **44 tools** (the manifest's note of 35 is stale). Every tool carries
-`annotations.readOnlyHint`: **27 read-only selected, 17 mutating skipped** unprobed.
-
-One judgment call: `idempotentHint: false` appears on *all 44* tools, reads and writes alike.
-Read literally it would trip the self-contradiction check on every read-only tool and drop
-coverage to zero. Being uniform across the whole surface, it carries no per-tool information —
-it is the MCP spec default (meaningful only when `readOnlyHint` is false), not a server
-contradicting itself. Hints trusted. `destructiveHint: true` appears only on `delete_file`.
+`mcpgen list github --schema` returned **44 tools** (the manifest note still says 35). Every
+tool carries `annotations.readOnlyHint`, so classification needed no keyword heuristics:
+**27 read-only, 17 mutating**. All 17 mutating tools were skipped. Hosted-HTTP probes are
+serial and paced at ≥2 s, so the read-only set was pruned by one — `run_secret_scanning`
+uploads file *content* to a scanner and carries no record worth a `TypedDict`.
+**26 tools probed, 18 skipped.**
 
 ## Discriminators
 
-Of 16 advisory candidates, Pass 1 dropped pagination/window params and the all-mutating sets.
-Pass 2 probed the rest: **`sha`** (3 commits) differed only by an optional `deletions` key
-nested in `files[]` — identity ref, not a discriminator. **`tag`** (3 tags) was identical:
-inconclusive, resolved as one base model. **`state`** on `list_pull_requests` showed `closed`
-carrying `assignees`/`closed_at`/`merged_at`/`milestone`, but `all` matched `open` — the
-variance follows record content, not the argument, so option 2 (base model, `total=False`).
+The `list` advisory named 16 candidates. Pass 1 disqualified `after`, `head`, `perPage`, and
+`since`. Seven survivors went to Pass 2 (21 paced probes, three values each): `sha`, `state`,
+`tag`, `name`, `issue_number`, `pullNumber`, `base`. `name` and `tag` came back identical
+(inconclusive). The other five "differed" only through **optional-field sparsity** —
+`assignees` absent on an unassigned issue, `closed_at`/`merged_at` absent on an open PR,
+`[<empty>]` where a branch filter matched nothing, one error string for an inaccessible `sha`.
+None is response-shape polymorphism, so all five were union-merged into one `total=False`
+model rather than minting variants.
 
-Two real discriminators the advisory *could not* raise, since `method` is denylisted:
-**`pull_request_read`** (9 methods) and **`issue_read`** (5). All 14 variants were probed
-separately. Payloads differ radically — `get` a dict, `get_files`/`get_commits`/`get_reviews`
-lists, `get_diff` a bare **string**, `get_check_runs` its own envelope.
-
-**Engine gap — the headline finding.** `_render_overloaded` reads `return_container` once per
-tool and applies it to all variants, so a tool spanning dict/list/str cannot be typed
-faithfully. Both were resolved to **option 3 (unwrap-only `Any`)** rather than emitting
-overloads that type-error on 5 of 9 valid `pull_request_read` calls. Per-variant
-`return_container` would unlock both. `get_commit.detail` (3 values) stayed one base model:
-its variants differ only in non-scalar keys (`stats`, `files`) that `fields` cannot express.
+The real discriminators are the `method` params, which the engine denylists and never flags:
+`issue_read` (5 values) and `pull_request_read` (9 values) return genuinely unrelated payloads
+per method. `get_commit.detail` (3 values) is a third. **All 17 variants were probed.**
 
 ## Shape decisions
 
-**21 of 27** probed tools are typed across **20 TypedDicts** (`Release` shared by
-`get_latest_release` and `get_release_by_tag`, fields verified identical).
+The six `search_*` tools wrap records under `items` → `unwrap:["items"]`,
+`return_container:"list"`, one `Search*Item` model each. `list_issues` is the odd one out — a
+GraphQL-style `{issues, totalCount, pageInfo}` envelope → `unwrap:["issues"]`. Every other list
+tool returns a bare top-level array (`unwrap:[]`). `get_latest_release` and
+`get_release_by_tag` returned byte-identical shapes and share one `Release` model.
 
-- **Envelope unwraps:** `list_issues` → `unwrap: ["issues"]`; the six `search_*` tools →
-  `unwrap: ["items"]`. All `return_container: "list"`, digging via `_dig_list`.
-- **Bare lists** (`list_commits`, `list_tags`, `list_branches`, `list_releases`,
-  `list_pull_requests`, `list_issue_types`, `get_teams`) need no unwrap. Notably
-  `list_pull_requests` returns a bare list where `list_issues` returns an envelope — the same
-  server is inconsistent between sibling tools.
+Three tools were deliberately left `Any`:
 
-Left untyped with cause: `get_file_contents` (returns `[status_string, resource-metadata]`;
-file bytes never appear — media rule), `list_issue_fields` (always `[]`, inner shape
-unobservable), and `get_team_members` / `list_repository_collaborators`, both marked
-`_probe_status: "inconclusive"` — the first returned `null`, the second `403 Resource not
-accessible by personal access token` on both `microsoft/vscode` *and* a repo the token owns,
-so it is a token-scope gap. One recovery: `list_issue_types` 404s at org level but succeeds
-when `repo` is supplied, turning an inconclusive entry into a real `list[IssueType]`.
+- **`issue_read` / `pull_request_read`** — every variant probed and recorded, but they mix
+  `dict`, `list`, and `str` returns. `return_container` is a **top-level** shape-spec field
+  shared by all variants, so a `variants` block would type the list-returning methods as the
+  dict union through the impl signature. Unwrap-only `Any` (step 4 option 3) beats that lie —
+  the run's most useful finding about the spec format.
+- **`get_commit`** — `detail` switches the payload only by adding *nested* `stats`/`files`
+  keys; `fields` promotes top-level scalars only, so three variant TypedDicts would have been
+  byte-identical. Resolved as a generic base model (option 2).
 
-## Verification
+## Surprises
 
-`ast.parse` clean and the module imports (104 KB, 44 wrappers). `list_issues` digs
-`('issues',)`, `search_code` digs `('items',)`, bare-list tools cast directly; all TypedDicts
-are `total=False`. Post-merge scrub replaced the PAT owner's login and org with
-`<example-owner>`/`<example-org>` (`probe_args_scrubbed: true`), keeping public
-`microsoft`/`vscode`, issue/PR numbers and SHAs as functional values; gitignored
-`github.verify.json` retains the real args for roundtrip.
+- `get_file_contents` returns a status string plus a `resource` metadata block with the bytes
+  stripped. Per the media rule it stays `Any`.
+- `get_release_by_tag` 404'd on a tag from `list_tags`: vscode's release tags (`1.135.0`) are
+  not its git tags (`v1.19.3`).
+- `list_issue_types` 404s at org scope for `microsoft`; it shapes cleanly with `repo` supplied.
+- Two tools produced no observable success payload and carry `_probe_status: inconclusive`:
+  `list_repository_collaborators` (403, PAT scope) and `get_team_members` (`null`).
+  `list_issue_fields` returned a genuine empty `[]`, so its element shape is unobservable — it
+  is `Any` with no inconclusive marker.
+
+`run.py` was not generated here — the harness verify stage owns it.
+
+## Result
+
+Module regenerated and `ast.parse`d clean (104 KB, 44 functions), imports without error, and
+emits **19 TypedDicts** across **20 shaped tools**.

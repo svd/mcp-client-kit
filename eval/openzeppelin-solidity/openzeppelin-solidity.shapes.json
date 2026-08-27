@@ -31,10 +31,10 @@
     "source": "live",
     "probed_args": {
       "name": "EvalMulti",
-      "uri": "https://example.com/{id}.json"
+      "uri": "https://example.com/token/{id}.json"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 556
+    "_observed_bytes": 562
   },
   "solidity-erc20": {
     "unwrap": [],
@@ -44,8 +44,7 @@
     "source": "live",
     "probed_args": {
       "name": "EvalToken",
-      "symbol": "EVT",
-      "decimals": "18"
+      "symbol": "EVT"
     },
     "_observed_shape": "str",
     "_observed_bytes": 428
@@ -57,7 +56,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "EvalNFT",
+      "name": "EvalNft",
       "symbol": "ENFT"
     },
     "_observed_shape": "str",
@@ -70,12 +69,12 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "EvalGov",
+      "name": "EvalGovernor",
       "delay": "1 day",
       "period": "1 week"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 3292
+    "_observed_bytes": 3302
   },
   "solidity-rwa": {
     "unwrap": [],
@@ -84,11 +83,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "EvalRWA",
-      "symbol": "ERWA"
+      "name": "EvalRwa",
+      "symbol": "EVR"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 423
+    "_observed_bytes": 422
   },
   "solidity-stablecoin": {
     "unwrap": [],
@@ -98,9 +97,9 @@
     "source": "live",
     "probed_args": {
       "name": "EvalStable",
-      "symbol": "EUSD"
+      "symbol": "EVS"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 432
+    "_observed_bytes": 431
   }
 }

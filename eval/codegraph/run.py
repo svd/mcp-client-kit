@@ -3,10 +3,6 @@ Smoke-test runner for generated codegraph/ wrappers.
 Transport: stdio  (codegraph serve --mcp)
 Auth: none
 
-Args come from codegraph.verify.json (real, pre-scrub probe args).
-No tool in codegraph.shapes.json declares a discriminator, so each tool is
-called exactly once.
-
 Usage:
     python eval/codegraph/run.py
 """
@@ -14,9 +10,7 @@ import asyncio
 import os
 import sys
 
-# The wrapper module sits next to this file (eval/codegraph/codegraph.py),
-# so the artifact dir itself is what has to be importable.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import codegraph
 
 from mcpgen import McpBridgeCaller
@@ -28,38 +22,53 @@ async def main() -> None:
     # One connection for the whole run: a single initialize() and a single
     # subprocess, instead of reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating tools: (none — all five codegraph tools are read-only)
+        # Skipped mutating tools: (none — every codegraph tool is read-only)
+        # Args are the real pre-scrub probe args from codegraph.verify.json.
+        # No tool is discriminated, so each is called exactly once.
+        # projectPath is omitted throughout: the probes ran against the current
+        # project, which is what the runner should smoke-test too.
 
-        # codegraph_search -> Any  (symbol lookup by name)
-        search = await codegraph.codegraph_search(caller, query="verify", limit=10)
-        print(f"codegraph_search: {type(search).__name__} ({len(str(search))} chars)")
-
-        # codegraph_node -> Any  (source/signature/docstring for one symbol)
-        node = await codegraph.codegraph_node(
-            caller, symbol="verify_server", includeCode=False
-        )
-        print(f"codegraph_node: {type(node).__name__} ({len(str(node))} chars)")
-
-        # codegraph_context -> Any  (PRIMARY: composed search + node + callers/callees)
-        ctx = await codegraph.codegraph_context(
+        # codegraph_search -> Any  (observed: str)
+        hits = await codegraph.codegraph_search(
             caller,
-            task="how does artifact verification work",
-            maxNodes=10,
+            query="verify_server",
+            limit=5,
+        )
+        print(f"codegraph_search: {type(hits).__name__} len={len(hits)}")
+
+        # codegraph_node -> Any  (observed: str)
+        node = await codegraph.codegraph_node(
+            caller,
+            symbol="verify_server",
             includeCode=True,
         )
-        print(f"codegraph_context: {type(ctx).__name__} ({len(str(ctx))} chars)")
+        print(f"codegraph_node: {type(node).__name__} len={len(node)}")
 
-        # codegraph_explore -> Any  (survey several related symbols in one capped call)
-        explore = await codegraph.codegraph_explore(
-            caller, query="verify_server cmd_verify", maxFiles=3
+        # codegraph_context -> Any  (observed: str)
+        context = await codegraph.codegraph_context(
+            caller,
+            task="how does verification work",
+            maxNodes=5,
+            includeCode=True,
         )
-        print(f"codegraph_explore: {type(explore).__name__} ({len(str(explore))} chars)")
+        print(f"codegraph_context: {type(context).__name__} len={len(context)}")
 
-        # codegraph_trace -> Any  ("how does <from_> reach <to>?")
-        trace = await codegraph.codegraph_trace(
-            caller, from_="cmd_verify", to="verify_server"
+        # codegraph_explore -> Any  (observed: str)
+        survey = await codegraph.codegraph_explore(
+            caller,
+            query="verify_server cmd_verify",
+            maxFiles=3,
         )
-        print(f"codegraph_trace: {type(trace).__name__} ({len(str(trace))} chars)")
+        print(f"codegraph_explore: {type(survey).__name__} len={len(survey)}")
+
+        # codegraph_trace -> Any  (observed: str)
+        # Wrapper renames the wire field "from" to the keyword `from_`.
+        path = await codegraph.codegraph_trace(
+            caller,
+            from_="verify_server",
+            to="check_ast",
+        )
+        print(f"codegraph_trace: {type(path).__name__} len={len(path)}")
 
 
 if __name__ == "__main__":

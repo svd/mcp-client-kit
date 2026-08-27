@@ -39,6 +39,7 @@ class Issue(TypedDict, total=False):
     labels: list
     attachments: list
     documents: list
+    stateHistory: list
 
 
 class IssueStatus(TypedDict, total=False):
@@ -66,6 +67,7 @@ class User(TypedDict, total=False):
     createdAt: str
     updatedAt: str
     status: str
+    teams: list
 
 
 class Workspace(TypedDict, total=False):
@@ -105,7 +107,21 @@ class IssueSummary(TypedDict, total=False):
     labels: list
 
 
-class DocumentationSearchResult(TypedDict, total=False):
+class UserSummary(TypedDict, total=False):
+    id: str
+    name: str
+    email: str
+    displayName: str
+    avatarUrl: str
+    isAdmin: bool
+    isGuest: bool
+    isActive: bool
+    createdAt: str
+    updatedAt: str
+    status: str
+
+
+class DocumentationHit(TypedDict, total=False):
     id: str
     title: str
     url: str
@@ -483,7 +499,8 @@ async def get_status_updates(caller: McpCaller, *, type: Literal['project', 'ini
         args["updatedAt"] = updatedAt
     if includeArchived is not None:
         args["includeArchived"] = includeArchived
-    return await caller.call(SERVER, "get_status_updates", args)
+    result = await caller.call(SERVER, "get_status_updates", args)
+    return _dig_list(result, ('statusUpdates', ))
 
 get_status_updates.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'limit': {'default': 50, 'description': 'Max results (default 50, max 250)', 'type': 'number', 'maximum': 250}, 'cursor': {'description': 'Next page cursor', 'type': 'string'}, 'orderBy': {'default': 'updatedAt', 'description': 'Sort: createdAt | updatedAt', 'type': 'string', 'enum': ['createdAt', 'updatedAt']}, 'type': {'type': 'string', 'enum': ['project', 'initiative'], 'description': 'Type of status update'}, 'id': {'description': 'Status update ID - if provided, returns this specific update', 'type': 'string'}, 'project': {'description': 'Project name, ID, identifier (e.g., PROJ-123), or slug', 'type': 'string'}, 'initiative': {'description': 'Initiative name, ID, identifier (e.g., INIT-123), or slug', 'type': 'string'}, 'user': {'description': 'User ID, name, email, or "me"', 'type': 'string'}, 'createdAt': {'description': 'Created after: ISO-8601 date/duration (e.g., -P1D)', 'type': 'string'}, 'updatedAt': {'description': 'Updated after: ISO-8601 date/duration (e.g., -P1D)', 'type': 'string'}, 'includeArchived': {'default': False, 'description': 'Include archived items', 'type': 'boolean'}}, 'required': ['type'], 'additionalProperties': False}
 
@@ -1058,7 +1075,7 @@ async def list_teams(caller: McpCaller, *, limit: float | None = None, cursor: s
 list_teams.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'limit': {'default': 50, 'description': 'Max results (default 50, max 250)', 'type': 'number', 'maximum': 250}, 'cursor': {'description': 'Next page cursor', 'type': 'string'}, 'orderBy': {'default': 'updatedAt', 'description': 'Sort: createdAt | updatedAt', 'type': 'string', 'enum': ['createdAt', 'updatedAt']}, 'query': {'description': 'Search query', 'type': 'string'}, 'includeArchived': {'default': False, 'description': 'Include archived items', 'type': 'boolean'}, 'createdAt': {'description': 'Created after: ISO-8601 date/duration (e.g., -P1D)', 'type': 'string'}, 'updatedAt': {'description': 'Updated after: ISO-8601 date/duration (e.g., -P1D)', 'type': 'string'}}, 'additionalProperties': False}
 
 
-async def list_users(caller: McpCaller, *, limit: float | None = None, cursor: str | None = None, orderBy: Literal['createdAt', 'updatedAt'] | None = None, query: str | None = None, team: str | None = None) -> list[User]:
+async def list_users(caller: McpCaller, *, limit: float | None = None, cursor: str | None = None, orderBy: Literal['createdAt', 'updatedAt'] | None = None, query: str | None = None, team: str | None = None) -> list[UserSummary]:
     """Retrieve users in the Linear workspace
 
     Args:
@@ -1080,7 +1097,7 @@ async def list_users(caller: McpCaller, *, limit: float | None = None, cursor: s
     if team is not None:
         args["team"] = team
     result = await caller.call(SERVER, "list_users", args)
-    return cast("list[User]", _dig_list(result, ('users', )))
+    return cast("list[UserSummary]", _dig_list(result, ('users', )))
 
 list_users.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'limit': {'default': 50, 'description': 'Max results (default 50, max 250)', 'type': 'number', 'maximum': 250}, 'cursor': {'description': 'Next page cursor', 'type': 'string'}, 'orderBy': {'default': 'updatedAt', 'description': 'Sort: createdAt | updatedAt', 'type': 'string', 'enum': ['createdAt', 'updatedAt']}, 'query': {'description': 'Filter by name or email', 'type': 'string'}, 'team': {'description': 'Team name or ID', 'type': 'string'}}, 'additionalProperties': False}
 
@@ -1554,7 +1571,7 @@ async def save_status_update(caller: McpCaller, *, type: Literal['project', 'ini
 save_status_update.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'type': {'type': 'string', 'enum': ['project', 'initiative'], 'description': 'Type of status update'}, 'id': {'description': 'Status update ID - if provided, updates this existing update', 'type': 'string'}, 'project': {'description': 'Project name, ID, identifier (e.g., PROJ-123), or slug', 'type': 'string'}, 'initiative': {'description': 'Initiative name, ID, identifier (e.g., INIT-123), or slug', 'type': 'string'}, 'body': {'description': 'Content as Markdown. Do not escape the string — use literal newlines and special characters, not escape sequences. To mention a user, use @displayName (e.g., @johndoe)', 'type': 'string'}, 'health': {'description': 'onTrack | atRisk | offTrack', 'type': 'string', 'enum': ['onTrack', 'atRisk', 'offTrack']}, 'isDiffHidden': {'description': 'Deprecated. Hide diff with previous update (create only)', 'type': 'boolean'}}, 'required': ['type'], 'additionalProperties': False}
 
 
-async def search_documentation(caller: McpCaller, *, query: str, page: float | None = None) -> list[DocumentationSearchResult]:
+async def search_documentation(caller: McpCaller, *, query: str, page: float | None = None) -> list[DocumentationHit]:
     """Search Linear's documentation to learn about features and usage
 
     Args:
@@ -1564,7 +1581,7 @@ async def search_documentation(caller: McpCaller, *, query: str, page: float | N
     args: dict[str, Any] = {"query": query}
     if page is not None:
         args["page"] = page
-    return cast("list[DocumentationSearchResult]", await caller.call(SERVER, "search_documentation", args))
+    return cast("list[DocumentationHit]", await caller.call(SERVER, "search_documentation", args))
 
 search_documentation.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'query': {'type': 'string', 'description': 'Search query'}, 'page': {'default': 0, 'description': 'Page number', 'type': 'number'}}, 'required': ['query'], 'additionalProperties': False}
 

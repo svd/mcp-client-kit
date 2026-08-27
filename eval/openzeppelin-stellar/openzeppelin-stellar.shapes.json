@@ -6,10 +6,14 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "AcmeAccount"
+      "name": "EvalAccount"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2193
+    "_observed_bytes": 2193,
+    "return_container": null,
+    "_json_unwrap": false,
+    "_note": "Returns Markdown-fenced Rust source, not a record. Raw payload tested NOT_JSON, so no envelope and no key path exist; unwrap stays empty and return_model stays null.",
+    "_discriminator_status": "unconfirmed: name/symbol/decimals/premint flagged by list; Pass 2 on stellar-fungible (symbol=AAA / BBBBBB / XYZ+decimals=18+premint=1000) returned an identical bare \"str\" each time. Resolved via option 3 (unwrap-only, no model) \u2014 a prose payload has no keys to vary."
   },
   "stellar-fungible": {
     "unwrap": [],
@@ -18,17 +22,17 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "GammaToken",
-      "symbol": "GMA",
-      "decimals": "2",
-      "mintable": true,
-      "burnable": true,
-      "pausable": true,
-      "access": "roles",
-      "upgradeable": true
+      "name": "EvalTokenC",
+      "symbol": "XYZ",
+      "decimals": "18",
+      "premint": "1000"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2967
+    "_observed_bytes": 700,
+    "return_container": null,
+    "_json_unwrap": false,
+    "_note": "Returns Markdown-fenced Rust source, not a record. Raw payload tested NOT_JSON, so no envelope and no key path exist; unwrap stays empty and return_model stays null.",
+    "_discriminator_status": "unconfirmed: name/symbol/decimals/premint flagged by list; Pass 2 on stellar-fungible (symbol=AAA / BBBBBB / XYZ+decimals=18+premint=1000) returned an identical bare \"str\" each time. Resolved via option 3 (unwrap-only, no model) \u2014 a prose payload has no keys to vary."
   },
   "stellar-governor": {
     "unwrap": [],
@@ -37,10 +41,14 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "AcmeGovernor"
+      "name": "EvalGovernor"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2066
+    "_observed_bytes": 2066,
+    "return_container": null,
+    "_json_unwrap": false,
+    "_note": "Returns Markdown-fenced Rust source, not a record. Raw payload tested NOT_JSON, so no envelope and no key path exist; unwrap stays empty and return_model stays null.",
+    "_discriminator_status": "unconfirmed: name/symbol/decimals/premint flagged by list; Pass 2 on stellar-fungible (symbol=AAA / BBBBBB / XYZ+decimals=18+premint=1000) returned an identical bare \"str\" each time. Resolved via option 3 (unwrap-only, no model) \u2014 a prose payload has no keys to vary."
   },
   "stellar-non-fungible": {
     "unwrap": [],
@@ -49,11 +57,15 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "AcmeNft",
-      "symbol": "ANFT"
+      "name": "EvalNFT",
+      "symbol": "ENFT"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 710
+    "_observed_bytes": 710,
+    "return_container": null,
+    "_json_unwrap": false,
+    "_note": "Returns Markdown-fenced Rust source, not a record. Raw payload tested NOT_JSON, so no envelope and no key path exist; unwrap stays empty and return_model stays null.",
+    "_discriminator_status": "unconfirmed: name/symbol/decimals/premint flagged by list; Pass 2 on stellar-fungible (symbol=AAA / BBBBBB / XYZ+decimals=18+premint=1000) returned an identical bare \"str\" each time. Resolved via option 3 (unwrap-only, no model) \u2014 a prose payload has no keys to vary."
   },
   "stellar-stablecoin": {
     "unwrap": [],
@@ -62,11 +74,15 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "AcmeUsd",
-      "symbol": "AUSD"
+      "name": "EvalStable",
+      "symbol": "EUSD"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 608
+    "_observed_bytes": 620,
+    "return_container": null,
+    "_json_unwrap": false,
+    "_note": "Returns Markdown-fenced Rust source, not a record. Raw payload tested NOT_JSON, so no envelope and no key path exist; unwrap stays empty and return_model stays null.",
+    "_discriminator_status": "unconfirmed: name/symbol/decimals/premint flagged by list; Pass 2 on stellar-fungible (symbol=AAA / BBBBBB / XYZ+decimals=18+premint=1000) returned an identical bare \"str\" each time. Resolved via option 3 (unwrap-only, no model) \u2014 a prose payload has no keys to vary."
   },
   "stellar-vault": {
     "unwrap": [],
@@ -75,10 +91,14 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "AcmeVault",
-      "symbol": "AVLT"
+      "name": "EvalVault",
+      "symbol": "EVLT"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 926
+    "_observed_bytes": 926,
+    "return_container": null,
+    "_json_unwrap": false,
+    "_note": "Returns Markdown-fenced Rust source, not a record. Raw payload tested NOT_JSON, so no envelope and no key path exist; unwrap stays empty and return_model stays null.",
+    "_discriminator_status": "unconfirmed: name/symbol/decimals/premint flagged by list; Pass 2 on stellar-fungible (symbol=AAA / BBBBBB / XYZ+decimals=18+premint=1000) returned an identical bare \"str\" each time. Resolved via option 3 (unwrap-only, no model) \u2014 a prose payload has no keys to vary."
   }
 }

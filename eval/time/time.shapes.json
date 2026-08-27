@@ -10,7 +10,7 @@
     },
     "source": "live",
     "probed_args": {
-      "source_timezone": "UTC",
+      "source_timezone": "America/New_York",
       "time": "14:30",
       "target_timezone": "Asia/Tokyo"
     }
@@ -28,10 +28,10 @@
     "source": "live",
     "probed_args": [
       {
-        "timezone": "UTC"
+        "timezone": "America/New_York"
       },
       {
-        "timezone": "America/New_York"
+        "timezone": "Europe/London"
       }
     ]
   }

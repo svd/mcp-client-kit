@@ -1,46 +1,42 @@
 {
+  "aws___get_regional_availability": {
+    "unwrap": [
+      "content",
+      "result"
+    ],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "regions": [
+        "us-east-1"
+      ],
+      "resource_type": "product"
+    },
+    "_shape_note": "content.result is a map keyed by AWS product name -> {status: str}. The keys are data, not schema, so no TypedDict applies. The tool description states the outer key is products | service_apis | cfn_resources depending on resource_type, so the unwrap deliberately stops at content.result, which is stable across all three."
+  },
   "aws___list_regions": {
-    "unwrap": ["content", "result"],
+    "unwrap": [
+      "content",
+      "result"
+    ],
     "return_model": "Region",
-    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "region_id": "str",
       "region_long_name": "str"
     },
     "source": "live",
-    "probed_args": {}
-  },
-  "aws___search_documentation": {
-    "unwrap": ["content", "result"],
-    "return_model": "SearchResultItem",
-    "return_container": "list",
-    "input_overrides": {},
-    "fields": {
-      "rank_order": "int",
-      "title": "str",
-      "url": "str",
-      "context": "str",
-      "skill_name": "str",
-      "skill_description": "str"
-    },
-    "source": "live",
-    "probed_args": [
-      {
-        "search_phrase": "S3 bucket versioning",
-        "limit": 3
-      },
-      {
-        "search_phrase": "lambda best practices skill",
-        "topics": ["agent_skills"],
-        "limit": 3
-      }
-    ]
+    "probed_args": {},
+    "return_container": "list"
   },
   "aws___read_documentation": {
-    "unwrap": ["content", "result"],
+    "unwrap": [
+      "content",
+      "result"
+    ],
     "return_model": "DocumentationPage",
-    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "status": "str",
@@ -50,66 +46,68 @@
       "start_index": "int",
       "end_index": "int",
       "truncated": "bool",
-      "redirected_url": "str | None",
-      "error_code": "str | None"
+      "redirected_url": "Any | None",
+      "error_code": "Any | None"
     },
     "source": "live",
     "probed_args": {
       "requests": [
         {
-          "url": "https://docs.aws.amazon.com/code-library/latest/ug/java_2_s3_code_examples.html",
+          "url": "https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html",
           "max_length": 2000
         }
       ]
-    }
+    },
+    "return_container": "list",
+    "_shape_note": "redirected_url and error_code were observed only as null on a successful, non-redirected fetch, so their non-null type is unobserved and stays `Any | None`."
   },
   "aws___retrieve_skill": {
-    "unwrap": ["content", "skill_content"],
+    "unwrap": [
+      "content",
+      "skill_content"
+    ],
     "return_model": null,
     "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {
-      "skill_name": "aws-lambda-durable-functions"
-    }
-  },
-  "aws___get_regional_availability": {
-    "unwrap": ["content", "result"],
-    "return_model": null,
-    "discriminator": "resource_type",
-    "variants": {
-      "product": {
-        "return_model": "ProductAvailability",
-        "fields": {
-          "products": "dict[str, Any]",
-          "next_token": "str | None",
-          "failed_regions": "Any | None"
-        }
-      },
-      "api": {
-        "return_model": "ServiceApiAvailability",
-        "fields": {
-          "service_apis": "dict[str, str]",
-          "next_token": "str | None",
-          "failed_regions": "Any | None"
-        }
-      },
-      "cfn": {
-        "return_model": "CfnResourceAvailability",
-        "fields": {
-          "cfn_resources": "dict[str, str]",
-          "next_token": "str | None",
-          "failed_regions": "Any | None"
-        }
-      }
+      "skill_name": "aws-serverless"
     },
+    "_shape_note": "The unwrapped value is the SKILL.md markdown as a plain string, not a record, so return_model stays null per the no-primitive-name rule; the unwrap still strips the content envelope."
+  },
+  "aws___search_documentation": {
+    "unwrap": [
+      "content",
+      "result"
+    ],
+    "return_model": "SearchResultItem",
     "input_overrides": {},
-    "fields": {},
+    "fields": {
+      "rank_order": "int",
+      "title": "str",
+      "context": "str",
+      "url": "str",
+      "skill_description": "str",
+      "skill_name": "str"
+    },
     "source": "live",
-    "probed_args": {
-      "resource_type": "cfn",
-      "regions": ["us-east-1"],
-      "filters": ["AWS::Lambda::Function"]
-    }
+    "probed_args": [
+      {
+        "search_phrase": "S3 bucket versioning",
+        "limit": 3,
+        "topics": [
+          "general"
+        ]
+      },
+      {
+        "search_phrase": "deploy serverless application skill workflow",
+        "limit": 5,
+        "topics": [
+          "agent_skills"
+        ]
+      }
+    ],
+    "return_container": "list",
+    "_shape_note": "Record shape varies with the `topics` argument: doc topics return {rank_order, title, context, url}; topics=['agent_skills'] returns {rank_order, title, skill_description, skill_name}. Both variants were probed and unioned into one total=False model. `topics` is an array, not a top-level scalar, so it is not a codegen discriminator and no variants block applies."
   }
 }

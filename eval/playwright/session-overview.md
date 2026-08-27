@@ -1,66 +1,64 @@
-# playwright — session overview
+# Playwright MCP — session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T06:10:09Z
-- **Duration:** 8m 53s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T08:50:17Z
+- **Duration:** 8m 37s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Tool surface
+## Surface and selection
 
-`mcpgen list playwright --schema` returned **42 tools**. This server sets
-`annotations.readOnlyHint` on every one of them, so step 2b's primary rule decided the
-whole selection with no keyword guessing: **18 read-only**, **24 mutating** (skipped).
-No hint was disputed — every `readOnlyHint: true` tool also carried
-`destructiveHint: false`, and none of their names passes the keyword test (`save`,
-`hide`, `show`, `start`, `stop` are not mutating verbs on that list).
+`mcpgen list` reported **42 tools**. Annotations were complete and trustworthy, so step 2b
+classified entirely on `readOnlyHint`: 24 tools carry `readOnlyHint: false` with
+`destructiveHint: true` (navigation, clicks, typing, `browser_evaluate`,
+`browser_run_code_unsafe`, tab management) and were skipped without probing. Of the 18
+read-only tools, **17 were probed**. The one exclusion is `browser_annotate`, whose own
+description says it "waits for the user to draw annotations" — a headless, non-interactive
+run has nobody to draw, so probing it would have blocked the sweep rather than returned a
+shape.
 
-**17 of the 18 were probed.** `browser_annotate` was not: it opens the Playwright
-Dashboard and blocks until a human draws annotations. A bounded probe hung past 120 s
-with no part file written, and was killed. Recorded as unprobed — interactive by design,
-unreachable from a headless run.
-
-## Seeds
-
-None. Instead, `--init-page servers/playwright-init.ts` puts each freshly-spawned probe
-process on `playwright.dev` and emits one console message per level, so read tools have
-real content instead of `about:blank`.
-
-## Surprises
-
-Every probe spawns a new process, and the browser lives inside it, so nothing survives a
-call. That split the 17 cleanly:
-
-- **12 returned a real result.** All are markdown prose — `### Result` / `### Page` /
-  `### Ran Playwright code` blocks — with no JSON envelope. The JSON-in-string test on
-  the captured raw payloads came back `NOT_JSON` for every one.
-- **5 returned only an error, never a result.** `browser_stop_tracing` →
-  `Tracing is not started`; `browser_video_chapter`, `browser_video_show_actions`,
-  `browser_video_hide_actions`, `browser_wait_for` → `No open pages available`. The last
-  four need a page the init hook only creates for tools that open a tab on demand. These
-  carry `"_probe_status": "inconclusive"` — the shape was never observed, and a bare
-  `"str"` would be indistinguishable from a genuine text tool.
-
-`browser_take_screenshot` was the only non-scalar shape: a two-block list of a text block
-plus an image block that collapses to `{type, mimeType, has_data}`. The bytes are
-deliberately dropped, so the observed shape describes the envelope, not a record.
-
-## Shape decisions
-
-**No tool was shaped.** Every entry keeps `unwrap: []` and `return_model: null`, so all
-42 wrappers stay `-> Any`. That is the honest reading, not a coverage gap: this server
-returns prose for humans, and a `TypedDict` over `str` would be a fabricated claim.
-`browser_take_screenshot` stays `Any` under the media rule.
+No seed commands are configured. Page state comes from `--init-page servers/playwright-init.ts`,
+which sizes the viewport, navigates to `playwright.dev`, and emits one console message per
+level. Every `mcpgen probe` spawns a fresh server process, so without it each probe would have
+observed `about:blank`.
 
 ## Discriminators
 
-Ten candidates were advised; `button`, `url`, `x`, `y` span only mutating tools and stay
-unresolved outside the selected set. Pass 2 probed `target` (`body` / `nav` / omitted)
-and `filename` on `browser_snapshot`, `text` (`Playwright` / `Docs` / a no-match string)
-on `browser_find`, `index` (1 / 2 / 3) on `browser_network_request`, and `element` on
-`browser_highlight`. Every variant observed `"str"` — **inconclusive, not disproven**.
-Resolved as step 4 option 3 (unwrap-only `Any`), which is what a prose return already is.
+The `list --schema` advisory raised ten candidates. Four (`button`, `url`, `x`, `y`) span only
+mutating tools and are recorded unresolved. The six reaching the selected set — `duration`,
+`element`, `filename`, `index`, `target`, `text` — each got Pass 2: three distinct values on
+one read-only tool, everything else held fixed. All eighteen probes returned identical shapes.
+That is **inconclusive, not disproven**: the six stay polymorphic-suspect, and step 4 resolved
+them by option 3 (unwrap-only `Any`), which is where the shape evidence pointed anyway.
 
-## Verification
+## Shape decisions
 
-`ast.parse` clean: 42 async defs, 0 `TypedDict`s, 12 params rendered as `Literal[...]`
-from their declared enums.
+**Every probed tool returned `str`.** Playwright MCP speaks human-readable markdown, not
+records: an `### Result` heading, an optional fenced `js` block echoing the Playwright code it
+ran, then `### Page` and `### Events` sections. The accessibility snapshot is fenced YAML
+inside that markdown. JSON-in-string detection was run against raw payloads for
+`browser_snapshot` and `browser_network_request` — both `NOT_JSON`. So for all 17 entries:
+`unwrap: []`, `return_model: null`, `fields: {}`. No `TypedDict` is emitted, and none should
+be — inventing one would parse markdown the wrapper never returns.
+
+`browser_take_screenshot` is the only tool whose shape is not a bare `str`: a two-element
+content list, a text block plus an image block whose base64 bytes mcpgen deliberately drops.
+That describes the MCP envelope, not a record, so it stays `Any` per the media-tool guard.
+
+Five tools returned **only** an error and never a success payload —
+`browser_wait_for`, `browser_video_chapter`, `browser_video_show_actions` and
+`browser_video_hide_actions` with `Error: No open pages available.`, and
+`browser_stop_tracing` with `Error: Tracing is not started`. These carry
+`"_probe_status": "inconclusive"` so the verifier does not read them as genuine
+text-returning tools.
+
+Eleven probed tools are flagged `_mutating_suspect` despite `readOnlyHint: true`: they write
+files into `--output-dir` (`browser_pdf_save`, `browser_take_screenshot`, the tracing and
+video pairs) or mutate live page state (`browser_highlight`, `browser_hide_highlight`, the
+action-overlay toggles). The flag records the discrepancy without overriding the server's own
+declaration.
+
+## Result
+
+Regeneration consumed all 17 shape entries; the module parses (`ast.parse` clean, 42
+functions). Nine `Literal[...]` unions came from `inputSchema` enums, so the input side is
+genuinely typed even though the return side cannot be.

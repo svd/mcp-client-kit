@@ -14,7 +14,7 @@ SERVER = 'exa'
 
 
 
-async def web_fetch_exa(caller: McpCaller, *, urls: list[str], maxCharacters: int | None = None) -> Any:
+async def web_fetch_exa(caller: McpCaller, *, urls: list[str], maxCharacters: float | None = None) -> Any:
     """Read a webpage's full content as clean markdown. Use after web_search_exa when highlights are insufficient or to read any URL.
 
     Best for: Extracting full content from known URLs. Batch multiple URLs in one call.
@@ -32,7 +32,7 @@ async def web_fetch_exa(caller: McpCaller, *, urls: list[str], maxCharacters: in
 web_fetch_exa.__schema__ = {'type': 'object', 'properties': {'urls': {'type': 'array', 'items': {'type': 'string'}, 'description': 'URLs to read. Batch multiple URLs in one call.'}, 'maxCharacters': {'type': 'number', 'minimum': 1, 'description': 'Maximum characters to extract per page (default: 3000)'}}, 'required': ['urls'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}
 
 
-async def web_search_exa(caller: McpCaller, *, query: str, numResults: int | None = None) -> Any:
+async def web_search_exa(caller: McpCaller, *, query: str, numResults: float | None = None) -> Any:
     """Search the web for any topic and get clean, ready-to-use content.
 
           Best for: Finding current information, news, facts, people, companies, or answering questions about any topic.

@@ -1,36 +1,32 @@
 {
   "sequentialthinking": {
     "unwrap": [],
-    "return_model": "ThoughtStatus",
+    "return_model": "ThoughtProgress",
     "input_overrides": {},
     "fields": {
       "thoughtNumber": "int",
       "totalThoughts": "int",
       "nextThoughtNeeded": "bool",
-      "branches": "list[str]",
+      "branches": "list",
       "thoughtHistoryLength": "int"
     },
     "source": "live",
     "probed_args": [
       {
-        "thought": "Initial analysis step",
+        "thought": "Step one: enumerate the constraints of the problem.",
         "thoughtNumber": 1,
         "totalThoughts": 3,
         "nextThoughtNeeded": true
       },
       {
-        "thought": "Branch exploration",
+        "thought": "Step two: branch to explore an alternative framing.",
         "thoughtNumber": 2,
         "totalThoughts": 3,
         "nextThoughtNeeded": true,
         "branchFromThought": 1,
-        "branchId": "alt-a"
-      },
-      {
-        "thought": "Final conclusion",
-        "thoughtNumber": 3,
-        "totalThoughts": 3,
-        "nextThoughtNeeded": false
+        "branchId": "alt-a",
+        "isRevision": false,
+        "needsMoreThoughts": false
       }
     ]
   }

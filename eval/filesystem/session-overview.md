@@ -1,69 +1,50 @@
-# filesystem — generate-mcp-wrappers session overview
+# filesystem — session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T05:57:28Z
-- **Duration:** 3m 57s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T08:30:39Z
+- **Duration:** 11m 39s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Setup
+## Tool surface
 
-`mcpgen` resolved to `uv run mcpgen` (0.9.0.dev1); every command carried
-`MCPGEN_SERVERS=.mcp.eval.json`. No seed commands were configured. The ignore preflight
-passed first try.
+`mcpgen list` reported **14 tools**. Every tool carried MCP `annotations`, so mutating
+classification never needed the keyword fallback: `write_file`, `edit_file`, `create_directory`,
+and `move_file` declare `readOnlyHint: false` and were skipped outright. Of the ten remaining
+read-only tools, `read_media_file` was left unprobed — its description is explicitly about
+base64 image and audio blocks, which the prober reduces to an envelope summary rather than the
+record, so modelling it would state a shape no probe saw. That left **9 tools probed, 5 skipped**.
 
-## Tool census
-
-The server exposes **14 tools**, all carrying `annotations.readOnlyHint`, so step 2b's
-primary path decided every classification and the keyword heuristic never ran.
-
-### mutating-skipped
-
-- `write_file` — `readOnlyHint: false`, `destructiveHint: true`
-- `edit_file` — `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`
-- `create_directory` — `readOnlyHint: false`
-- `move_file` — `readOnlyHint: false`, `destructiveHint: true`
-
-No `readOnlyHint: true` tool self-contradicted and no name disputed its hint, so all ten
-read-only tools cleared. One was then dropped by the media rule: `read_media_file` returns
-base64 image/audio blocks, whose probe would describe the envelope rather than the record,
-so it stays `-> Any`, unprobed by design. **Probed: 9. Skipped: 5.**
-
-## Discriminators
-
-`list --schema` flagged `head` and `tail`, shared by `read_file` and `read_text_file`. Both
-sit on Pass 1's pagination/window auto-disqualify list — they window the output, they do
-not switch its shape — so both were dropped without a live call. **discriminators: N/A**;
-Pass 2 did not run.
+**Discriminators: N/A.** The `list --schema` advisory flagged `head` and `tail` as candidates
+spanning `read_file` and `read_text_file`. Both are named in Pass 1's pagination/window
+auto-disqualify list — they window a text response, they do not switch its shape — so Pass 2
+made no live calls and no tool stayed polymorphic-suspect.
 
 ## Surprises
 
-The finding is how little of this server is structured. Eight of nine probes came back as
-bare `str`: `list_directory` and `list_directory_with_sizes` return `[FILE]`/`[DIR]`-prefixed
-text, `search_files` newline-joined paths, and `get_file_info` *key: value* prose
-(`size: 302`, `isDirectory: false`) that looks tabular but is not JSON. That verdict is
-stronger than a substring guess — the bridge's `_parse_one` tries `json.loads` then
-`ast.literal_eval` before falling back to text, so an observed `"str"` proves both failed.
-Raw captures of `get_file_info`, `search_files`, and `list_allowed_directories` confirmed
-each was a genuine success payload, not an error, so no `_probe_status: inconclusive` was
-warranted. `directory_tree` is the lone exception: it ships a JSON-encoded string the
-transport parses for us, so the probe saw a real `list` of `{name, type, children}` nodes.
+The interesting finding is how little of this server is shapeable, and that this is correct
+rather than a gap. Eight of the nine probed tools return **human-formatted prose**, not records:
+`get_file_info` answers with `size: 3845\ncreated: …` key-value text, `list_directory` with
+`[DIR] x / [FILE] y` lines, `search_files` with newline-joined paths. A raw `call --out` capture
+confirmed the `get_file_info` payload is genuinely not JSON, so `_observed_shape: "str"` is a
+settled fact and not a probe failure — no `_probe_status: inconclusive` marker was warranted
+anywhere in this run.
+
+The batched probe sweep tripped the harness's 2-minute command ceiling on the ninth tool
+(`list_allowed_directories`); it was re-issued alone and succeeded. Eight parts had already
+been written, so nothing was lost.
 
 ## Shape decisions
 
-- **`directory_tree`** → `unwrap: []`, `return_container: "list"`, `return_model:
-  DirectoryNode` (`name: str`, `type: str`, `children: list`). There is no vendor envelope —
-  the parsed payload *is* the record list — so no `_dig_list` is emitted and the wrapper
-  casts directly. `children` stays a bare `list`: the nest is recursive, and modelling its
-  elements from one probe would overstate what was seen. `total=False` covers files, which
-  carry no `children`. Noted `_json_unwrap: true`.
-- **The eight prose tools** → `return_model: null`, `unwrap: []`. A `TypedDict` over an
-  unparsed string would be a lie. `get_file_info` is the tempting one, left alone because
-  typing it needs parsing the wrapper does not do.
+- **`directory_tree` → `list[DirectoryNode]`** (`unwrap: []`, `return_container: "list"`). This
+  is the one tool carrying a real record. The server double-encodes: the MCP text block *is* a
+  JSON array. The seam's own `parse()` runs `json.loads` on text content, so the probe observed a
+  parsed `[{name, type, children}]` — the list is what a caller actually receives, and the
+  annotation is honest rather than a cast over a string. `unwrap` stays empty because the parsed
+  object *is* the record: there is no envelope key to dig, and inventing one would make `_dig`
+  return a field instead of the tree. `children` is held at `"list"` — the nodes recurse, and
+  promoting a nested element model from one probe would over-state depth. Flagged `_json_unwrap`.
+- **The other 8 probed tools → `Any`.** Prose in, prose out. A `TypedDict` over a formatted
+  string would be a fabrication, so `return_model` stays `null` for each.
 
-`probed_args` needed no scrubbing — every value is a `/private/tmp` path or a glob.
-
-## Verification
-
-The regenerated module parses cleanly (`ast.parse` OK). `directory_tree` reads
-`-> list[DirectoryNode]`; the other thirteen stay `-> Any`, the honest signature for prose
-and for unprobed mutating tools.
+The regenerated module `ast.parse`s cleanly; `directory_tree` is the only signature that reads
+anything other than `Any`.

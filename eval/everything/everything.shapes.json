@@ -6,11 +6,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "message": "hello from mcpgen probe"
+      "message": "eval-probe"
     },
-    "_observed_shape": "str",
-    "_observed_bytes": 31,
-    "_note": "Prose payload; JSON-in-string test returned NOT_JSON. Genuine text tool."
+    "_note": "Returns the echoed message as prose text. No record structure to model."
   },
   "get-annotated-message": {
     "unwrap": [],
@@ -29,9 +27,7 @@
         "messageType": "debug"
       }
     ],
-    "_observed_shape": "str",
-    "_observed_bytes": 44,
-    "_note": "Prose payload; JSON-in-string test returned NOT_JSON. Genuine text tool. messageType='error' returns the literal text 'Error: Operation failed' \u2014 that is the demo's content, not a probe failure; 'success' and 'debug' returned prose too."
+    "_note": "Prose text for every messageType (error/success/debug all probed); annotations are envelope metadata, not payload."
   },
   "get-env": {
     "unwrap": [],
@@ -40,9 +36,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {},
-    "_observed_shape": "dict[str, str]",
-    "_observed_bytes": 3590,
-    "_note": "Probe observed 33 keys, all environment variables of THIS machine's npx launch. Key set is machine-specific, so no TypedDict is honest; stays Any."
+    "_note": "Returns the launched process environment as a flat dict of str->str. Field names are machine-specific and include USER/HOME/PATH, so no TypedDict is emitted; the honest type is an untyped mapping."
   },
   "get-resource-links": {
     "unwrap": [],
@@ -53,12 +47,7 @@
     "probed_args": {
       "count": 3
     },
-    "_observed_shape": [
-      "str",
-      "...x4"
-    ],
-    "_observed_bytes": 353,
-    "_note": "Raw capture shows a HETEROGENEOUS list: element 0 is a prose string, elements 1..n are resource_link dicts {type, uri, name}. _observed_shape's ['str','...x4'] renders only element 0 and under-describes the payload. No uniform element type, so no model."
+    "_note": "Returns resource_link blocks; mcpgen drops link metadata to str placeholders, so no payload shape was observed."
   },
   "get-resource-reference": {
     "unwrap": [],
@@ -66,25 +55,15 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "resourceType": "Text",
-        "resourceId": 1
-      },
-      {
-        "resourceType": "Blob",
-        "resourceId": 2
-      }
-    ],
-    "_observed_shape": [
-      "str"
-    ],
-    "_observed_bytes": 211,
-    "_note": "Raw capture shows a heterogeneous 3-element list: prose, then a resource metadata dict {type, mimeType, has_text, has_blob}, then prose. Binary/resource block, so the dict is an envelope descriptor, not the record. Stays Any."
+    "probed_args": {
+      "resourceType": "Blob",
+      "resourceId": 2
+    },
+    "_note": "Both enum values of resourceType probed (Text, Blob) with resourceId 1 and 2; both returned the same list-of-3 text/resource blocks with no modellable payload. Discriminator resolved: no shape difference."
   },
   "get-structured-content": {
     "unwrap": [],
-    "return_model": "WeatherReading",
+    "return_model": "WeatherRecord",
     "input_overrides": {},
     "fields": {
       "temperature": "int",
@@ -92,19 +71,10 @@
       "humidity": "int"
     },
     "source": "live",
-    "probed_args": [
-      {
-        "location": "New York"
-      },
-      {
-        "location": "Chicago"
-      },
-      {
-        "location": "Los Angeles"
-      }
-    ],
-    "_observed_bytes": 73,
-    "_note": "Identical key set across all three enum locations; ints stayed int in every probe."
+    "probed_args": {
+      "location": "New York"
+    },
+    "_note": "The only tool on this server returning structured content. The server declares an outputSchema and mcpgen surfaced structuredContent directly, so no unwrap path is needed; the three scalars are typed as observed for location=\"New York\"."
   },
   "get-sum": {
     "unwrap": [],
@@ -116,9 +86,7 @@
       "a": 2,
       "b": 3
     },
-    "_observed_shape": "str",
-    "_observed_bytes": 26,
-    "_note": "Prose payload; JSON-in-string test returned NOT_JSON. Genuine text tool."
+    "_note": "Returns the sum rendered as prose (\"The sum of 2 and 3 is 5.\"); raw payload confirmed NOT_JSON."
   },
   "get-tiny-image": {
     "unwrap": [],
@@ -127,12 +95,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {},
-    "_observed_shape": [
-      "str",
-      "...x3"
-    ],
-    "_observed_bytes": 133,
-    "_note": "Image tool: image blocks surface as metadata envelopes, never the base64 bytes. Left as Any per the media rule."
+    "_note": "Image tool: base64 bytes are deliberately dropped by the probe, so only the envelope was observed. Left as Any per the media rule."
   },
   "trigger-long-running-operation": {
     "unwrap": [],
@@ -144,8 +107,6 @@
       "duration": 1,
       "steps": 2
     },
-    "_observed_shape": "str",
-    "_observed_bytes": 66,
-    "_note": "Prose payload; JSON-in-string test returned NOT_JSON. Genuine text tool."
+    "_note": "Returns a prose completion summary after the progress stream; no record."
   }
 }

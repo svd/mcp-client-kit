@@ -19,8 +19,8 @@ class ContentItem(TypedDict, total=False):
     Site: str
     Type: str
     Id: str
-    Data: dict
     OriginalRequest: str
+    Data: dict
 
 
 class SearchQuestionItem(TypedDict, total=False):
@@ -34,6 +34,9 @@ class SearchQuestionItem(TypedDict, total=False):
     is_answered: bool
     accepted_answer_id: int
     creation_date: int
+    tags: list
+    answers: list
+    owner: dict
 
 
 def _dig_list(obj: Any, path: tuple[str, ...]) -> list:

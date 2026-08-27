@@ -34,56 +34,53 @@ async def main() -> None:
     # One connection for the whole run: a single initialize() instead of
     # reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating tools: none — every tool on this server renders a
-        # Rust/Soroban contract source string and writes nothing, server- or
-        # client-side. All six are read-only by design.
-        # No shape entry carries a discriminator, so one call per tool.
-        # Args are the real probed args from openzeppelin-stellar.verify.json.
+        # Skipped mutating tools: none — every tool renders a Rust/Soroban
+        # contract source string and "Does not write to disk", so all six are
+        # read-only by design.
+        # No shape entry carries a confirmed discriminator: `mcpgen list` flagged
+        # name/symbol/decimals/premint as candidates, but Pass 2 returned an
+        # identical bare `str` for every variant, so the shapes resolved to
+        # unwrap-only with no model. One call per tool.
+        # Args below are the real probed args from openzeppelin-stellar.verify.json.
 
-        # stellar-fungible -> Any  (observed: str — Rust source, ~2967 B)
-        # Full option sweep as probed: mintable/burnable/pausable/upgradeable
-        # with role-based access.
+        # stellar-fungible -> Any  (observed: str — Rust source, ~700 B)
         fungible = await openzeppelin_stellar.stellar_fungible(
             caller,
-            name="GammaToken",
-            symbol="GMA",
-            decimals="2",
-            mintable=True,
-            burnable=True,
-            pausable=True,
-            access="roles",
-            upgradeable=True,
+            name="EvalTokenC",
+            symbol="XYZ",
+            decimals="18",
+            premint="1000",
         )
         print(f"stellar-fungible: {type(fungible).__name__} len={len(fungible)}")
 
         # stellar-non-fungible -> Any  (observed: str — Rust source, ~710 B)
         non_fungible = await openzeppelin_stellar.stellar_non_fungible(
-            caller, name="AcmeNft", symbol="ANFT"
+            caller, name="EvalNFT", symbol="ENFT"
         )
         print(
             f"stellar-non-fungible: {type(non_fungible).__name__} "
             f"len={len(non_fungible)}"
         )
 
-        # stellar-stablecoin -> Any  (observed: str — Rust source, ~608 B)
+        # stellar-stablecoin -> Any  (observed: str — Rust source, ~620 B)
         stablecoin = await openzeppelin_stellar.stellar_stablecoin(
-            caller, name="AcmeUsd", symbol="AUSD"
+            caller, name="EvalStable", symbol="EUSD"
         )
         print(f"stellar-stablecoin: {type(stablecoin).__name__} len={len(stablecoin)}")
 
         # stellar-vault -> Any  (observed: str — Rust source, ~926 B)
         vault = await openzeppelin_stellar.stellar_vault(
-            caller, name="AcmeVault", symbol="AVLT"
+            caller, name="EvalVault", symbol="EVLT"
         )
         print(f"stellar-vault: {type(vault).__name__} len={len(vault)}")
 
         # stellar-account -> Any  (observed: str — Rust source, ~2193 B)
-        account = await openzeppelin_stellar.stellar_account(caller, name="AcmeAccount")
+        account = await openzeppelin_stellar.stellar_account(caller, name="EvalAccount")
         print(f"stellar-account: {type(account).__name__} len={len(account)}")
 
         # stellar-governor -> Any  (observed: str — Rust source, ~2066 B)
         governor = await openzeppelin_stellar.stellar_governor(
-            caller, name="AcmeGovernor"
+            caller, name="EvalGovernor"
         )
         print(f"stellar-governor: {type(governor).__name__} len={len(governor)}")
 

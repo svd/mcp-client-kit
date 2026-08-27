@@ -35,25 +35,28 @@ async def main() -> None:
     # One connection for the whole run: a single initialize() instead of
     # reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating tools: none — every tool on this server renders a
-        # Rust/Stylus contract source string and mutates nothing server-side
-        # ("Does not write to disk", per each tool description).
+        # Skipped mutating tools: none — every tool here renders a Rust/Stylus
+        # contract source string and mutates nothing server-side ("Does not
+        # write to disk", per each tool description), so all three are emitted.
         # No shape entry carries a discriminator, so one call per tool.
-        # Args come from openzeppelin-stylus.verify.json (real probed args);
-        # the optional feature flags below are extras the schema allows.
+        # Args are the real probed args from openzeppelin-stylus.verify.json.
 
-        # stylus-erc20 -> Any  (observed: str — Rust source, ~2.5 KB)
+        # stylus-erc20 -> Any  (observed: str — Rust source, ~2575 bytes)
         erc20 = await openzeppelin_stylus.stylus_erc20(
-            caller, name="AlphaBeta"
+            caller, name="Q3_Rewards"
         )
         print(f"stylus-erc20: {type(erc20).__name__} len={len(erc20)}")
 
-        # stylus-erc721 -> Any  (observed: str — Rust source, ~2.3 KB)
-        erc721 = await openzeppelin_stylus.stylus_erc721(caller, name="MyNft")
+        # stylus-erc721 -> Any  (observed: str — Rust source, ~5734 bytes)
+        erc721 = await openzeppelin_stylus.stylus_erc721(
+            caller, name="MyNFT", enumerable=True
+        )
         print(f"stylus-erc721: {type(erc721).__name__} len={len(erc721)}")
 
-        # stylus-erc1155 -> Any  (observed: str — Rust source, ~2.0 KB)
-        erc1155 = await openzeppelin_stylus.stylus_erc1155(caller, name="MyMulti")
+        # stylus-erc1155 -> Any  (observed: str — Rust source, ~2580 bytes)
+        erc1155 = await openzeppelin_stylus.stylus_erc1155(
+            caller, name="MyMulti", supply=True
+        )
         print(f"stylus-erc1155: {type(erc1155).__name__} len={len(erc1155)}")
 
 

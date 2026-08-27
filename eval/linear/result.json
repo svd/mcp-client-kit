@@ -11,7 +11,7 @@
   },
   "check_details": {
     "ast": "",
-    "signatures": "probe_inconclusive: 3 tool(s) had no observable success payload \u2014 shapes unknown: get_project, list_milestones, get_document",
+    "signatures": "probe_inconclusive: 10 tool(s) had no observable success payload \u2014 shapes unknown: get_agent_skill, get_attachment, get_diff, get_diff_threads, get_document, get_milestone, get_project, get_release, get_release_note, list_milestones",
     "idempotency": "offline determinism check (real tool schemas from linear.mcpgen.json)",
     "pii": "",
     "roundtrip": "oauth_not_supported_in_verifier"
@@ -24,7 +24,7 @@
   "verdict": "partial",
   "versions": {
     "engine": "0.9.0.dev1",
-    "skill_ref": "v0.0.4-156-gfd9eda8",
+    "skill_ref": "v0.0.4-159-g8cc836b",
     "skill_path": "~/src/mcp-client-kit"
   }
 }

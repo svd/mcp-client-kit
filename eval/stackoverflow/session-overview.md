@@ -1,63 +1,61 @@
-# stackoverflow — session overview
+# stackoverflow — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T06:04:41Z
-- **Duration:** 2m 22s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T08:44:58Z
+- **Duration:** 3m 37s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface
+## Server and tool inventory
 
-`mcpgen list stackoverflow --schema` returned **2 tools**, both carrying
-`annotations.readOnlyHint: true`: `so_search` (lexical Stack Overflow search) and
-`get_content` (fetch questions/answers/comments by `SO_Q…` / `SO_A…` / `SO_C…` id).
-Neither name passes the mutating keyword test, so the annotation was not disputed and
-both were selected. **2 probed, 0 skipped** — no `## mutating-skipped` section applies.
+`https://mcp.stackoverflow.com` over native streamable-HTTP OAuth. A stored credential was
+already valid (`mcpgen list-creds` → `stackoverflow valid 2026-08-27T12:14:00`), so no browser
+login was needed and the whole run stayed non-interactive.
 
-Native streamable-HTTP OAuth worked without re-auth; the cached token carried the whole
-run, and no Cloudflare challenge appeared (engine 0.9.0.dev1, above the 0.8.0 floor the
-manifest notes for this server).
+The server exposes **2 tools**, both carrying `annotations.readOnlyHint: true`:
 
-**Discriminators: N/A.** The only shared parameter is `query`, which the engine denylists,
-so no advisory fired and Pass 2 was skipped.
+```
+Tools on stackoverflow:
+  get_content — Get Stack Overflow Content using the given query (SO_Q123, SO_A456, SO_C789)
+  so_search   — Search Stack Overflow using lexical search
+```
 
-## Surprises
+Both were selected and probed; **nothing was skipped**. No mutating tools exist on this server,
+so the subagent mutating-tool fallback never engaged. No seed commands were configured.
 
-The two tools disagree on envelope convention, which is the interesting finding here.
-`so_search` returns lowercase `{"items": [...]}`. `get_content` returns a PascalCase
-`{"Items": [{"Site","Type","Id","Data","OriginalRequest"}], "Errors": []}` — a second
-envelope layer, with the actual Stack Overflow record nested one level further under
-`Data`, and a per-item `Type` tag.
+**Discriminators: N/A.** The only parameter the two tools share is `query`, which is on the
+engine's own denylist, so no candidate could clear the precondition and `list --schema` emitted
+no advisory. Pass 2 was correctly skipped.
 
-That `Type` tag is a **response-side** discriminator with no input parameter behind it —
-the variant is selected by the `SO_Q…`/`SO_A…` prefix inside the free-text `query`, so the
-step-2.e discriminator machinery does not apply. Probing a question id and an answer id
-separately confirmed it: the deep-merged `Data` unions question keys (`question_id`,
-`answer_count`, `is_answered`, `view_count`) with answer keys (`is_accepted`,
-`answer_id`).
+## Probe findings
 
-`Errors` came back `[]` on all three probes, so its element shape is unobservable; it sits
-outside the chosen unwrap path and is not modelled.
+`so_search` returned a single-key envelope `{"items": [...]}` with 4 question records. Two
+fields proved genuinely optional across the four items: `accepted_answer_id` (2/4) and
+`answers` (3/4) — exactly the nullability material this server was picked for. The deep merge
+unioned them in, and `total=False` on the emitted `TypedDict` states them honestly.
+
+`get_content` was the surprise. It does **not** reuse the search envelope: it returns
+`{"Items": [...], "Errors": []}` — PascalCase, a different key, and a per-request wrapper
+carrying `Site`, `Type`, `Id`, `OriginalRequest` around a nested `Data` payload. `Data` is
+polymorphic on the *response* field `Type`: the `Question` variant carries
+`question_id`/`view_count`/`answer_count`/`tags`, the `Answer` variant carries
+`answer_id`/`is_accepted` and drops them. A raw `call` capture confirmed both variants in one
+response.
 
 ## Shape decisions
 
-- **`so_search`** → `unwrap: ["items"]`, `return_container: "list"`,
-  `return_model: SearchQuestionItem`. Ten top-level stable scalars promoted
-  (`question_id`, `title`, `link`, `body_markdown`, `score`, `view_count`,
-  `answer_count`, `is_answered`, `accepted_answer_id`, `creation_date`). `tags`,
-  `answers`, and `owner` are non-scalar nests left unmodelled per the depth guard;
-  `accepted_answer_id` is absent rather than null on unanswered questions, which
-  `total=False` already covers.
-- **`get_content`** → `unwrap: ["Items"]`, `return_container: "list"`,
-  `return_model: ContentItem`. The wrapper's own scalars (`Site`, `Type`, `Id`,
-  `OriginalRequest`) are typed; **`Data` is deliberately left `dict`**. Flattening the
-  merged Question∪Answer union into one `TypedDict` would state authoritatively that every
-  item carries both `question_id` and `answer_id`, which no single response does. `Type` is
-  the honest handle for callers to narrow on.
+- **`so_search`** — `unwrap: ["items"]`, `return_container: "list"`, model `SearchQuestionItem`.
+  Ten top-level scalars promoted; `tags`/`answers` kept as `list` and `owner` as `dict` per the
+  depth guard rather than modelled from one probe.
+- **`get_content`** — `unwrap: ["Items"]`, `return_container: "list"`, model `ContentItem`. The
+  four envelope scalars are promoted; **`Data` stays `dict`**. The discriminator here is a
+  response field, not an input argument, and a single call can return mixed `Type` values in one
+  list, so the shape-spec `variants` mechanism does not apply — typing `Data` from either variant
+  would misdescribe the other. Unwrapping to `Items` discards `Errors`, which was empty on this
+  probe; noted as a known trade-off.
 
-Distinct model names were minted because the two field sets differ; no collision.
+Bootstrapping used real public Stack Overflow ids (`SO_Q54987361`, `SO_A54987732`) read from the
+`so_search` raw capture. `probed_args` holds only public identifiers and a free-text query — no
+PII to scrub.
 
-## Verification
-
-`ast.parse` clean. Both wrappers return concrete types — `list[ContentItem]` and
-`list[SearchQuestionItem]` — with bodies digging their envelopes via `_dig_list`. No tool
-was left `Any`.
+The regenerated module **parses cleanly** (`ast.parse` OK); both tools return
+`list[<TypedDict>]` via `_dig_list`, neither is left `Any`.

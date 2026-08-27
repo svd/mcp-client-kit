@@ -2,25 +2,21 @@
   "codegraph_context": {
     "unwrap": [],
     "return_model": null,
-    "input_overrides": {
-      "maxNodes": "int"
-    },
+    "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {
-      "task": "how does artifact verification work",
-      "maxNodes": 10,
+      "task": "how does verification work",
+      "maxNodes": 5,
       "includeCode": true
     },
     "_observed_shape": "str",
-    "_observed_bytes": 466
+    "_observed_bytes": 457
   },
   "codegraph_explore": {
     "unwrap": [],
     "return_model": null,
-    "input_overrides": {
-      "maxFiles": "int"
-    },
+    "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {
@@ -38,25 +34,23 @@
     "source": "live",
     "probed_args": {
       "symbol": "verify_server",
-      "includeCode": false
+      "includeCode": true
     },
     "_observed_shape": "str",
-    "_observed_bytes": 1255
+    "_observed_bytes": 5029
   },
   "codegraph_search": {
     "unwrap": [],
     "return_model": null,
-    "input_overrides": {
-      "limit": "int"
-    },
+    "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "verify",
-      "limit": 10
+      "query": "verify_server",
+      "limit": 5
     },
     "_observed_shape": "str",
-    "_observed_bytes": 1236
+    "_observed_bytes": 671
   },
   "codegraph_trace": {
     "unwrap": [],
@@ -65,10 +59,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "from": "cmd_verify",
-      "to": "verify_server"
+      "from": "verify_server",
+      "to": "check_ast"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 12404
+    "_observed_bytes": 3645
   }
 }

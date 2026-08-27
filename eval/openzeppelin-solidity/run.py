@@ -28,7 +28,7 @@ SERVER_URL = "https://mcp.openzeppelin.com/contracts/solidity/mcp"
 
 
 def _preview(label: str, result: object) -> None:
-    """Every tool here returns `Any` (observed shape: str — Solidity source)."""
+    """Every tool here is annotated `-> Any`; observed shape is `str` (Solidity source)."""
     if isinstance(result, str):
         lines = result.splitlines()
         first = lines[0] if lines else ""
@@ -43,9 +43,10 @@ async def main() -> None:
     # One connection for the whole run: a single initialize() instead of
     # reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating tools: none — all 8 tools are pure contract-source
-        # generators; nothing is written server-side.
-        # No discriminated tools in this server's shape spec, so one call per tool.
+        # Skipped mutating tools: none. All 8 tools are pure contract-source
+        # generators — they return Solidity text and write nothing server-side.
+        # No tool in openzeppelin-solidity.shapes.json carries a discriminator,
+        # so this is one call per tool.
         # Args are the real probed values from openzeppelin-solidity.verify.json.
 
         # solidity-custom -> Any  (minimal blank contract scaffold)
@@ -54,42 +55,41 @@ async def main() -> None:
 
         # solidity-erc20 -> Any
         erc20 = await openzeppelin_solidity.solidity_erc20(
-            caller, name="EvalToken", symbol="EVT", decimals="18"
+            caller, name="EvalToken", symbol="EVT"
         )
         _preview("solidity-erc20", erc20)
 
         # solidity-erc721 -> Any
         erc721 = await openzeppelin_solidity.solidity_erc721(
-            caller, name="EvalNFT", symbol="ENFT"
+            caller, name="EvalNft", symbol="ENFT"
         )
         _preview("solidity-erc721", erc721)
 
         # solidity-erc1155 -> Any
         erc1155 = await openzeppelin_solidity.solidity_erc1155(
-            caller, name="EvalMulti", uri="https://example.com/{id}.json"
+            caller, name="EvalMulti", uri="https://example.com/token/{id}.json"
         )
         _preview("solidity-erc1155", erc1155)
 
         # solidity-stablecoin -> Any
         stablecoin = await openzeppelin_solidity.solidity_stablecoin(
-            caller, name="EvalStable", symbol="EUSD"
+            caller, name="EvalStable", symbol="EVS"
         )
         _preview("solidity-stablecoin", stablecoin)
 
         # solidity-rwa -> Any
         rwa = await openzeppelin_solidity.solidity_rwa(
-            caller, name="EvalRWA", symbol="ERWA"
+            caller, name="EvalRwa", symbol="EVR"
         )
         _preview("solidity-rwa", rwa)
 
-        # solidity-account -> Any
+        # solidity-account -> Any  (ERC-4337 smart account scaffold)
         account = await openzeppelin_solidity.solidity_account(caller, name="EvalAccount")
         _preview("solidity-account", account)
 
-        # solidity-governor -> Any  (largest output; `decimals` is int-coerced
-        # by the shape spec's input_overrides)
+        # solidity-governor -> Any  (largest output; `delay`/`period` are required)
         governor = await openzeppelin_solidity.solidity_governor(
-            caller, name="EvalGov", delay="1 day", period="1 week"
+            caller, name="EvalGovernor", delay="1 day", period="1 week"
         )
         _preview("solidity-governor", governor)
 

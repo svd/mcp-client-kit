@@ -2,63 +2,59 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-27T05:57:28Z
-- **Duration:** 3m 55s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T08:30:40Z
+- **Duration:** 9m 44s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
 ## Seeding
 
-Both harness seed commands ran before the skill and both succeeded: `create_entities`
-(Ada Lovelace, Analytical Engine) and `create_relations` (Ada Lovelace —programmed→
-Analytical Engine). Seeding mattered: the read tools return
-`{"entities": [], "relations": []}` against an empty store, leaving inner element shapes
-unobservable. With the store populated, every probe carried real records.
+Both seed commands ran before the skill and both succeeded (exit 0), but each returned `[]`
+rather than the created records: the server had been seeded by an earlier run and
+`create_entities` / `create_relations` return only the *newly* created items, deduping the
+rest. A `read_graph` check confirmed the store did hold the two entities (Ada Lovelace,
+Analytical Engine) and the one `programmed` relation, so probing proceeded against real data
+rather than an empty graph.
 
-## Tool selection
+The folder also held artifacts from that earlier run, including a `memory.shapes.json` that
+`codegen` auto-detected on the first pass. Those were moved aside and the module regenerated
+from bare stubs, so this record reflects one run only.
 
-The server exposes **9 tools**. All nine carry `annotations`, and every one declares
-`readOnlyHint`, so step 2b's primary path decided the whole set with no keyword guessing:
+## Tools and selection
 
-- **3 probed** (`readOnlyHint: true`, agreeing annotations, names clean under the
-  contradiction check): `read_graph`, `search_nodes`, `open_nodes`.
-- **6 skipped as mutating** (`readOnlyHint: false`, stated by the server): `create_entities`,
-  `create_relations`, `add_observations`, `delete_entities`, `delete_observations`,
-  `delete_relations`. The three `delete_*` tools also carry `destructiveHint: true`.
+The server exposes **9 tools**. Every one carries explicit `annotations`, so classification
+needed no keyword or semantic fallback: `readOnlyHint: true` on `read_graph`, `search_nodes`,
+and `open_nodes`; `readOnlyHint: false` on the six mutators (`create_entities`,
+`create_relations`, `add_observations`, plus the three `delete_*`, which also set
+`destructiveHint: true`). All three read-only tools were probed; the six mutating tools were
+skipped and left `-> Any`, which suits them — they return acks, not records.
 
-`discriminators: N/A` — `mcpgen list --schema` emitted no advisory, and no candidate could
-clear the precondition: the only scalar parameter shared shape-wise is `query`, which is on
-the engine's own denylist; every other parameter is an array.
+**Discriminators: N/A.** No parameter is shared by two or more tools under the same name with
+a top-level scalar `type` — every multi-tool parameter (`entities`, `relations`, `names`,
+`deletions`) is an array, and `query` is both single-tool and denylisted. The `list --schema`
+stderr carried no advisory, matching that reading.
 
-## Probe results and shape decisions
+## Surprises
 
-All three probes returned success payloads on the first attempt. The surprise was the
-absence of one: the memory server ships **no vendor envelope**. Each tool returns the
-record directly as `{"entities": [...], "relations": [...]}`, so `unwrap` is `[]` for all
-three and the generated bodies `cast(...)` rather than `_dig(...)`.
+`search_nodes` with `query: "Ada"` returned one entity but *also* the Ada→Analytical Engine
+relation, whose other endpoint is absent from the returned `entities`. The server filters
+entities by the query and then returns relations touching any match, so callers can receive
+relations pointing at nodes not present in the same payload. Worth knowing; it does not change
+the type.
 
-The three shapes are byte-for-byte identical in structure, which is why all three share a
-single `return_model: "KnowledgeGraph"` — the skill permits a shared name exactly when the
-`fields` dicts match, and here they do. `return_container` is omitted: the unwrapped value
-is one dict, not a list of records.
+## Shape decisions
 
-`fields` records both top-level keys as `list[dict]`. Neither is a scalar, but both were
-observed non-empty, and typing them `list[dict]` states the level that was actually seen
-while leaving the element shape unmodeled, per the depth guard. Promoting `Entity` and
-`Relation` to real nested models is not expressible — codegen only emits models named by
-`return_model`.
+All three read tools returned the identical top-level record `{entities: [...], relations: [...]}`
+with **no vendor envelope**, so `unwrap` is `[]` for each and no `_dig` helper is emitted.
+Because the three `fields` dicts are identical, they legitimately share one model,
+`KnowledgeGraph` — which is also the honest domain name, since each returns a subgraph.
+`return_container` is omitted: the record is a single dict, not a list.
 
-One genuine oddity: `search_nodes(query="Ada")` returned a single entity (Ada Lovelace)
-alongside a relation whose `to` endpoint, "Analytical Engine", is **not** in the returned
-entity list. The server filters entities by the query but does not restrict relations to
-edges between surviving nodes, so callers must treat returned relations as possibly
-dangling. This is behavior, not shape.
-
-`input_overrides` is empty — no schema lied. `probed_args` were left unscrubbed: the values
-are harness-authored public fixtures ("Ada Lovelace", "Analytical Engine", "Ada") committed
-already in `servers/servers.toml`, not user PII, and keeping them functional lets the
-roundtrip verifier replay from the committed artifact.
+`fields` records `entities` and `relations` as `list[dict]`. The element shapes were observed
+and stable (`name`/`entityType`/`observations`, `from`/`to`/`relationType`), but `fields` is a
+flat map and nested `TypedDict`s are not expressible there, so the inner dicts stay `dict`
+rather than over-claiming depth from a two-entity store.
 
 ## Verification
 
-The regenerated module parses (`ast.parse`) and imports cleanly. All three shaped
-signatures read `-> KnowledgeGraph`; the six mutating tools correctly remain `-> Any`.
-Runner generation was left to the harness verify stage, as instructed.
+The regenerated module parses cleanly (`ast.parse` OK). All three shaped tools read
+`-> KnowledgeGraph` rather than `-> Any`; the six mutating tools remain `Any` as intended.
+`run.py` is the harness's job and was not generated here.

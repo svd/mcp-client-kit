@@ -23,7 +23,7 @@ class Commit(TypedDict, total=False):
 class Label(TypedDict, total=False):
     color: str
     description: str
-    id: int
+    id: str
     name: str
 
 
@@ -46,6 +46,7 @@ class Release(TypedDict, total=False):
     zipball_url: str
     tarball_url: str
     node_id: str
+    assets: list
 
 
 class AuthenticatedUser(TypedDict, total=False):
@@ -55,13 +56,13 @@ class AuthenticatedUser(TypedDict, total=False):
     avatar_url: str
 
 
-class TagRef(TypedDict, total=False):
+class GitRef(TypedDict, total=False):
     ref: str
     url: str
     node_id: str
 
 
-class TeamGroup(TypedDict, total=False):
+class TeamMembership(TypedDict, total=False):
     org: str
     teams: list
 
@@ -94,6 +95,7 @@ class IssueSummary(TypedDict, total=False):
     state: str
     created_at: str
     updated_at: str
+    assignees: list
 
 
 class PullRequestSummary(TypedDict, total=False):
@@ -106,6 +108,9 @@ class PullRequestSummary(TypedDict, total=False):
     html_url: str
     created_at: str
     updated_at: str
+    closed_at: str | None
+    merged_at: str | None
+    milestone: str | None
 
 
 class ReleaseSummary(TypedDict, total=False):
@@ -124,12 +129,6 @@ class TagSummary(TypedDict, total=False):
     sha: str
 
 
-class SecretScanResult(TypedDict, total=False):
-    numBytesScanned: int
-    blobsScanned: int
-    secrets: list
-
-
 class SearchCodeItem(TypedDict, total=False):
     name: str
     path: str
@@ -143,34 +142,37 @@ class SearchCommitItem(TypedDict, total=False):
 
 
 class SearchIssueItem(TypedDict, total=False):
-    author_association: str
-    body: str
-    comments: int
-    comments_url: str
-    created_at: str
-    events_url: str
-    html_url: str
     id: int
-    labels_url: str
+    number: int
+    title: str
+    body: str
+    state: str
+    author_association: str
+    comments: int
     locked: bool
     node_id: str
-    number: int
-    repository_url: str
-    state: str
-    title: str
+    created_at: str
     updated_at: str
     url: str
+    html_url: str
+    comments_url: str
+    events_url: str
+    labels_url: str
+    repository_url: str
+    field_values: list
 
 
 class SearchPullRequestItem(TypedDict, total=False):
     id: int
     number: int
-    state: str
-    locked: bool
     title: str
     body: str
+    state: str
+    draft: bool
     author_association: str
     comments: int
+    locked: bool
+    node_id: str
     created_at: str
     updated_at: str
     url: str
@@ -179,8 +181,6 @@ class SearchPullRequestItem(TypedDict, total=False):
     events_url: str
     labels_url: str
     repository_url: str
-    node_id: str
-    draft: bool
 
 
 class SearchRepositoryItem(TypedDict, total=False):
@@ -542,7 +542,7 @@ async def get_release_by_tag(caller: McpCaller, *, owner: str, repo: str, tag: s
 get_release_by_tag.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'tag': {'type': 'string', 'description': "Tag name (e.g., 'v1.0.0')"}}, 'required': ['owner', 'repo', 'tag']}
 
 
-async def get_tag(caller: McpCaller, *, owner: str, repo: str, tag: str) -> TagRef:
+async def get_tag(caller: McpCaller, *, owner: str, repo: str, tag: str) -> GitRef:
     """Get details about a specific git tag in a GitHub repository
 
     Args:
@@ -551,7 +551,7 @@ async def get_tag(caller: McpCaller, *, owner: str, repo: str, tag: str) -> TagR
         tag: Tag name
     """
     args: dict[str, Any] = {"owner": owner, "repo": repo, "tag": tag}
-    return cast("TagRef", await caller.call(SERVER, "get_tag", args))
+    return cast("GitRef", await caller.call(SERVER, "get_tag", args))
 
 get_tag.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'tag': {'type': 'string', 'description': 'Tag name'}}, 'required': ['owner', 'repo', 'tag']}
 
@@ -569,7 +569,7 @@ async def get_team_members(caller: McpCaller, *, org: str, team_slug: str) -> An
 get_team_members.__schema__ = {'type': 'object', 'properties': {'org': {'type': 'string', 'description': 'Organization login (owner) that contains the team.'}, 'team_slug': {'type': 'string', 'description': 'Team slug'}}, 'required': ['org', 'team_slug']}
 
 
-async def get_teams(caller: McpCaller, *, user: str | None = None) -> list[TeamGroup]:
+async def get_teams(caller: McpCaller, *, user: str | None = None) -> list[TeamMembership]:
     """Get details of the teams the user is a member of. Limited to organizations accessible with current credentials
 
     Args:
@@ -578,7 +578,7 @@ async def get_teams(caller: McpCaller, *, user: str | None = None) -> list[TeamG
     args: dict[str, Any] = {}
     if user is not None:
         args["user"] = user
-    return cast("list[TeamGroup]", await caller.call(SERVER, "get_teams", args))
+    return cast("list[TeamMembership]", await caller.call(SERVER, "get_teams", args))
 
 get_teams.__schema__ = {'type': 'object', 'properties': {'user': {'type': 'string', 'description': 'Username to get teams for. If not provided, uses the authenticated user.'}}}
 
@@ -1017,7 +1017,7 @@ async def request_copilot_review(caller: McpCaller, *, owner: str, pullNumber: f
 request_copilot_review.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'pullNumber': {'type': 'number', 'description': 'Pull request number'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['owner', 'repo', 'pullNumber']}
 
 
-async def run_secret_scanning(caller: McpCaller, *, files: Any, owner: str, repo: str) -> SecretScanResult:
+async def run_secret_scanning(caller: McpCaller, *, files: Any, owner: str, repo: str) -> Any:
     """Scan files, content, or recent changes for secrets such as API keys, passwords, tokens, and credentials.
 
     This tool is intended for targeted scans of specific files, snippets, or diffs provided directly as content. The files parameter accepts either a single string or an array of strings containing raw file contents or diff hunks, and returns detected secrets with their locations and related secret scanning metadata. Content must not be empty. For full repository scanning, other mechanisms are available.
@@ -1033,7 +1033,7 @@ async def run_secret_scanning(caller: McpCaller, *, files: Any, owner: str, repo
         repo: Repository name
     """
     args: dict[str, Any] = {"files": files, "owner": owner, "repo": repo}
-    return cast("SecretScanResult", await caller.call(SERVER, "run_secret_scanning", args))
+    return await caller.call(SERVER, "run_secret_scanning", args)
 
 run_secret_scanning.__schema__ = {'type': 'object', 'properties': {'files': {'description': 'A single string or an array of strings containing file contents, snippets, or diff hunks to scan for secrets. These must be raw contents, not repository file paths.', 'anyOf': [{'type': 'string', 'minLength': 1}, {'type': 'array', 'items': {'type': 'string'}, 'minItems': 1, 'maxItems': 100}]}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['files', 'owner', 'repo']}
 

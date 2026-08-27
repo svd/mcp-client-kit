@@ -32,14 +32,36 @@ async def main() -> None:
     # One connection for the whole run: a single initialize() instead of
     # reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating tools: (none — this server exposes only a search tool)
-        # Args come from astro-docs.verify.json (real, pre-scrub probe args).
+        # Skipped mutating tools: (none — the server exposes a single read-only
+        # search tool).
+        # Args are the real, pre-scrub probe args from astro-docs.verify.json.
+        # search_astro_docs has no discriminator, so both probed queries are
+        # replayed against the one return shape (list[AstroDocSearchResult]).
 
         # search_astro_docs -> list[AstroDocSearchResult]
-        results = await astro_docs.search_astro_docs(caller, query="view transitions")
-        print(f"search_astro_docs: {len(results)} item(s)")
-        for hit in results[:3]:
-            print(f"  - {hit.get('title')!r}  {hit.get('source_type')!r}  {hit.get('source_url')!r}")
+        collections = await astro_docs.search_astro_docs(
+            caller, query="content collections"
+        )
+        print(f"search_astro_docs('content collections'): {len(collections)} item(s)")
+        for hit in collections[:3]:
+            print(
+                f"  - {hit.get('title')!r}  "
+                f"{hit.get('source_type')!r}  {hit.get('source_url')!r}"
+            )
+
+        # search_astro_docs -> list[AstroDocSearchResult]  (second probed query)
+        transitions = await astro_docs.search_astro_docs(
+            caller, query="view transitions astro:page-load"
+        )
+        print(
+            "search_astro_docs('view transitions astro:page-load'): "
+            f"{len(transitions)} item(s)"
+        )
+        for hit in transitions[:3]:
+            print(
+                f"  - {hit.get('title')!r}  "
+                f"{hit.get('source_type')!r}  {hit.get('source_url')!r}"
+            )
 
 
 if __name__ == "__main__":

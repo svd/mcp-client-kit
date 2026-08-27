@@ -1,19 +1,4 @@
 {
-  "get_commit": {
-    "unwrap": [],
-    "return_model": "Commit",
-    "input_overrides": {},
-    "fields": {
-      "sha": "str",
-      "html_url": "str"
-    },
-    "source": "live",
-    "probed_args": {
-      "owner": "microsoft",
-      "repo": "vscode",
-      "sha": "84ef3481c697a6bdf3bdb5777c50ba54346a1afe"
-    }
-  },
   "get_file_contents": {
     "unwrap": [],
     "return_model": null,
@@ -24,8 +9,7 @@
       "owner": "microsoft",
       "repo": "vscode",
       "path": "README.md"
-    },
-    "_untyped_reason": "resource/media envelope: response is [status_str, resource-metadata]; the record itself (file bytes/text) is never in the payload"
+    }
   },
   "get_label": {
     "unwrap": [],
@@ -34,7 +18,7 @@
     "fields": {
       "color": "str",
       "description": "str",
-      "id": "int",
+      "id": "str",
       "name": "str"
     },
     "source": "live",
@@ -66,7 +50,8 @@
       "upload_url": "str",
       "zipball_url": "str",
       "tarball_url": "str",
-      "node_id": "str"
+      "node_id": "str",
+      "assets": "list"
     },
     "source": "live",
     "probed_args": {
@@ -109,7 +94,8 @@
       "upload_url": "str",
       "zipball_url": "str",
       "tarball_url": "str",
-      "node_id": "str"
+      "node_id": "str",
+      "assets": "list"
     },
     "source": "live",
     "probed_args": {
@@ -120,7 +106,7 @@
   },
   "get_tag": {
     "unwrap": [],
-    "return_model": "TagRef",
+    "return_model": "GitRef",
     "input_overrides": {},
     "fields": {
       "ref": "str",
@@ -141,16 +127,15 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "org": "<example-org>",
-      "team_slug": "engineering"
+      "org": "<ORG>",
+      "team_slug": "<TEAM_SLUG>"
     },
-    "probe_args_scrubbed": true,
     "_probe_status": "inconclusive",
-    "_untyped_reason": "no success payload observed"
+    "probe_args_scrubbed": true
   },
   "get_teams": {
     "unwrap": [],
-    "return_model": "TeamGroup",
+    "return_model": "TeamMembership",
     "input_overrides": {},
     "fields": {
       "org": "str",
@@ -159,20 +144,6 @@
     "source": "live",
     "probed_args": {},
     "return_container": "list"
-  },
-  "issue_read": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "method": "get",
-      "owner": "microsoft",
-      "repo": "vscode",
-      "issue_number": 332877
-    },
-    "_untyped_reason": "discriminator `method` resolved to option 3: variants span dict/list containers, which mcpgen applies tool-wide"
   },
   "list_branches": {
     "unwrap": [],
@@ -187,7 +158,7 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "perPage": 3
+      "perPage": 5
     },
     "return_container": "list"
   },
@@ -216,8 +187,7 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode"
-    },
-    "_untyped_reason": "returned [] on every probe; inner element shape unobservable"
+    }
   },
   "list_issue_types": {
     "unwrap": [],
@@ -251,13 +221,13 @@
       "body": "str",
       "state": "str",
       "created_at": "str",
-      "updated_at": "str"
+      "updated_at": "str",
+      "assignees": "list"
     },
     "source": "live",
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "state": "OPEN",
       "perPage": 3
     },
     "return_container": "list"
@@ -275,15 +245,26 @@
       "merged": "bool",
       "html_url": "str",
       "created_at": "str",
-      "updated_at": "str"
+      "updated_at": "str",
+      "closed_at": "str | None",
+      "merged_at": "str | None",
+      "milestone": "str | None"
     },
     "source": "live",
-    "probed_args": {
-      "owner": "microsoft",
-      "repo": "vscode",
-      "state": "all",
-      "perPage": 3
-    },
+    "probed_args": [
+      {
+        "owner": "microsoft",
+        "repo": "vscode",
+        "state": "open",
+        "perPage": 2
+      },
+      {
+        "owner": "microsoft",
+        "repo": "vscode",
+        "state": "closed",
+        "perPage": 2
+      }
+    ],
     "return_container": "list"
   },
   "list_releases": {
@@ -315,13 +296,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "owner": "<example-owner>",
-      "repo": "ubiquity-4konverta",
+      "owner": "microsoft",
+      "repo": "vscode",
       "perPage": 3
     },
-    "probe_args_scrubbed": true,
-    "_probe_status": "inconclusive",
-    "_untyped_reason": "no success payload observed"
+    "_probe_status": "inconclusive"
   },
   "list_tags": {
     "unwrap": [],
@@ -339,36 +318,6 @@
     },
     "return_container": "list"
   },
-  "pull_request_read": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "method": "get",
-      "owner": "microsoft",
-      "repo": "vscode",
-      "pullNumber": 332876
-    },
-    "_untyped_reason": "discriminator `method` resolved to option 3: variants span dict/list/str containers, which mcpgen applies tool-wide"
-  },
-  "run_secret_scanning": {
-    "unwrap": [],
-    "return_model": "SecretScanResult",
-    "input_overrides": {},
-    "fields": {
-      "numBytesScanned": "int",
-      "blobsScanned": "int",
-      "secrets": "list"
-    },
-    "source": "live",
-    "probed_args": {
-      "owner": "microsoft",
-      "repo": "vscode",
-      "files": "AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-    }
-  },
   "search_code": {
     "unwrap": [
       "items"
@@ -383,7 +332,7 @@
     },
     "source": "live",
     "probed_args": {
-      "query": "language:python def main",
+      "query": "repo:microsoft/vscode addEventListener",
       "perPage": 3
     },
     "return_container": "list"
@@ -412,29 +361,28 @@
     "return_model": "SearchIssueItem",
     "input_overrides": {},
     "fields": {
-      "author_association": "str",
-      "body": "str",
-      "comments": "int",
-      "comments_url": "str",
-      "created_at": "str",
-      "events_url": "str",
-      "html_url": "str",
       "id": "int",
-      "labels_url": "str",
+      "number": "int",
+      "title": "str",
+      "body": "str",
+      "state": "str",
+      "author_association": "str",
+      "comments": "int",
       "locked": "bool",
       "node_id": "str",
-      "number": "int",
-      "repository_url": "str",
-      "state": "str",
-      "title": "str",
+      "created_at": "str",
       "updated_at": "str",
-      "url": "str"
+      "url": "str",
+      "html_url": "str",
+      "comments_url": "str",
+      "events_url": "str",
+      "labels_url": "str",
+      "repository_url": "str",
+      "field_values": "list"
     },
     "source": "live",
     "probed_args": {
-      "query": "terminal crash",
-      "owner": "microsoft",
-      "repo": "vscode",
+      "query": "repo:microsoft/vscode terminal rendering bug",
       "perPage": 3
     },
     "return_container": "list"
@@ -448,12 +396,14 @@
     "fields": {
       "id": "int",
       "number": "int",
-      "state": "str",
-      "locked": "bool",
       "title": "str",
       "body": "str",
+      "state": "str",
+      "draft": "bool",
       "author_association": "str",
       "comments": "int",
+      "locked": "bool",
+      "node_id": "str",
       "created_at": "str",
       "updated_at": "str",
       "url": "str",
@@ -461,13 +411,11 @@
       "comments_url": "str",
       "events_url": "str",
       "labels_url": "str",
-      "repository_url": "str",
-      "node_id": "str",
-      "draft": "bool"
+      "repository_url": "str"
     },
     "source": "live",
     "probed_args": {
-      "query": "repo:microsoft/vscode is:pr",
+      "query": "repo:microsoft/vscode is:pr is:open",
       "perPage": 3
     },
     "return_container": "list"
@@ -516,9 +464,144 @@
     },
     "source": "live",
     "probed_args": {
-      "query": "torvalds",
+      "query": "octocat",
       "perPage": 3
     },
     "return_container": "list"
+  },
+  "get_commit": {
+    "unwrap": [],
+    "return_model": "Commit",
+    "input_overrides": {},
+    "fields": {
+      "sha": "str",
+      "html_url": "str"
+    },
+    "source": "live",
+    "probed_args": [
+      {
+        "owner": "microsoft",
+        "repo": "vscode",
+        "sha": "main",
+        "detail": "none"
+      },
+      {
+        "owner": "microsoft",
+        "repo": "vscode",
+        "sha": "main",
+        "detail": "stats"
+      },
+      {
+        "owner": "microsoft",
+        "repo": "vscode",
+        "sha": "main",
+        "detail": "full_patch"
+      }
+    ],
+    "_discriminator_note": "`detail` (none|stats|full_patch) is a confirmed shape switch: `stats` adds nested `stats`+`files`, `full_patch` adds `patch` inside each file. All three variants probed. Resolved as a generic base model (SKILL step 4 option 2) because the added keys are nested, and `fields` promotes top-level scalars only \u2014 three variant TypedDicts would have been byte-identical."
+  },
+  "issue_read": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": [
+      {
+        "method": "get",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "issue_number": 332898
+      },
+      {
+        "method": "get_comments",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "issue_number": 332898
+      },
+      {
+        "method": "get_sub_issues",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "issue_number": 332898
+      },
+      {
+        "method": "get_parent",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "issue_number": 332898
+      },
+      {
+        "method": "get_labels",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "issue_number": 332898
+      }
+    ],
+    "_discriminator_note": "`method` is a confirmed discriminator; all 5 values probed. get -> Issue dict, get_labels -> {labels,totalCount} dict, get_parent -> {parent} dict, get_comments -> list[comment], get_sub_issues -> list. Variants mix dict and list containers, but `return_container` is a top-level shape-spec field shared by every variant, so a `variants` block would type the two list methods as the dict union via the impl signature. Resolved as unwrap-only Any (SKILL step 4 option 3) rather than state that lie."
+  },
+  "pull_request_read": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": [
+      {
+        "method": "get",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "pullNumber": 332876
+      },
+      {
+        "method": "get_diff",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "pullNumber": 332876
+      },
+      {
+        "method": "get_status",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "pullNumber": 332876
+      },
+      {
+        "method": "get_files",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "pullNumber": 332876
+      },
+      {
+        "method": "get_commits",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "pullNumber": 332876
+      },
+      {
+        "method": "get_review_comments",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "pullNumber": 332876
+      },
+      {
+        "method": "get_reviews",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "pullNumber": 332876
+      },
+      {
+        "method": "get_comments",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "pullNumber": 332876
+      },
+      {
+        "method": "get_check_runs",
+        "owner": "microsoft",
+        "repo": "vscode",
+        "pullNumber": 332876
+      }
+    ],
+    "_discriminator_note": "`method` is a confirmed discriminator; all 9 values probed. get/get_status/get_review_comments/get_check_runs -> dict, get_files/get_commits/get_reviews/get_comments -> list, get_diff -> str. Same top-level `return_container` limitation as issue_read: resolved as unwrap-only Any (SKILL step 4 option 3)."
   }
 }
