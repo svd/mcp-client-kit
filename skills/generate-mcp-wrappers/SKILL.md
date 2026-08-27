@@ -59,7 +59,7 @@ thread, never handed to a batch agent.
 catalog, (b) reads raw payloads in its own context, (c) drafts the step-4 shape entry
 (`unwrap`/`return_model`/`return_container`/`fields`/`input_overrides`, plus
 `discriminator`+`variants` for its sibling group), (d) writes the part with **raw**
-`probed_args` (parts are gitignored; scrub runs post-merge at step 4),
+`probed_args` (parts stay out of git via the step-3 ignore check; scrub runs at step 4),
 (e) returns a compact per-tool summary (decision + unwrap path) — never the payload.
 
 For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
@@ -107,6 +107,10 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    `<server>` name maps to its transport and forwards the server's `env` block (API keys,
    etc.) to the launched process. `MCPGEN_SERVERS` must prefix the command in the **same
    shell invocation** — it does not persist across calls.
+   `codegen` writes `--out` with a plain `write_text` and does **not** create parent
+   directories, so whenever `--out` names a folder, create it first or the run dies with
+   `FileNotFoundError`. The subfolder layout below is the default; `mkdir` is unnecessary
+   only when you write straight into the CWD.
    ```bash
    mkdir -p "<server>"
    MCPGEN_SERVERS=servers.json <mcpgen> codegen <server> --out <server>/<server>.py --embed-schema
@@ -120,9 +124,12 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    <mcpgen> codegen <server> --url "https://mcp.example.com/mcp" --out <server>/<server>.py --embed-schema
    <mcpgen> codegen <server> --url "https://api.example.com/mcp/" --bearer "$MY_TOKEN" --out <server>/<server>.py --embed-schema
    ```
-   `codegen`, `list`, `probe`, and `call` each require the same transport flags
-   (`--stdio` / `--url` / `--bearer` / `--config`) on every invocation — they do **not**
-   inherit flags from a prior run. `merge` and `discover` accept no transport flags.
+   Only the config form forwards a server's `env` block. With direct `--stdio` you must
+   repeat `--env` (once per variable) for every credential the server process needs, or
+   it starts unauthenticated. `--env KEY` forwards `$KEY` from the current shell;
+   `--env KEY=VAL` sets it inline. It is a no-op for non-stdio *transports* only: against
+   a config-declared stdio server it merges over that server's own `env` block, so one
+   extra variable never costs you the config's block.
 
    `codegen`, `list`, `probe`, and `call` each require the same transport flags
    (`--stdio` / `--url` / `--bearer` / `--env` / `--config`) on every invocation — they do **not**
@@ -382,8 +389,34 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    - CWD output (default): `<shapes-path>` = `<server>.shapes.json`
    - Subfolder output (e.g. `github/github.py`): `<shapes-path>` = `github/github.shapes.json`
 
-   Use the **same `<shapes-path>` value** in every probe (step 3), the merge (step 3b),
-   and codegen `--shapes` if you pass it explicitly.
+   Use the **same `<shapes-path>` value** in every probe (step 3) and the merge (step 3b),
+   and in codegen `--shapes` on the rare run that passes it.
+
+   **Ignore-rule preflight — run before the first live call of any kind**, including the
+   recon subagent's. Probing writes raw ids and PII into three artifacts. `mcpgen`
+   installs no ignore rules, so verify the repo has them.
+
+   Two of the three paths follow `<shapes-path>`, not the CWD: `merge` writes the verify
+   sidecar beside the shapes file. Write `<shapes-stem>` for `<shapes-path>` with the
+   `.shapes.json` suffix removed (`github/github.shapes.json` → `github/github`). Only
+   `probe-raw.json` is CWD-relative, because the `call --out` commands below put it there.
+   Raw payloads are named **per tool** — `<server>.<tool>.probe-raw.json` — so one capture
+   never overwrites another's, and the check below stands in for every such name: an
+   ignore rule that covers it must be a `*.probe-raw.json` glob, not one literal path.
+   `git check-ignore -q` takes one pathname at a time, and a bare `|| echo` still exits 0 —
+   so accumulate and fail hard:
+
+   ```bash
+   bad=0
+   for p in "<shapes-path>.parts/" "<shapes-stem>.verify.json" "<server>.<tool>.probe-raw.json"; do
+     git check-ignore -q "$p" || { echo "NOT IGNORED — add to .gitignore: $p"; bad=1; }
+   done
+   [ "$bad" -eq 0 ] || { echo "ignore preflight FAILED — do not probe"; exit 1; }
+   echo "ignore preflight OK"
+   ```
+
+   Add any pattern reported here and re-run until it prints `ignore preflight OK`. Do not
+   proceed with an unignored path.
 
    > **Recon (>4 selected tools):** Only now, with the ignore preflight green and
    > `<shapes-path>` fixed, dispatch a **recon subagent** for bootstrap ids and
@@ -627,7 +660,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    Each `--args` makes one live call. The observed shapes are **deep-merged**: keys are
    unioned (a key absent from some probes is kept — `total=False` covers it), type
    conflicts widen (`str`+`NoneType` → `str | None`; `int`+`float` → `float`; other
-   conflicts → `Any`). The skeleton's `_observed_shape` reflects the merged result, and
+   concrete conflicts → `Any`, or `Any | None` when a null was seen too). The skeleton's `_observed_shape` reflects the merged result, and
    `fields` pulls out the merged top-level scalars. With multiple probes, `probed_args`
    is a list of the arg-dicts; with a single probe it stays a plain dict.
 
@@ -661,16 +694,20 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
    **Check `inputSchema.required` before constructing probe args** (read from `list --schema`
    output). If the array is non-empty, never probe with `'{}'` — call the tool with minimal
-   valid args on the first attempt. Invent realistic-looking but fake values for required
-   string/ID args that carry no `enum`. For GitHub servers, prefer `owner: "microsoft",
-   repo: "vscode"` as the default probe repo (`octocat/Hello-World` lacks releases/tags/issue
-   fields and produces `[<empty>]` for those tools).
+   valid args on the first attempt. For a required arg that **references an existing
+   object** (an id, key, or slug), use a real value from the recon catalog or a discovery
+   tool — a server that validates existence answers an invented id with an error, and you
+   record an error shape instead of the record. Invent values only for required
+   string args that reference nothing (a free-text query, a label, a title). For GitHub
+   servers, prefer `owner: "microsoft", repo: "vscode"` — real, public, and carrying
+   releases, tags, and issues to observe.
 
    **Inspect `inputSchema` for enum constraints before constructing probe args** (read from
    `list --schema` output, field `inputSchema.properties[param].enum`). If an `enum` array
    is present, use its **first listed value** as the probe arg instead of inventing a value —
-   invented values will be rejected with an MCP validation error. Record the chosen value
-   in `probed_args`. Note: codegen maps enum params to `Literal[...]` automatically, so the
+   a validating server rejects invented values (mcpgen itself does not check). Record the chosen value
+   in `probed_args`. Note: codegen maps scalar enum members to `Literal[...]` automatically
+   (float and object members fall back to `float` / `dict`), so the
    generated signature already encodes the allowed values.
 
    **JSON-in-string detection.** Some servers double-encode: the record arrives as a JSON
@@ -723,7 +760,9 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
    **Empty-store probes produce under-typed list fields.** If a read tool returns an
    empty list (`[]`), the inner element shape is unobservable. Do not fabricate a schema
-   from zero samples — leave the field typed as `list`. Note in `session-overview.md`
+   from zero samples. The skeleton omits the field entirely; to keep it visible add
+   `"<field>": "list"` by hand — the one allowed non-scalar in `fields`.
+   Note in `session-overview.md`
    that the inner model is unobservable at probe time, and recommend re-running
    `mcpgen probe` after seeding the server with representative data (e.g. via
    `<mcpgen> call <server> <mutating-tool> --args '<json>' --out <server>.<mutating-tool>.probe-raw.json`)
@@ -739,10 +778,10 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
    **Security: the skeleton records live `probed_args` verbatim — real ids, names, possibly
    PII.** With multi-probe this is a *list* of arg-dicts. Batch agents write parts with
-   **raw** `probed_args` — the `.parts/` directory is gitignored, so raw args never enter
-   version control at this stage. The single scrub pass runs post-merge on the main thread
-   (step 4): open `shapes.json` and replace PII after `mcpgen merge` has written both the
-   shapes file and its gitignored `<server>.verify.json` sidecar. A real identifier in a
+   **raw** `probed_args`; the step-3 preflight above is what keeps them out of git.
+   The single scrub pass runs post-merge on the main thread
+   (step 4): open `<shapes-path>` and replace PII after `mcpgen merge` has written both the
+   shapes file and its gitignored `<shapes-stem>.verify.json` sidecar. A real identifier in a
    version-controlled file is a leak that survives deletion (git history) and travels to
    anyone the repo reaches.
 
@@ -762,8 +801,9 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    needed when the sidecar is absent or does not cover that tool.
 
    The shape-spec must record *that* `entityType` was probed as `int` and the response
-   *shape* — never the sample values. If you keep raw responses for reference, write them
-   to `<server>.probe-raw.json` (git-ignored), not into the shape-spec.
+   *shape* — never values lifted out of the response payload. This does not empty
+   `probed_args`: its functional (non-PII) values stay, per the scrub rules above. If you keep raw responses for reference, write them
+   to `<server>.<tool>.probe-raw.json` (git-ignored), not into the shape-spec.
 
 3b. **Consolidate parts → shapes.json.**
    ```
@@ -781,20 +821,26 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    - Parts for re-probed tools overwrite the corresponding base entry.
    - Use `--keep-parts` to retain the parts directory for inspection.
    - `mcpgen codegen` will also read parts directly (in-memory merge) if the merged file
-     is absent, so you can skip 3b during rapid iteration — but run it before committing
-     so the repo contains a single, hand-editable artifact.
-   - Also emits a gitignored `<server>.verify.json` beside `<shapes-path>` — a flat
+     is absent **and `--shapes` was not passed** — the explicit flag takes the file as
+     given and does not fall back. So you can skip 3b during rapid iteration only while
+     relying on auto-detect. Run it before committing either way, so the repo contains a
+     single, hand-editable artifact.
+   - Also emits a gitignored `<shapes-stem>.verify.json` — the sidecar name comes from
+     the `<shapes-path>` filename with `.shapes.json` stripped, not from `<server>`, so
+     it always lands beside the shapes file. It holds a flat
      `{tool: probed_args}` map sourced from raw parts (pre-scrub), for use by the
-     roundtrip verifier. Partial re-probes overlay existing sidecar entries.
+     roundtrip verifier. Partial re-probes overlay existing sidecar entries — except a
+     re-probe with empty args, which does not overwrite: delete that tool's stale entry
+     by hand, or the verifier replays the old arguments live.
 
 4. **Edit the shape-spec — THIS is the judgment.**
 
    **First: scrub `probed_args`.** This is the single scrub point — batch agents do NOT
-   scrub their parts. Open `shapes.json` and replace all real ids, emails, names, UUIDs,
+   scrub their parts. Open `<shapes-path>` and replace all real ids, emails, names, UUIDs,
    and other PII in every `probed_args` entry with `<example-*>` placeholders (follow the
-   PII vs functional-value guidance in step 3). The gitignored `<server>.verify.json`
+   PII vs functional-value guidance in step 3). The gitignored `<shapes-stem>.verify.json`
    sidecar already holds the original args for the roundtrip verifier, so scrubbing
-   `shapes.json` does not break verification.
+   `<shapes-path>` does not break verification.
 
    Then, for each tool entry:
    - **`unwrap`**: set the key path to the *real record*, stripping vendor envelopes.
@@ -810,7 +856,8 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      Two tools may not share a `return_model` name unless their `fields` dicts are identical. Check for collisions before finalising.
    - **`return_container`**: set `"list"` when the unwrapped value is a *list* of records
      (e.g. `query_acme`'s `data.results`). Return type becomes `list[<model>]` and the body
-     digs via `_dig_list` (list passes through, envelope dug, else `[]`) instead of `_dig`.
+     digs via `_dig_list` instead of `_dig`: a list passes through, an envelope is dug,
+     otherwise it falls back to the last path key at top level and defaults to `[]`.
      Omit for a single dict/scalar record (the `get_entity` case).
    - **Discriminator resolution (mandatory for polymorphic-suspect tools).** For every
      tool flagged in step 2.e **that is in the selected set**, you MUST choose one of
@@ -836,8 +883,10 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      > never emit a variant-specific `return_model` from a single-variant probe alone.
    - **`input_overrides`**: fix types the schema lied about. JSON Schema `number` is
      `float`, but some servers use `int` for id/type fields → `{"entityType": "int"}`.
-   - **`fields`**: keep **only top-level stable scalars the probe actually saw**. Mark
-     observed-`None` fields nullable (`"benchDurationCurrent": "float | None"`).
+   - **`fields`**: keep **only top-level stable scalars the probe actually saw**, plus the
+     one exception from step 3 — a hand-added `"<field>": "list"` for a field seen only as
+     an empty list. Mark observed-`None` fields nullable
+     (`"benchDurationCurrent": "float | None"`).
    - **`source`**: `"live"`, or `"fixture"` + a note if you authored from a recorded
      shape instead of a live call (never let a fixture fallback read as a live probe).
    - Delete `_observed_shape` once you've extracted the real shape.
@@ -905,7 +954,7 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      reports the engine missing on a machine where step 0 just used it.
    - **Server name** — `<server>` (the name used throughout this skill)
    - **Output folder** — the dir from `--out` (e.g. `<server>/`), which holds `<server>.py`,
-     `<server>.shapes.json`, and `<server>.verify.json`
+     `<shapes-path>`, and `<shapes-stem>.verify.json`
    - **Connection source** — exactly how step 1 reached the server:
      - config file: the `servers.json` path used via `MCPGEN_SERVERS=` / `--config`; **or**
      - direct params: `--stdio "<launch>"`, `--url "<url>"` (+ `--bearer "$ENV_VAR"` if applicable)
@@ -971,12 +1020,9 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
   scalars. Deep/variadic nests (`proposals.candidate.seniority.level`) stay `dict` /
   `Any`. Over-modelling = authoritative lies about a shape you saw once.
 - **Scrub `probed_args` before committing.** The post-merge scrub at step 4 is the single
-  scrub point — placeholder any real ids/names/PII directly in `shapes.json`. Parts
-  (`.parts/` dirs) and `<server>.verify.json` are gitignored raw counterparts; the only
-  committable artifact is a fully-scrubbed `shapes.json`.
-- **Drift is not the type's job.** A `TypedDict` catches no runtime drift by design.
-  Schema drift is the deferred `--check` mode's job (re-probe → diff vs stored
-  shape-spec), not a reason to pick a heavier return type.
+  scrub point — placeholder any real ids/names/PII directly in `<shapes-path>`. Parts
+  (`.parts/` dirs) and `<shapes-stem>.verify.json` are gitignored raw counterparts; the only
+  committable artifact is a fully-scrubbed `<shapes-path>`.
 - **Discriminator consistency — never emit a variant-specific `return_model` from a
   single-variant probe.** If a tool takes a discriminator arg (flagged in step 2.e),
   every sibling tool sharing that arg is polymorphic-suspect until probed across
