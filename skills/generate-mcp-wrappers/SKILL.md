@@ -194,8 +194,8 @@ barrier stays on main.
       such as `["string", "null"]`, or a scalar expressed only through `anyOf`/`oneOf`, does not
       clear the type test.
 
-      Where nothing clears all four, no advisory can fire — record `discriminators: N/A` in
-      `session-overview.md` and move to step 3. Two tools sharing only `page`, only a boolean or
+      Where nothing clears all four, no advisory can fire — run the description sweep below
+      before recording `discriminators: N/A`. Two tools sharing only `page`, only a boolean or
       object param, or `entityType` against `entitytype` all fail it; `maxResults` and `filePath`
       **pass** it, because the engine does not drop those. Otherwise the advisory names what
       survived:
@@ -205,6 +205,15 @@ barrier stays on main.
       [list]   entityType → export_excel, get_entity, get_entity_fields, …
       [list]   Probe EACH value or use a base model — do NOT type from one probe. See SKILL step 4.
       ```
+
+      **The advisory is not the only source — sweep the descriptions too.** Its precondition
+      needs a shared scalar, so two real discriminators are invisible to it by construction: one
+      confined to a **single** tool, and one whose type is an array. Read the descriptions of the
+      selected tools for a param that names what comes back — `Response key: products |
+      service_apis | cfn_resources` is a discriminator declaring itself in prose. Treat a hit as
+      a candidate like any other: carry it into Pass 2, resolve it in step 4. Enumerate its
+      values from the description, since a param like this often carries no `enum` to read them
+      from. Record `discriminators: N/A` only when this sweep comes up empty too.
 
       Record every candidate and the tools it spans. A discriminator found on one tool **drives
       its siblings** — every tool in that list is *polymorphic-suspect*, and stays so through
@@ -521,6 +530,22 @@ barrier stays on main.
       list tools keep `return_container: "list"` so each overload returns `list[<Variant>]` and
       the impl returns `list[V1 | V2 | …]`. Codegen supports that combination directly — no
       manual edits needed.
+
+      **Needs a discriminator that is both scalar and required.** Two ways a parameter fails
+      that, and they fail differently:
+
+      - **Array** (`sources: ["web", "news"]`) — overloads key on `Literal['<value>']`, so the
+        values must be mutually exclusive; an array can request several at once and get every
+        matching key back, so no set of overloads describes it. Nothing renders.
+      - **Optional** (absent from `inputSchema.required`) — this one renders, which is why it
+        is the dangerous case. Codegen emits the discriminator with no default, so a parameter
+        the server treats as optional becomes **mandatory on every call**, in the overloads and
+        the impl alike, and the wrapper forwards it whether or not the caller wanted it. The
+        params are keyword-only, so Python accepts the signature and `ast.parse` passes: step 6
+        sees nothing wrong. The only symptom is a call that used to type-check and no longer
+        does.
+
+      Resolve either with option 2 or 3, however cleanly their variants probed.
    2. **Generic base model** — a shared `TypedDict` of fields common to all variants
       (`total=False`), when variants are many/unstable or precision isn't worth N live calls.
    3. **Unwrap-only / `Any`** — when values can't be enumerated and a base model isn't justified.
@@ -530,9 +555,9 @@ barrier stays on main.
    > **Non-interactive fallback — when 2d's condition is not met *and* the variants were not all
    > probed** (more than 20 values, or values step 2.e could not enumerate): default to a
    > **generic base model** (option 2), and to unwrap-only `Any` only when variants are too
-   > diverse or structurally incompatible. Where every variant *was* probed, option 1 stands:
-   > emit the variants. Either way, never emit a variant-specific `return_model` from a
-   > single-variant probe alone.
+   > diverse or structurally incompatible. Where every variant *was* probed and the
+   > discriminator is both scalar and required, option 1 stands: emit the variants. Either way,
+   > never emit a variant-specific `return_model` from a single-variant probe alone.
 
 5. **Regenerate.** Reach the server exactly the way step 1 did — one form, not both:
 
