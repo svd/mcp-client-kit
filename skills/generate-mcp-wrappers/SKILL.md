@@ -200,8 +200,21 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
 
    The selected set (from any path) drives steps 3 and 4.
 
-   g. **Detect discriminators.** The `mcpgen list` output includes a stderr
-      advisory when params are shared across ≥2 tools:
+   e. **Detect discriminators.** The advisory is stderr of the *same* `list --schema`
+      run step 2.a already made, so the answer is in hand before any analysis.
+
+      *Precondition — use it to tell a genuinely absent advisory from an unread one.*
+      A candidate exists only where two or more tools declare a parameter under the
+      **same name, same case**, carrying a top-level `"type"` of exactly `"integer"`,
+      `"number"`, or `"string"`, and absent from the engine's own denylist — the
+      lowercased-exact-name list in Pass 1's first sentence, **not** the camelCase
+      additions Pass 1 layers on top of it. A union such as `["string", "null"]`, or a
+      scalar expressed only through `anyOf`/`oneOf`, does not clear the type test. Where
+      nothing clears all four, no advisory can fire — record `discriminators: N/A` in
+      `session-overview.md` and move to step 3. Two tools sharing only `page`, only a
+      boolean or object param, or `entityType` against `entitytype` all fail it;
+      `maxResults` and `filePath` **pass** it, because the engine does not drop those.
+      Otherwise the advisory names what survived:
       ```
       [list] ⚠  discriminator candidates (response shape varies by these args):
       [list]   entityType → export_excel, get_entity, get_entity_fields, …
@@ -209,25 +222,79 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
       ```
       Record every discriminator candidate and the tools it spans. A discriminator
       found on one tool **drives its siblings** — every tool in that list is
-      *polymorphic-suspect* and must be resolved in step 4 before the shape-spec is
-      considered complete.
+      *polymorphic-suspect*, and stays so through Pass 2 — which can confirm a candidate
+      but never disprove one. An **inconclusive** Pass 2 does not clear it: the tools
+      remain polymorphic-suspect and step 4 must still resolve them. That is what "flagged
+      in step 2.e" means
+      wherever the rest of this file says it. Resolution is mandatory for siblings
+      **inside the selected set**; a sibling outside it is recorded as unresolved, never
+      probed to close the gap.
 
       **Filter before probing — two-pass disqualification:**
 
-      *Pass 1 — auto-disqualify without probing.* Drop any candidate whose name matches
-      a known input-only pattern. No reasoning required; these are never response keys:
-      - **Pagination / window:** `page`, `limit`, `perPage`, `per_page`, `head`, `tail`,
-        `since`, `after`, `before`, `offset`, `cursor`, `maxResults`, `count`
-      - **Sort / order:** `sort`, `order`, `direction`, `orderBy`, `order_by`
-      - **Path / repo identity:** `path`, `filePath`, `file_path`, `repoPath`, `repo_path`,
-        `projectPath`, `repoName`, `repositoryName`, `workspacePath`
-      - **Spans all tools in the selected set** — a global context arg, not a shape switch.
+      *Pass 1 — auto-disqualify by name.* The advisory is already pre-filtered: `list`
+      drops `page`/`per_page`/`limit`/`offset`/`cursor`/`path`/`repo`/`owner`/`org`/
+      `branch`/`ref`/`method`/`query`/`search`/`filter`/`sort`/`order`/`direction`/
+      `context_lines`/`include`/`exclude` and exactly five identity forms —
+      `reponame`, `repo_name`, `repositoryname`, `username`, `orgname` — matching
+      lowercased exact names. That list is the whole of it: any other `*name` param
+      (`fileName`, `entityName`) reaches you. Do not re-check the ones it drops. Pass 1
+      catches the camelCase and alternate spellings
+      that exact match misses — no reasoning required; these steer a query, never the
+      shape:
+      - **Pagination / window:** `perPage`, `head`, `tail`, `since`, `after`, `before`,
+        `maxResults`, `count`
+      - **Sort / order:** `orderBy`, `order_by`
+      - **Path identity:** `filePath`, `file_path`, `repoPath`, `repo_path`,
+        `projectPath`, `workspacePath`
 
-      *Pass 2 — post-probe confirm.* For any candidate that survived Pass 1, confirm the
-      field appears in the *response* payload of at least one probed call (i.e. it is a
-      key in `_observed_shape`). A parameter that appears only in `inputSchema.properties`
-      but never in any observed response dict is an *input* parameter, not a response
-      discriminator — discard it regardless of how many tools share it.
+      Breadth is **not** a disqualifier. A parameter every selected tool accepts can still
+      be a real discriminator — on some servers every tool takes `entityType`. Judge a
+      candidate by what it does to the response, never by how many tools share it.
+
+      *Pass 2 — confirm by comparing response shapes.* This pass makes live calls, so it
+      runs at the **start of step 3**, after the ignore preflight and once `<shapes-path>`
+      exists — not here. Record the surviving candidates now; confirm them there.
+
+      For each candidate that survived Pass 1, pick one **non-mutating** tool that takes
+      it and probe **three distinct values** of that parameter — or every value, if its
+      `enum` has three or fewer — holding every other argument fixed.
+
+      **Normalize before comparing.** `_observed_shape` renders a list of more than one
+      element as `[<element shape>, "...xN"]`, where `N` is that response's element
+      count. `N` tracks how much data came back, not the shape, so two identical shapes
+      differ textually whenever the counts differ. Ignore every `...xN` sentinel when
+      comparing; a differing `N` alone is **not** a shape difference.
+
+      Then judge:
+      - **Any two values differ** (a key present in one and absent in the other, or the
+        same key with a different type) → confirmed discriminator. Resolve it per step 4.
+        Stop probing this candidate; one difference is proof.
+      - **All probed values identical** → **inconclusive, not disproven.** Three samples
+        of one tool cannot clear the parameter for its siblings: a fourth value, or the
+        same value on a different sibling, may still switch shape. Stop probing the
+        candidate here, but it stays polymorphic-suspect: resolve it in step 4 like any
+        other flagged tool — option 1 where the variants can be enumerated and probed,
+        otherwise option 2 or 3 — and record it in `session-overview.md` as unconfirmed
+        — with the tool and the exact values compared — typing the affected returns no more
+        precisely than
+        the probes justify. Never let an inconclusive result promote a
+        single-variant model to a confident one.
+
+      Do **not** require the parameter to appear as a key in the response. A server can
+      switch shape on an argument it never echoes back — `entityType=1` may return plain
+      `Person` fields with no `entityType` key — so absence from the payload proves
+      nothing either way.
+
+      This costs up to three live calls per surviving candidate. That is the price of the
+      answer: guessing from names alone is what produces a confident `list[Person]` for a
+      tool that returns something else at `entityType=7`. The Pass 1 list keeps the
+      candidate set small, and the 20-variant threshold below still caps full resolution.
+      Get the values from the param's `enum`, or from a discovery tool, as below. Issue
+      the values as **separate `probe` invocations**, never as repeated `--args` in one:
+      a single probe deep-merges all its calls into one `_observed_shape`, which unions
+      away the very difference this pass is looking for. Each probe overwrites the tool's
+      part file — read the shape between calls, or only the last one survives.
 
 3. **Probe each selected tool → skeleton (parallel-safe).**
 
@@ -248,6 +315,14 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    > condition holds; where it does not, probe only the tools whose required args
    > reference nothing and record the rest as unprobed, naming the id you lacked. It
    > returns a compact catalog, never a raw payload.
+
+   **Then run step 2.e's Pass 2** — the variant probes per surviving discriminator
+   candidate, comparing response shapes — before the main probe sweep. Skip it outright
+   when step 2.e recorded `discriminators: N/A`; there is no candidate to confirm. It runs *after*
+   recon because a candidate whose values are not declared in its `enum` can only get
+   them from the recon catalog. Pass 2's verdicts — confirmed **or inconclusive**, per
+   step 2.e — decide which tools stay polymorphic-suspect, and that decides how many
+   variants the sweep below has to cover.
 
    > **Batch dispatch (>4 selected tools, local `stdio` only):** With Pass 2 settled,
    > group selected tools into batches (batching rule: sibling sets together; see
@@ -346,17 +421,23 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
    Use multi-probe when: (a) some fields are nullable/optional, (b) the same tool is
    called with different ids and you want to capture all visible field variants, (c) a
    discriminated tool has multiple response shapes per variant that you want to union.
-   For discriminated tools (any tool in the polymorphic-suspect list from step 2.g),
-   probe **each variant separately** and place the merged result under the right
-   variant key manually in step 4. **Cap: max 20 variants per discriminator.** If the
-   enumerated value count exceeds 20, do NOT probe all — use `AskUserQuestion` to ask
-   the user: probe all N (each is a live call), probe a named subset, or fall back to
-   a generic base model (step 4 option 2). Each probe is a live call, so 20 is a
-   cost/blast-radius ceiling.
+   For discriminated tools (any tool in the polymorphic-suspect list from step 2.e),
+   probe **each variant separately** and place its shape under the right variant key
+   manually in step 4. A tool's part file is a single fixed path
+   (`<shapes-path>.parts/<tool>.json`) and each probe **overwrites** it, so read that
+   part and record the variant's shape *before* issuing the next variant's probe —
+   otherwise only the last variant survives. **Threshold: 20 variants per discriminator.** Probe
+   up to 20 without asking. Above 20, stop and put the choice to the user via
+   `AskUserQuestion` — probe all N (each is a live call), probe a named subset, or fall
+   back to a generic base model (step 4 option 2). Only an explicit user yes takes it
+   past 20; each probe is a live call, so the threshold is a cost/blast-radius brake.
 
-   > **Subagent fallback (when `AskUserQuestion` is unavailable):** Fall back to a
-   > generic base model of common fields (step 4 option 2); use unwrap-only `Any` if
-   > no stable shared base exists. Do not probe all N variants.
+   > **Non-interactive fallback — when 2d's condition is not met and the count is
+   > above 20**, since nothing can grant the exception: fall back to a generic base
+   > model of common fields (step 4 option 2), or unwrap-only `Any` where no stable
+   > shared base exists. Do **not** probe all N. At or under 20 the sweep proceeds
+   > without asking, exactly as above — the threshold is what the interactive gate
+   > guards, not the sweep itself.
 
    Enumerate discriminator values from: (a) the param's `enum` in `inputSchema`;
    (b) discovery tools / glossary / tool descriptions (e.g. `get_filters` /
@@ -517,8 +598,9 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
      digs via `_dig_list` (list passes through, envelope dug, else `[]`) instead of `_dig`.
      Omit for a single dict/scalar record (the `get_entity` case).
    - **Discriminator resolution (mandatory for polymorphic-suspect tools).** For every
-     tool flagged in step 2.g, you MUST choose one of three options before the
-     shape-spec is considered complete. Default: probe all variants (≤20).
+     tool flagged in step 2.e **that is in the selected set**, you MUST choose one of
+     three options before the shape-spec is considered complete; a flagged tool outside
+     the set stays recorded as unresolved. Default: probe all variants (≤20).
      1. **Probe all variants** *(default, ≤20 values)* — emit `discriminator` +
         `variants`; for list tools keep `return_container: "list"` so each overload
         returns `list[<Variant>]` and the impl returns `list[V1 | V2 | …]`.
@@ -646,12 +728,13 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
   Schema drift is the deferred `--check` mode's job (re-probe → diff vs stored
   shape-spec), not a reason to pick a heavier return type.
 - **Discriminator consistency — never emit a variant-specific `return_model` from a
-  single-variant probe.** If a tool takes a discriminator arg (flagged in step 2.g),
+  single-variant probe.** If a tool takes a discriminator arg (flagged in step 2.e),
   every sibling tool sharing that arg is polymorphic-suspect until probed across
   values or resolved to a base model / `Any`. A single-variant model is a silent lie
-  for all other variants — the exact mistake that typed `query_acme` as `list[Person]`
-  when entityType=2/7/… return completely different shapes.
-- **Enum params render as `Literal[...]` automatically** — do not hand-widen them to
-  `str`. Codegen's `py_type()` emits `Literal['a', 'b', ...]` for any param whose
-  `inputSchema` carries an `enum` array (no flag required). Widen to `str` only if
-  the server's actual validation rejects values that aren't in the declared enum.
+  for all other variants: typing a tool `list[Person]` from one `entityType` value
+  misdescribes every response the other values return.
+- **Scalar enum params render as `Literal[...]` automatically** — do not hand-widen them
+  to `str`. Codegen's `py_type()` emits `Literal['a', 'b', ...]` for a param whose
+  `inputSchema` carries an `enum` array of PEP 586-safe scalars (no flag required);
+  float and object members fall back to `float` / `dict`. Widen to `str` only if
+  the server actually accepts values outside the declared enum.
