@@ -2,6 +2,7 @@
   "notion-fetch": {
     "unwrap": [],
     "return_model": "NotionEntity",
+    "return_container": null,
     "input_overrides": {},
     "fields": {
       "title": "str",
@@ -9,11 +10,19 @@
       "text": "str"
     },
     "source": "live",
-    "probed_args": {
-      "id": "<page-id>"
-    },
+    "probed_args": [
+      {
+        "id": "<notion-page-id>"
+      },
+      {
+        "id": "<notion-database-id>"
+      },
+      {
+        "id": "self"
+      }
+    ],
     "probe_args_scrubbed": true,
-    "_note": "Two probes (a page id and a database id) returned the same four keys, so `id` is not a shape discriminator. `metadata` is a nested dict ({type: str}) and stays untyped; `text` carries the Notion-flavored Markdown body."
+    "_discriminator_note": "`id` is a confirmed shape-switching argument: a page id and a database id both return {metadata,title,url,text}, but id='self' returns a workspace/user identity envelope under a `self` key. Values are unbounded (any uuid, any notion:// docs URI, the literal 'self'), so no Literal overload set can enumerate them — resolved with SKILL step 4 option 2, a generic base model of the fields common to the entity responses. `metadata` and `self` stay untyped nested dicts."
   },
   "notion-get-comments": {
     "unwrap": [],
@@ -22,14 +31,17 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "page_id": "<page-id>"
+      "page_id": "<notion-page-id>",
+      "include_all_blocks": true,
+      "include_resolved": true
     },
     "probe_args_scrubbed": true,
-    "_note": "The probed page carries no discussions, so the response was an empty object `{}`. Nothing about the populated shape was observable; re-probe against a page with comments before shaping."
+    "_empty_result_note": "Live call succeeded and returned `{}` — the probed page carries no discussions even with include_all_blocks and include_resolved set. The record shape is unobservable, not absent; re-probe against a page that has comments."
   },
   "notion-get-teams": {
     "unwrap": [],
     "return_model": "TeamsResult",
+    "return_container": null,
     "input_overrides": {},
     "fields": {
       "joinedTeams": "list",
@@ -38,14 +50,14 @@
     },
     "source": "live",
     "probed_args": {},
-    "_note": "Both team lists came back empty in this workspace, so the element shape is unobservable. `joinedTeams`/`otherTeams` are hand-added as `list` (the empty-list exception) to keep them visible."
+    "_empty_result_note": "Both team lists came back empty in this workspace, so the team element shape is unobservable. The two list fields are hand-added per the empty-store rule; their inner model stays untyped."
   },
   "notion-get-users": {
     "unwrap": [
       "results"
     ],
+    "return_model": "WorkspaceUser",
     "return_container": "list",
-    "return_model": "UserSummary",
     "input_overrides": {},
     "fields": {
       "type": "str",
@@ -53,15 +65,16 @@
       "name": "str"
     },
     "source": "live",
-    "probed_args": {},
-    "_note": "Envelope is {results, has_more}; unwrapped to the record list. `email` was absent for every probed user, so it is not typed."
+    "probed_args": {
+      "page_size": 5
+    }
   },
   "notion-list-favorite-pages": {
     "unwrap": [
       "results"
     ],
-    "return_container": "list",
     "return_model": "SidebarPageSummary",
+    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "type": "str",
@@ -70,15 +83,15 @@
     },
     "source": "live",
     "probed_args": {
-      "limit": 5
+      "limit": 8
     }
   },
   "notion-list-private-pages": {
     "unwrap": [
       "results"
     ],
-    "return_container": "list",
     "return_model": "SidebarPageSummary",
+    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "type": "str",
@@ -87,16 +100,15 @@
     },
     "source": "live",
     "probed_args": {
-      "limit": 5
-    },
-    "_note": "Same record shape as notion-list-favorite-pages, so the two share `SidebarPageSummary`. The envelope's `nextCursor` is dropped by the unwrap."
+      "limit": 8
+    }
   },
   "notion-list-recent-pages": {
     "unwrap": [
       "results"
     ],
-    "return_container": "list",
     "return_model": "RecentPageSummary",
+    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "type": "str",
@@ -106,43 +118,46 @@
     },
     "source": "live",
     "probed_args": {
-      "limit": 5
+      "limit": 8
     },
-    "_note": "Distinct model from SidebarPageSummary: recent entries also carry `icon`, which is absent on some rows and covered by total=False."
+    "_note": "`title` and `icon` are absent on some rows; TypedDict total=False covers that. The envelope's `nextCursor` is dropped by the unwrap — callers that need pagination must read the raw envelope."
   },
   "notion-list-shared-pages": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {
+      "results": "list"
+    },
+    "source": "live",
+    "probed_args": {
+      "limit": 8
+    },
+    "_empty_result_note": "The Shared sidebar section is empty in this workspace, so `results` returned `[]` and the element shape was never observed. Left untyped rather than copied from the sibling list tools — that would state a shape this probe did not see."
+  },
+  "notion-query-data-sources": {
     "unwrap": [
       "results"
     ],
+    "return_model": "DataSourceRow",
     "return_container": "list",
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "limit": 5
-    },
-    "_note": "`results` came back empty in this workspace, so the element shape was never observed. Unwrap-only: the envelope is stripped but the element stays Any rather than borrowing a shape from the sibling list tools."
-  },
-  "notion-query-data-sources": {
-    "unwrap": [],
-    "return_model": "DataSourceQueryResult",
     "input_overrides": {},
     "fields": {
-      "has_more": "bool"
+      "id": "str",
+      "url": "str",
+      "createdTime": "str"
     },
     "source": "live",
     "probed_args": {
       "data": {
-        "mode": "sql",
         "data_source_urls": [
-          "collection://<data-source-uuid>"
+          "collection://<data-source-id>"
         ],
-        "query": "SELECT * FROM \"collection://<data-source-uuid>\" LIMIT 5"
+        "query": "SELECT * FROM \"collection://<data-source-id>\" LIMIT 5"
       }
     },
     "probe_args_scrubbed": true,
-    "_note": "The input `data` is itself a union (mode=sql | mode=view), but the selector is nested inside an object rather than a top-level scalar param, so overloads cannot key on it — resolved as a generic base model. Only `has_more` is a stable top-level scalar: `results` rows are the queried database's own columns (dynamic per data source) and `data_source_ids` is a list, so neither is typed. mode=view was not probed (no view URL reachable without a mutating tool)."
+    "_note": "Only `id`, `url`, and `createdTime` are Notion-supplied and stable across data sources. Every other row key is a user-defined database column ('Name', 'Status', 'Date Created' in this probe) and varies per data source, so none is promoted. total=False leaves room for them. The `data` argument's nested `mode` (sql | view) is a second shape switch, but it sits one level down inside an object parameter — @overload keys on top-level scalars only — so it cannot be expressed as variants; only SQL mode was probed."
   },
   "notion-query-meeting-notes": {
     "unwrap": [],
@@ -151,8 +166,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {},
-    "_probe_status": "inconclusive",
-    "_note": "Every response was an error rather than a result, so no shape was ever observed."
+    "_probe_status": "inconclusive"
   },
   "notion-search-agents": {
     "unwrap": [],
@@ -165,7 +179,7 @@
       "limit": 5
     },
     "_probe_status": "inconclusive",
-    "_note": "Both enum values of `scope` (favorites, workspace) returned an error envelope rather than a result, so the agent record shape was never observed."
+    "_note": "Both enum values of the required `scope` discriminator were probed; each returned an error envelope rather than a result, so no variant shape was established."
   },
   "notion-search": {
     "unwrap": [
@@ -173,10 +187,9 @@
     ],
     "return_container": "list",
     "discriminator": "query_type",
-    "input_overrides": {},
     "variants": {
       "internal": {
-        "return_model": "SearchContentItem",
+        "return_model": "SearchResultItem",
         "fields": {
           "id": "str",
           "title": "str",
@@ -187,24 +200,20 @@
         }
       },
       "user": {
-        "return_model": "SearchUserItem",
+        "return_model": "UserSearchItem",
         "fields": {
           "text": "str"
         }
       }
     },
+    "input_overrides": {},
+    "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "query": "task list",
-        "query_type": "internal",
-        "content_search_mode": "workspace_search"
-      },
-      {
-        "query": "s",
-        "query_type": "user"
-      }
-    ],
-    "_note": "Confirmed discriminator: `query_type` is a two-value scalar enum and both values were probed separately. internal returns ranked content records; user returns a single blob whose `text` holds a <users-search-results> XML document. The envelope's `type` key echoes the mode (content_search / user_search) and is dropped by the unwrap."
+    "probed_args": {
+      "query": "project notes",
+      "query_type": "internal",
+      "page_size": 5
+    },
+    "_note": "Confirmed discriminator: both enum values were probed separately and the response shapes differ. query_type='internal' returns ranked content hits ({id,title,url,type,highlight,timestamp}); query_type='user' returns a single row whose `text` holds a <users-search-results> XML blob. The envelope's own `type` field echoes the mode ('user_search'), but the discriminator is the argument, not that key. `query_type` is optional in the schema, so codegen also emits an omission overload returning the union."
   }
 }

@@ -27,7 +27,7 @@ class TeamsResult(TypedDict, total=False):
     hasMore: bool
 
 
-class UserSummary(TypedDict, total=False):
+class WorkspaceUser(TypedDict, total=False):
     type: str
     id: str
     name: str
@@ -46,11 +46,13 @@ class RecentPageSummary(TypedDict, total=False):
     icon: str
 
 
-class DataSourceQueryResult(TypedDict, total=False):
-    has_more: bool
+class DataSourceRow(TypedDict, total=False):
+    id: str
+    url: str
+    createdTime: str
 
 
-class SearchContentItem(TypedDict, total=False):
+class SearchResultItem(TypedDict, total=False):
     id: str
     title: str
     url: str
@@ -59,7 +61,7 @@ class SearchContentItem(TypedDict, total=False):
     timestamp: str
 
 
-class SearchUserItem(TypedDict, total=False):
+class UserSearchItem(TypedDict, total=False):
     text: str
 
 
@@ -662,7 +664,7 @@ async def notion_get_teams(caller: McpCaller, *, query: str | None = None) -> Te
 notion_get_teams.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'query': {'description': 'Optional search query to filter teams by name (case-insensitive).', 'type': 'string', 'minLength': 1, 'maxLength': 100}}, 'additionalProperties': {}}
 
 
-async def notion_get_users(caller: McpCaller, *, query: str | None = None, start_cursor: str | None = None, page_size: int | None = None, user_id: str | None = None) -> list[UserSummary]:
+async def notion_get_users(caller: McpCaller, *, query: str | None = None, start_cursor: str | None = None, page_size: int | None = None, user_id: str | None = None) -> list[WorkspaceUser]:
     """Retrieves a list of users in the current workspace. Shows workspace members and guests with their IDs, names, emails (if available), and types (person or bot).
 
     Supports cursor-based pagination to iterate through all users in the workspace.
@@ -697,7 +699,7 @@ async def notion_get_users(caller: McpCaller, *, query: str | None = None, start
     if user_id is not None:
         args["user_id"] = user_id
     result = await caller.call(SERVER, "notion-get-users", args)
-    return cast("list[UserSummary]", _dig_list(result, ('results', )))
+    return cast("list[WorkspaceUser]", _dig_list(result, ('results', )))
 
 notion_get_users.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'query': {'description': 'Optional search query to filter users by name or email (case-insensitive).', 'type': 'string', 'minLength': 1, 'maxLength': 100}, 'start_cursor': {'description': 'Cursor for pagination. Use the next_cursor value from the previous response to get the next page.', 'type': 'string', 'minLength': 1}, 'page_size': {'description': 'Number of users to return per page (1–100; default 100).', 'type': 'integer', 'minimum': 1, 'maximum': 100}, 'user_id': {'description': 'Return only the user matching this ID. Pass "self" to fetch the current user.', 'type': 'string', 'minLength': 1, 'maxLength': 100}}, 'additionalProperties': {}}
 
@@ -768,8 +770,7 @@ async def notion_list_shared_pages(caller: McpCaller, *, limit: float | None = N
         args["limit"] = limit
     if cursor is not None:
         args["cursor"] = cursor
-    result = await caller.call(SERVER, "notion-list-shared-pages", args)
-    return _dig_list(result, ('results', ))
+    return await caller.call(SERVER, "notion-list-shared-pages", args)
 
 notion_list_shared_pages.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'limit': {'description': 'Maximum results to return (1-200).', 'type': 'number'}, 'cursor': {'description': 'Opaque pagination cursor from the previous response.', 'type': 'string'}}, 'additionalProperties': False}
 
@@ -787,7 +788,7 @@ async def notion_move_pages(caller: McpCaller, *, page_or_database_ids: list[str
 notion_move_pages.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'page_or_database_ids': {'description': 'An array of up to 100 page or database IDs to move. IDs are v4 UUIDs and can be supplied with or without dashes (e.g. extracted from a <page> or <database> URL given by the "search" or "fetch" tool). Data Sources under Databases can\'t be moved individually.', 'minItems': 1, 'maxItems': 100, 'type': 'array', 'items': {'type': 'string'}}, 'new_parent': {'description': 'The new parent under which the pages will be moved. This can be a page, the workspace, a database, or a specific data source under a database when there are multiple. Moving pages to the workspace level adds them as private pages and should rarely be used.', 'anyOf': [{'type': 'object', 'properties': {'page_id': {'type': 'string', 'description': 'The ID of the parent page (with or without dashes), for example, 195de9221179449fab8075a27c979105'}, 'type': {'type': 'string', 'enum': ['page_id']}}, 'required': ['page_id'], 'additionalProperties': {}}, {'type': 'object', 'properties': {'database_id': {'type': 'string', 'description': 'The ID of the parent database (with or without dashes), for example, 195de9221179449fab8075a27c979105'}, 'type': {'type': 'string', 'enum': ['database_id']}}, 'required': ['database_id'], 'additionalProperties': {}}, {'type': 'object', 'properties': {'data_source_id': {'type': 'string', 'description': 'The ID of the parent data source (collection), with or without dashes. For example, f336d0bc-b841-465b-8045-024475c079dd'}, 'type': {'type': 'string', 'enum': ['data_source_id']}}, 'required': ['data_source_id'], 'additionalProperties': {}}, {'type': 'object', 'properties': {'type': {'type': 'string', 'enum': ['workspace']}}, 'required': ['type'], 'additionalProperties': {}}]}}, 'required': ['page_or_database_ids', 'new_parent'], 'additionalProperties': {}}
 
 
-async def notion_query_data_sources(caller: McpCaller, *, data: Any) -> DataSourceQueryResult:
+async def notion_query_data_sources(caller: McpCaller, *, data: Any) -> list[DataSourceRow]:
     """Query data from Notion databases using SQL or by specifying a view. This is the canonical replacement for the deprecated query_database_view tool.
 
     By default, uses SQL mode to execute SQLite queries against one or more data sources. Alternatively, use view mode to execute a database view's existing filters and sorts. Pass the same view_url previously used with query_database_view. Archive selection is supported in view mode only. SQL mode does not accept "is_archived"; SQL archive support is a separate infrastructure follow-up.
@@ -831,7 +832,8 @@ async def notion_query_data_sources(caller: McpCaller, *, data: Any) -> DataSour
         data: The data required for querying data sources
     """
     args: dict[str, Any] = {"data": data}
-    return cast("DataSourceQueryResult", await caller.call(SERVER, "notion-query-data-sources", args))
+    result = await caller.call(SERVER, "notion-query-data-sources", args)
+    return cast("list[DataSourceRow]", _dig_list(result, ('results', )))
 
 notion_query_data_sources.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'data': {'description': 'The data required for querying data sources', 'anyOf': [{'type': 'object', 'properties': {'data_source_urls': {'maxItems': 100, 'type': 'array', 'items': {'type': 'string'}, 'description': 'Notion data source URLs whose SQLite tables are available to the query; each data source is exposed as a table named by its URL. Obtain them from the fetch tool, in the format: collection://f336d0bc-b841-465b-8045-024475c079dd'}, 'query': {'type': 'string', 'description': 'Read-only SQLite query to execute against the data sources. Use a data source URL as the table name, e.g. SELECT * FROM "collection://..." WHERE .... Include every needed filter in WHERE (filters on views of the data source are not automatically applied). For time comparisons or ordering, normalize text timestamps with datetime(...) or date(...).'}, 'mode': {'type': 'string', 'enum': ['sql']}, 'params': {'description': 'Positional parameters bound to `?` placeholders in the query. Prefer parameterized queries over string interpolation. Use "__YES__" for checked checkboxes and "__NO__" for unchecked checkboxes.', 'maxItems': 100, 'type': 'array', 'items': {'anyOf': [{'type': 'string'}, {'type': 'number'}, {'type': 'boolean'}, {'type': 'null'}]}}}, 'required': ['data_source_urls', 'query'], 'additionalProperties': False}, {'type': 'object', 'properties': {'mode': {'type': 'string', 'enum': ['view']}, 'view_url': {'type': 'string', 'description': 'URL of a specific database view to query. Example: https://www.notion.so/workspace/db-id?v=view-id'}, 'start_cursor': {'description': 'Cursor for pagination. Use the next_cursor value from the previous response to get the next page.', 'type': 'string', 'minLength': 1, 'maxLength': 200}, 'page_size': {'description': 'Number of rows to return per page (default: 100, max: 100).', 'type': 'integer', 'minimum': 1, 'maximum': 100}, 'is_archived': {'description': 'Optional archive selector. Omitted or false queries non-archived rows only; true queries archived rows only.', 'type': 'boolean'}}, 'required': ['mode', 'view_url'], 'additionalProperties': False}]}}, 'required': ['data'], 'additionalProperties': {}}
 
@@ -913,12 +915,15 @@ notion_query_meeting_notes.__schema__ = {'type': 'object', '$schema': 'https://j
 
 
 @overload
-async def notion_search(caller: McpCaller, *, query: str, query_type: Literal['internal'], content_search_mode: Literal['workspace_search', 'ai_search'] | None = None, data_source_url: str | None = None, page_url: str | None = None, teamspace_id: str | None = None, filters: dict | None = None, page_size: int | None = None, max_highlight_length: int | None = None) -> list[SearchContentItem]: ...
+async def notion_search(caller: McpCaller, *, query: str, query_type: Literal['internal'], content_search_mode: Literal['workspace_search', 'ai_search'] | None = None, data_source_url: str | None = None, page_url: str | None = None, teamspace_id: str | None = None, filters: dict | None = None, page_size: int | None = None, max_highlight_length: int | None = None) -> list[SearchResultItem]: ...
 
 @overload
-async def notion_search(caller: McpCaller, *, query: str, query_type: Literal['user'], content_search_mode: Literal['workspace_search', 'ai_search'] | None = None, data_source_url: str | None = None, page_url: str | None = None, teamspace_id: str | None = None, filters: dict | None = None, page_size: int | None = None, max_highlight_length: int | None = None) -> list[SearchUserItem]: ...
+async def notion_search(caller: McpCaller, *, query: str, query_type: Literal['user'], content_search_mode: Literal['workspace_search', 'ai_search'] | None = None, data_source_url: str | None = None, page_url: str | None = None, teamspace_id: str | None = None, filters: dict | None = None, page_size: int | None = None, max_highlight_length: int | None = None) -> list[UserSearchItem]: ...
 
-async def notion_search(caller: McpCaller, *, query: str, query_type: str, content_search_mode: Literal['workspace_search', 'ai_search'] | None = None, data_source_url: str | None = None, page_url: str | None = None, teamspace_id: str | None = None, filters: dict | None = None, page_size: int | None = None, max_highlight_length: int | None = None) -> list[SearchContentItem | SearchUserItem]:
+@overload
+async def notion_search(caller: McpCaller, *, query: str, content_search_mode: Literal['workspace_search', 'ai_search'] | None = None, data_source_url: str | None = None, page_url: str | None = None, teamspace_id: str | None = None, filters: dict | None = None, page_size: int | None = None, max_highlight_length: int | None = None) -> list[SearchResultItem | UserSearchItem]: ...
+
+async def notion_search(caller: McpCaller, *, query: str, query_type: str | None = None, content_search_mode: Literal['workspace_search', 'ai_search'] | None = None, data_source_url: str | None = None, page_url: str | None = None, teamspace_id: str | None = None, filters: dict | None = None, page_size: int | None = None, max_highlight_length: int | None = None) -> list[SearchResultItem | UserSearchItem]:
     """Search the user's Notion workspace and connected sources (Slack, Google Drive,
     GitHub, Jira, Teams, SharePoint, OneDrive, Linear) and return a ranked list
     of results to read. Two query types:
@@ -981,7 +986,9 @@ async def notion_search(caller: McpCaller, *, query: str, query_type: str, conte
         page_size: Maximum number of results to return (default 10). Lower values reduce response size.
         max_highlight_length: Maximum character length for result highlights (default 200). Set to 0 to omit highlights entirely.
     """
-    args: dict[str, Any] = {"query": query, "query_type": query_type}
+    args: dict[str, Any] = {"query": query}
+    if query_type is not None:
+        args["query_type"] = query_type
     if content_search_mode is not None:
         args["content_search_mode"] = content_search_mode
     if data_source_url is not None:
@@ -997,7 +1004,7 @@ async def notion_search(caller: McpCaller, *, query: str, query_type: str, conte
     if max_highlight_length is not None:
         args["max_highlight_length"] = max_highlight_length
     result = await caller.call(SERVER, "notion-search", args)
-    return cast("list[SearchContentItem | SearchUserItem]", _dig_list(result, ('results', )))
+    return cast("list[SearchResultItem | UserSearchItem]", _dig_list(result, ('results', )))
 
 notion_search.__schema__ = {'type': 'object', '$schema': 'https://json-schema.org/draft/2020-12/schema', 'properties': {'query': {'type': 'string', 'minLength': 1, 'description': 'Semantic search query over your entire Notion workspace and connected sources (Slack, Google Drive, Github, Jira, Microsoft Teams, Sharepoint, OneDrive, or Linear). For best results, don\'t provide more than one question per tool call. Use a separate "search" tool call for each search you want to perform.\n\nAlternatively, the query can be a substring or keyword to find users by matching against their name or email address. For example: "john" or "john@example.com"'}, 'query_type': {'description': 'Specify type of the query as either "internal" or "user". Always include this input if performing "user" search.', 'type': 'string', 'enum': ['internal', 'user']}, 'content_search_mode': {'description': 'Select search backend: "workspace_search" (faster, workspace-only) or "ai_search" (semantic, includes Slack/Linear/etc.). If omitted, uses AI search if available. Content searches only.', 'type': 'string', 'enum': ['workspace_search', 'ai_search']}, 'data_source_url': {'description': 'Optionally, provide the URL of a Data source to search. This will perform a semantic search over the pages in the Data Source. Note: must be a Data Source, not a Database. <data-source> tags are part of the Notion flavored Markdown format returned by tools like fetch. The full spec is available in the create-pages tool description.', 'type': 'string'}, 'page_url': {'description': 'Optionally, provide the URL or ID of a page to search within. This will perform a semantic search over the content within and under the specified page. Accepts either a full page URL (e.g. https://notion.so/workspace/Page-Title-1234567890) or just the page ID (UUIDv4) with or without dashes.', 'type': 'string'}, 'teamspace_id': {'description': 'Optionally, provide the ID of a teamspace to restrict search results to. This will perform a search over content within the specified teamspace only. Accepts the teamspace ID (UUIDv4) with or without dashes.', 'type': 'string'}, 'filters': {'description': "Optionally provide filters to apply to the search results. Only valid when query_type is 'internal'.", 'type': 'object', 'properties': {'created_date_range': {'description': 'Optional filter to only produce search results created within the specified date range.', 'type': 'object', 'properties': {'start_date': {'description': 'The start date of the date range as an ISO 8601 date string, if any.', 'type': 'string', 'format': 'date', 'pattern': '^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$'}, 'end_date': {'description': 'The end date of the date range as an ISO 8601 date string, if any.', 'type': 'string', 'format': 'date', 'pattern': '^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$'}}, 'additionalProperties': {}}, 'created_by_user_ids': {'description': 'Optional filter to only produce search results created by the Notion users that have the specified user IDs.', 'maxItems': 100, 'type': 'array', 'items': {'type': 'string'}}}, 'additionalProperties': {}}, 'page_size': {'description': 'Maximum number of results to return (default 10). Lower values reduce response size.', 'type': 'integer', 'minimum': 1, 'maximum': 25}, 'max_highlight_length': {'description': 'Maximum character length for result highlights (default 200). Set to 0 to omit highlights entirely.', 'type': 'integer', 'minimum': 0, 'maximum': 500}}, 'required': ['query'], 'additionalProperties': {}}
 

@@ -22,6 +22,11 @@ from mcpgen import LoginWontHelp, McpBridgeCaller, ensure_login
 SERVER_URL = "https://mcp.notion.com/mcp"
 SERVER_NAME = "notion"
 
+# Real args below come from notion/notion.verify.json (unscrubbed probe args).
+PAGE_ID = "a4eb85e3403c4d8597acf3749a0ddb1f"
+DATABASE_ID = "0c54738b63e44b4abbdf86106f4d37a8"
+DATA_SOURCE_URL = "collection://6d3e0a4f-39a1-4219-a6bc-c68be6b635c8"
+
 
 async def main() -> None:
     # Ensure a valid OAuth token is available (silent refresh or browser prompt).
@@ -39,19 +44,17 @@ async def main() -> None:
     # One connection for the whole run: one initialize() and one OAuth
     # pre-flight refresh, instead of one per tool call.
     async with caller.connected():
-        # Skipped mutating tools: notion_convert_page_to_skill, notion_create_attachment,
-        # notion_create_comment, notion_create_database, notion_create_file_upload,
-        # notion_create_folder, notion_create_pages, notion_create_view,
-        # notion_duplicate_page, notion_move_pages, notion_update_data_source,
-        # notion_update_folder, notion_update_page, notion_update_view.
-        # Also skipped (read-only, but need a server-side ephemeral id that no probe
-        # produced): notion_get_async_task, notion_download_attachment.
-        #
-        # Args come from notion.verify.json (real, pre-scrub) unless noted otherwise.
+        # Skipped mutating tools: notion_create_attachment, notion_create_comment,
+        # notion_create_database, notion_create_file_upload, notion_create_folder,
+        # notion_create_pages, notion_create_view, notion_update_data_source,
+        # notion_update_folder, notion_update_page, notion_update_view,
+        # notion_duplicate_page, notion_move_pages, notion_convert_page_to_skill.
+        # Also skipped (read-only but need a live server-side id that no probe
+        # recorded): notion_get_async_task, notion_download_attachment.
 
-        # notion-get-users -> list[UserSummary]
-        users = await notion.notion_get_users(caller)
-        print(f"notion-get-users: {len(users)} item(s)")
+        # notion-fetch -> NotionEntity  (id='self' identity envelope)
+        me = await notion.notion_fetch(caller, id="self")
+        print(f"notion-fetch(self): title={me.get('title')!r}  url={me.get('url')!r}")
 
         # notion-get-teams -> TeamsResult
         teams = await notion.notion_get_teams(caller)
@@ -60,82 +63,77 @@ async def main() -> None:
             f"other={len(teams.get('otherTeams') or [])} hasMore={teams.get('hasMore')}"
         )
 
+        # notion-get-users -> list[WorkspaceUser]
+        users = await notion.notion_get_users(caller, page_size=5)
+        print(f"notion-get-users: {len(users)} user(s)")
+
         # notion-list-recent-pages -> list[RecentPageSummary]
-        recent = await notion.notion_list_recent_pages(caller, limit=5)
-        print(f"notion-list-recent-pages: {len(recent)} item(s)")
+        recent = await notion.notion_list_recent_pages(caller, limit=8)
+        print(f"notion-list-recent-pages: {len(recent)} page(s)")
 
         # notion-list-favorite-pages -> list[SidebarPageSummary]
-        favorites = await notion.notion_list_favorite_pages(caller, limit=5)
-        print(f"notion-list-favorite-pages: {len(favorites)} item(s)")
+        favorites = await notion.notion_list_favorite_pages(caller, limit=8)
+        print(f"notion-list-favorite-pages: {len(favorites)} page(s)")
 
         # notion-list-private-pages -> list[SidebarPageSummary]
-        private = await notion.notion_list_private_pages(caller, limit=5)
-        print(f"notion-list-private-pages: {len(private)} item(s)")
+        private = await notion.notion_list_private_pages(caller, limit=8)
+        print(f"notion-list-private-pages: {len(private)} page(s)")
 
-        # notion-list-shared-pages -> Any
-        # Unwrap-only: `results` was empty at probe time, so the element shape is
-        # unknown and the wrapper still returns Any.
-        shared = await notion.notion_list_shared_pages(caller, limit=5)
+        # notion-list-shared-pages -> Any  (envelope left untyped: probe saw results=[])
+        shared = await notion.notion_list_shared_pages(caller, limit=8)
         print(f"notion-list-shared-pages: {type(shared).__name__}")
 
-        # notion-fetch -> NotionEntity
-        entity = await notion.notion_fetch(caller, id="0c54738b63e44b4abbdf86106f4d37a8")
+        # notion-fetch -> NotionEntity  (page id)
+        page = await notion.notion_fetch(caller, id=PAGE_ID)
+        print(f"notion-fetch(page): title={page.get('title')!r}  url={page.get('url')!r}")
+
+        # notion-fetch -> NotionEntity  (database id)
+        database = await notion.notion_fetch(caller, id=DATABASE_ID)
         print(
-            f"notion-fetch: title={entity.get('title')!r} url={entity.get('url')!r} "
-            f"text_len={len(entity.get('text') or '')}"
+            f"notion-fetch(database): title={database.get('title')!r}  "
+            f"url={database.get('url')!r}"
         )
 
-        # notion-get-comments -> Any
-        # The probed page carried no discussions, so `{}` is the expected response.
+        # notion-get-comments -> Any  (probed page had no discussions; shape unobserved)
         comments = await notion.notion_get_comments(
-            caller, page_id="a4eb85e3403c4d8597acf3749a0ddb1f"
+            caller, page_id=PAGE_ID, include_all_blocks=True, include_resolved=True
         )
         print(f"notion-get-comments: {type(comments).__name__}")
 
-        # notion-search -> list[SearchContentItem]  (query_type="internal")
-        # Args from notion.shapes.json.probed_args: verify.json only carries the
-        # "user" variant, and these values contain no PII.
-        search_internal = await notion.notion_search(
-            caller,
-            query="task list",
-            query_type="internal",
-            content_search_mode="workspace_search",
-        )
-        print(f"notion-search(internal): {len(search_internal)} record(s)")
-
-        # notion-search -> list[SearchUserItem]  (query_type="user")
-        search_user = await notion.notion_search(caller, query="s", query_type="user")
-        print(f"notion-search(user): {len(search_user)} record(s)")
-
-        # notion-query-data-sources -> DataSourceQueryResult
-        # mode=view was never probed (no view URL reachable without a mutating tool).
-        ds = await notion.notion_query_data_sources(
+        # notion-query-data-sources -> list[DataSourceRow]  (SQL mode only was probed)
+        rows = await notion.notion_query_data_sources(
             caller,
             data={
-                "mode": "sql",
-                "data_source_urls": [
-                    "collection://6d3e0a4f-39a1-4219-a6bc-c68be6b635c8"
-                ],
-                "query": (
-                    'SELECT * FROM "collection://'
-                    '6d3e0a4f-39a1-4219-a6bc-c68be6b635c8" LIMIT 5'
-                ),
+                "data_source_urls": [DATA_SOURCE_URL],
+                "query": f'SELECT * FROM "{DATA_SOURCE_URL}" LIMIT 5',
             },
         )
-        print(f"notion-query-data-sources: has_more={ds.get('has_more')}")
+        print(f"notion-query-data-sources: {len(rows)} row(s)")
 
-        # notion-search-agents -> Any
-        # Probe was inconclusive: both `scope` values returned an error envelope,
-        # so this call may fail rather than return a shaped record.
-        agents = await notion.notion_search_agents(caller, scope="workspace", limit=5)
-        print(f"notion-search-agents: {type(agents).__name__}")
+        # notion-search -> list[SearchResultItem]  (query_type='internal')
+        hits = await notion.notion_search(
+            caller, query="project notes", query_type="internal", page_size=5
+        )
+        print(f"notion-search(internal): {len(hits)} hit(s)")
 
-        # notion-query-meeting-notes -> Any
-        # Probe was inconclusive: every response was an error, and no args were
-        # established, so this is called with defaults only.
-        meeting_notes = await notion.notion_query_meeting_notes(caller)
-        print(f"notion-query-meeting-notes: {type(meeting_notes).__name__}")
+        # notion-search -> list[UserSearchItem]  (query_type='user')
+        people = await notion.notion_search(
+            caller, query="project notes", query_type="user", page_size=5
+        )
+        print(f"notion-search(user): {len(people)} row(s)")
 
+        # notion-search-agents -> Any  (scope='workspace'; probe returned an error envelope)
+        agents_ws = await notion.notion_search_agents(caller, scope="workspace", limit=5)
+        print(f"notion-search-agents(workspace): {type(agents_ws).__name__}")
+
+        # notion-search-agents -> Any  (scope='favorites'; second enum value of the
+        # required discriminator — probed too, also inconclusive)
+        agents_fav = await notion.notion_search_agents(caller, scope="favorites", limit=5)
+        print(f"notion-search-agents(favorites): {type(agents_fav).__name__}")
+
+        # notion-query-meeting-notes -> Any  (probe inconclusive; no filter recorded)
+        notes = await notion.notion_query_meeting_notes(caller)
+        print(f"notion-query-meeting-notes: {type(notes).__name__}")
 
 if __name__ == "__main__":
     asyncio.run(main())
