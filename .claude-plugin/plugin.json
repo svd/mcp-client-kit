@@ -1,7 +1,7 @@
 {
   "name": "mcp-client-kit",
   "description": "Turn any MCP server into typed Python you own — one async def per tool, return types probed from real responses, drift caught in CI. Requires the mcpgen CLI (pip install mcp-client-kit).",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "author": {
     "name": "Sviatoslav Sviridov",
     "email": "sviridov@gmail.com"
