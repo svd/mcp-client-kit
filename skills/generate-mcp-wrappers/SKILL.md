@@ -59,7 +59,7 @@ barrier stays on main.
 
 ## Procedure
 
-0. **Resolve the CLI.** Requires `mcpgen >= 0.7.0` — one floor for the whole procedure,
+0. **Resolve the CLI.** Requires `mcpgen >= 0.9.0` — one floor for the whole procedure,
    step 7's runner included, so no later step re-checks the engine. Do not proceed on an
    older one.
 
@@ -68,7 +68,7 @@ barrier stays on main.
    outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
 
    ```bash
-   min=0.7.0; MCPGEN=
+   min=0.9.0; MCPGEN=
    for c in "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
      out=$(eval "$c --version" 2>/dev/null) || continue
      ver=$(printf '%s\n' "$out" | awk '{print $2}')
@@ -531,21 +531,12 @@ barrier stays on main.
       the impl returns `list[V1 | V2 | …]`. Codegen supports that combination directly — no
       manual edits needed.
 
-      **Needs a discriminator that is both scalar and required.** Two ways a parameter fails
-      that, and they fail differently:
-
-      - **Array** (`sources: ["web", "news"]`) — overloads key on `Literal['<value>']`, so the
-        values must be mutually exclusive; an array can request several at once and get every
-        matching key back, so no set of overloads describes it. Nothing renders.
-      - **Optional** (absent from `inputSchema.required`) — this one renders, which is why it
-        is the dangerous case. Codegen emits the discriminator with no default, so a parameter
-        the server treats as optional becomes **mandatory on every call**, in the overloads and
-        the impl alike, and the wrapper forwards it whether or not the caller wanted it. The
-        params are keyword-only, so Python accepts the signature and `ast.parse` passes: step 6
-        sees nothing wrong. The only symptom is a call that used to type-check and no longer
-        does.
-
-      Resolve either with option 2 or 3, however cleanly their variants probed.
+      **Needs a scalar discriminator.** An array (`sources: ["web", "news"]`) is not one:
+      overloads key on `Literal['<value>']`, so the values have to be mutually exclusive, and an
+      array can request several at once and get every matching key back. No set of overloads
+      describes that, so nothing renders — resolve it with option 2 or 3, however cleanly its
+      variants probed. An *optional* discriminator is fine: codegen emits an extra overload for
+      the omitted case, returning the union.
    2. **Generic base model** — a shared `TypedDict` of fields common to all variants
       (`total=False`), when variants are many/unstable or precision isn't worth N live calls.
    3. **Unwrap-only / `Any`** — when values can't be enumerated and a base model isn't justified.
@@ -556,7 +547,7 @@ barrier stays on main.
    > probed** (more than 20 values, or values step 2.e could not enumerate): default to a
    > **generic base model** (option 2), and to unwrap-only `Any` only when variants are too
    > diverse or structurally incompatible. Where every variant *was* probed and the
-   > discriminator is both scalar and required, option 1 stands: emit the variants. Either way,
+   > discriminator is scalar, option 1 stands: emit the variants. Either way,
    > never emit a variant-specific `return_model` from a single-variant probe alone.
 
 5. **Regenerate.** Reach the server exactly the way step 1 did — one form, not both:
