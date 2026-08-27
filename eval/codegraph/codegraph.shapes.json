@@ -2,26 +2,33 @@
   "codegraph_context": {
     "unwrap": [],
     "return_model": null,
-    "input_overrides": {},
+    "input_overrides": {
+      "maxNodes": "int"
+    },
     "fields": {},
     "source": "live",
     "probed_args": {
-      "task": "How does the roundtrip verifier work?"
+      "task": "how does artifact verification work",
+      "maxNodes": 10,
+      "includeCode": true
     },
     "_observed_shape": "str",
-    "_observed_bytes": 3918
+    "_observed_bytes": 466
   },
   "codegraph_explore": {
     "unwrap": [],
     "return_model": null,
-    "input_overrides": {},
+    "input_overrides": {
+      "maxFiles": "int"
+    },
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "verify.py roundtrip check"
+      "query": "verify_server cmd_verify",
+      "maxFiles": 3
     },
     "_observed_shape": "str",
-    "_observed_bytes": 12554
+    "_observed_bytes": 14678
   },
   "codegraph_node": {
     "unwrap": [],
@@ -30,22 +37,26 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "symbol": "check_roundtrip"
+      "symbol": "verify_server",
+      "includeCode": false
     },
     "_observed_shape": "str",
-    "_observed_bytes": 515
+    "_observed_bytes": 1255
   },
   "codegraph_search": {
     "unwrap": [],
     "return_model": null,
-    "input_overrides": {},
+    "input_overrides": {
+      "limit": "int"
+    },
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "check_roundtrip"
+      "query": "verify",
+      "limit": 10
     },
     "_observed_shape": "str",
-    "_observed_bytes": 614
+    "_observed_bytes": 1236
   },
   "codegraph_trace": {
     "unwrap": [],
@@ -54,10 +65,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "from": "main",
-      "to": "check_roundtrip"
+      "from": "cmd_verify",
+      "to": "verify_server"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 9995
+    "_observed_bytes": 12404
   }
 }

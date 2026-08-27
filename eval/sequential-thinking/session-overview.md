@@ -1,49 +1,54 @@
-# Session Overview: sequential-thinking
+# sequential-thinking — session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-07-14T08:28:25Z
-- **Duration:** 2m 3s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T06:01:39Z
+- **Duration:** 3m 0s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Server Summary
+## Server surface
 
-The `sequential-thinking` MCP server exposes a single tool: `sequentialthinking`. It implements a structured chain-of-thought reasoning loop, accepting a thought string and metadata (step number, total estimate, revision/branching flags) and returning a status record tracking progress through the thinking sequence.
+`sequential-thinking` exposes exactly **one tool**, `sequentialthinking`, and it was probed.
+Nothing was skipped: the tool carries agreeing annotations (`readOnlyHint: true`,
+`destructiveHint: false`, `idempotentHint: true`), and the keyword test finds no mutating
+word in the name, so the hint stands undisputed and the tool entered the selected set on
+the default path. `mutating-skipped`: none. `discriminators: N/A` — a candidate needs a
+scalar parameter shared by two or more tools, and this server has only one tool, so the
+`list --schema` advisory could not fire.
 
-## Tool Coverage
+## Probing
 
-- **Total tools exposed:** 1
-- **Probed:** 1 (`sequentialthinking`)
-- **Skipped:** 0
-- **Mutating tools flagged:** 0
+Three live calls in one `probe` invocation, all against the same server process so the
+server's own state accumulated across them: a plain first thought, a branch
+(`branchFromThought: 1`, `branchId: "alt-a"`), and a closing thought with
+`nextThoughtNeeded: false`. The multi-probe was deliberate — it is the only way to see
+`branches` non-empty, since the first call returns it as `[]`.
 
-No discriminator candidates were detected — only one tool exists, so there are no shared params across sibling tools to disambiguate.
+The one surprise is what the tool returns. Its description is entirely about prose
+reasoning, so a text payload would be the obvious guess; instead every call returns a
+small JSON **status object** describing the thinking session — the thought counter, the
+caller's own `nextThoughtNeeded` echoed back, the list of branch ids, and a running
+`thoughtHistoryLength`. The prose the tool is named for goes to the server's stderr as a
+boxed banner, not into the response. Payload size was 117 bytes. A second surprise, minor:
+`nextThoughtNeeded` is described as a core parameter yet is absent from
+`inputSchema.required`, so the generated signature makes it optional.
 
-## Probe Findings
+No errors, no empty results, no rate limiting. The `npx` cold start printed the server's
+own stdout banner between frames; the probe succeeded, so that is noise.
 
-`inputSchema.required` listed `thought`, `thoughtNumber`, `totalThoughts` (note: `nextThoughtNeeded` is not schema-required despite the tool description implying it always matters). Two live calls were made in one probe session, chained so the second call could exercise the branching path the first run's empty-list probe couldn't reach:
+## Shape decision
 
-```json
-[
-  {"thought": "Step 1: identify the problem.", "nextThoughtNeeded": true, "thoughtNumber": 1, "totalThoughts": 2},
-  {"thought": "Step 2 (branch): explore an alternative approach.", "nextThoughtNeeded": false, "thoughtNumber": 2, "totalThoughts": 2, "branchFromThought": 1, "branchId": "alt-approach"}
-]
-```
+- **`sequentialthinking` → `ThoughtStatus`** (single dict, no `return_container`).
+  `unwrap` stays `[]`: the parsed payload *is* the record, with no vendor envelope over
+  it, so inventing a key path would make `_dig` return a field instead of the record.
+  `fields` keeps the four observed top-level scalars plus `branches: list[str]` — the
+  element type is not a guess, it was observed carrying the `"alt-a"` branch id in probes
+  2 and 3. `input_overrides` is empty; the schema's `integer`/`boolean` declarations
+  matched what came back, so nothing was lied about. `probed_args` needed no scrubbing:
+  the thoughts are invented free text and the branch id is a label, with no ids, paths, or
+  PII anywhere.
 
-The server responded with a flat dict, no vendor envelope, for both calls. The second (branching) call surfaced a previously-unobserved detail: `branches` is a **list of strings** (branch id labels, e.g. `"alt-approach"`), not an opaque empty list as a single-call probe would show. Multi-probing across a stateful branch call was the key to resolving this field's element type.
+## Outcome
 
-## Shape Decisions
-
-**`sequentialthinking` -> `ThoughtResult`**
-
-- **Unwrap path:** `[]` — no envelope; the response is a flat dict at the top level.
-- **Return model:** `ThoughtResult` (TypedDict) — stable scalar/list-of-scalar fields warrant a typed model.
-- **Fields included:**
-  - `thoughtNumber: int`, `totalThoughts: int`, `nextThoughtNeeded: bool` — echoed back from input
-  - `branches: list[str]` — branch id labels; resolved from `str` after the branching probe (previously unobservable with an empty-list result)
-  - `thoughtHistoryLength: int` — running count of submitted thoughts
-- **`input_overrides`:** none needed; schema types are correct as declared.
-- **PII scrub:** `probed_args` contains only generic placeholder sentences and a descriptive branch slug (`"alt-approach"`) — no emails, UUIDs, numeric ids, or personal names. No scrubbing required.
-
-## Generated Module
-
-The regenerated `sequential-thinking.py` parsed cleanly (`ast.parse` success). `sequentialthinking` now returns `-> ThoughtResult` with `branches: list[str]`, an improvement over a prior run that left `branches` as generic `list` due to an empty-list probe. `eval-kit verify` reports all checks passing (`ast`, `signatures`, `idempotency`, `pii`); `roundtrip` is skipped because `probed_args` is a multi-probe list, which the roundtrip verifier does not call live.
+Regeneration with the shape-spec parsed cleanly (`ast.parse` OK). The wrapper now reads
+`-> ThoughtStatus` instead of `-> Any`, with `ThoughtStatus` rendered as a `total=False`
+`TypedDict`. `run.py` was intentionally not generated — the harness's verify stage owns it.

@@ -1,51 +1,60 @@
-# Session Overview: deepwiki
+# deepwiki — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T15:42:11Z
-- **Duration:** 1m 50s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T05:57:27Z
+- **Duration:** 3m 54s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Summary
+## Tool inventory
 
-The `deepwiki` MCP server (HTTP, `https://mcp.deepwiki.com/mcp`, no auth) exposes 3
-tools. All 3 were read-only (no `create`/`update`/`delete`-shaped names, no
-`readOnlyHint: false`), so all 3 were selected and probed under the subagent
-"probe all non-mutating tools" fallback — no tools were skipped. None of the tools
-shared a discriminator-shaped parameter, so no polymorphic-variant resolution was
-needed.
+`mcpgen list deepwiki --schema` returned **3 tools**, all probed, none skipped:
 
-## Tool-by-tool probe results
+```
+Tools on deepwiki:
+  ask_question         — Ask any question about a GitHub repository and get an AI-powered, context-grounded response.
+  read_wiki_contents   — View documentation about a GitHub repository.
+  read_wiki_structure  — Get a list of documentation topics for a GitHub repository.
+```
 
-- **`read_wiki_structure`** — probed with `repoName: "modelcontextprotocol/servers"`.
-  Returned a ~1.2 KB Markdown-formatted outline of documentation topics as a plain
-  string (a nested bullet list of page titles). Not JSON, not JSON-in-a-string
-  (`json.loads()` fails on it) — genuinely unstructured prose.
-- **`ask_question`** — probed with the same repo and the question "What is the
-  purpose of this repository?". Returned a ~2.5 KB free-text, AI-generated answer.
-  Same as above: prose, not structured data.
-- **`read_wiki_contents`** — probed with the same repo. Returned the full wiki body
-  as a single ~394 KB Markdown string — by far the largest payload of the three,
-  and the reason this tool is a strong "big dump" candidate to keep out of model
-  context in downstream callers, even though its shape (a bare string) needed no
-  further typing.
+No tool carries an `annotations` block, so mutation classification fell through to the
+keyword test plus a semantic read of each description. Splitting the names on `_` yields
+`ask`/`question`, `read`/`wiki`/`contents`, `read`/`wiki`/`structure` — no whole word is on
+the mutating list, and all three descriptions describe reads. Nothing was flagged, so no
+`_mutating_suspect` markers were added and `mutating-skipped` is empty.
+
+**discriminators: N/A.** `repoName` is the only parameter shared by more than one tool, and
+it fails the advisory precondition twice over: `reponame` is one of the five identity forms
+the engine denylists, and on `ask_question` it is expressed through `anyOf` rather than a
+top-level scalar `"type"`. The `list --schema` stderr carried no advisory, confirming this.
+Pass 2 was therefore skipped outright.
+
+All three tools were probed against the public repo `modelcontextprotocol/servers` — a real,
+well-documented target — with the ≥ 2 s hosted-endpoint pacing between calls.
+
+## Surprises
+
+Every probe came back `_observed_shape: "str"`. Because a text payload collapses to a bare
+`"str"` and the words are lost, each tool's raw payload was captured with `mcpgen call --out`
+and run through the JSON-in-string guard: all three returned `NOT_JSON` (`JSONDecodeError`).
+Reading the payload heads confirmed they are genuine successes — a Markdown topic outline, a
+Markdown prose answer, and a 373 KB Markdown wiki dump — not quota, auth, or 404 error text.
+So `_observed_shape: "str"` is left as plain evidence of a real text-returning tool; no
+`_probe_status: inconclusive` marker was warranted.
+
+The size spread is the notable result: `read_wiki_structure` 1.2 KB, `ask_question` 2.0 KB,
+`read_wiki_contents` 394 KB. Codegen picked the last one up from `_observed_bytes` and emitted
+a payload-size warning into its docstring.
 
 ## Shape decisions
 
-All three tools got the same shape decision: **`unwrap: []`, `return_model: null`**.
-Each tool's entire response is a single Markdown/prose string with no vendor
-envelope, no JSON structure, and no stable scalar fields to promote into a
-`TypedDict`. Typing any of them as a record would be an authoritative lie about a
-shape that is, by design, natural-language text. The generated wrapper functions
-correctly keep `-> Any` for all three — callers should treat the return value as a
-plain string and handle it (render, chunk, summarize) at the call site.
+deepwiki has **no shapeable tool by design**. For all three: `unwrap: []` (no vendor envelope
+exists — the MCP content block holds the Markdown directly), `return_model: null`, `fields: {}`,
+`return_container` omitted. Setting a `TypedDict` on any of them would claim a dict the wrapper
+never returns; `-> Any` over a `str` is the honest signature. No `input_overrides` were needed —
+`ask_question`'s `anyOf` correctly renders `repoName: Any`, since the server genuinely accepts
+either a string or a list of up to ten.
 
-No PII appeared in `probed_args` — `repoName` values are public GitHub repository
-identifiers and the `question` string is a generic prompt, so no scrubbing was
-required beyond the standard pass.
+`probed_args` needed no scrubbing: a public repo slug and an authored question string are
+functional values, not PII.
 
-## Module generation
-
-`mcpgen codegen` regenerated `eval/deepwiki/deepwiki.py` from the shape spec
-without errors. The module parses cleanly (`ast.parse` succeeds), and all three
-signatures (`ask_question`, `read_wiki_contents`, `read_wiki_structure`) correctly
-read `-> Any`, matching the shape-spec's `return_model: null` for all three tools.
+The regenerated module parsed cleanly (`ast.parse` OK).

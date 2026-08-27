@@ -15,8 +15,8 @@ SERVER = 'memory'
 
 
 class KnowledgeGraph(TypedDict, total=False):
-    entities: list
-    relations: list
+    entities: list[dict]
+    relations: list[dict]
 
 
 async def add_observations(caller: McpCaller, *, observations: list[dict]) -> Any:

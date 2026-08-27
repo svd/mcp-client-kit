@@ -1,6 +1,6 @@
 """
 Smoke-test runner for generated sqlite/ wrappers.
-Transport: stdio  (uvx mcp-server-sqlite --db-path /tmp/eval.db)
+Transport: stdio  (uvx --with 'mcp<2' mcp-server-sqlite --db-path /tmp/eval.db)
 Auth: none
 
 Usage:
@@ -10,39 +10,39 @@ import asyncio
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+# The wrapper module lives next to this file (eval/sqlite/sqlite.py), so this
+# directory — not its parent — goes on sys.path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sqlite
 
 from mcpgen import McpBridgeCaller
 
 
 async def main() -> None:
-    caller = McpBridgeCaller(cmd="uvx mcp-server-sqlite --db-path /tmp/eval.db")
+    caller = McpBridgeCaller(cmd="uvx --with 'mcp<2' mcp-server-sqlite --db-path /tmp/eval.db")
 
     # One connection for the whole run: a single initialize() and a single
     # subprocess, instead of reconnecting for every tool call.
     async with caller.connected():
         # Skipped mutating tools: append_insight, create_table, write_query
 
-        # list_tables -> list[TableName]
+        # list_tables -> list[TableName]  (no args)
         tables = await sqlite.list_tables(caller)
         print(f"list_tables: {len(tables)} table(s)")
 
-        # describe_table -> list[ColumnInfo]  (probe: users)
+        # describe_table -> list[ColumnInfo]  (probed args: table_name='users')
         cols_users = await sqlite.describe_table(caller, table_name="users")
         print(f"describe_table(users): {len(cols_users)} column(s)")
 
-        # describe_table -> list[ColumnInfo]  (probe: products)
+        # describe_table -> list[ColumnInfo]  (probed args: table_name='products')
         cols_products = await sqlite.describe_table(caller, table_name="products")
         print(f"describe_table(products): {len(cols_products)} column(s)")
 
-        # read_query -> list  (probe: SELECT * FROM users LIMIT 2)
-        rows_users = await sqlite.read_query(caller, query="SELECT * FROM users LIMIT 2")
-        print(f"read_query(users): {len(rows_users)} row(s)")
-
-        # read_query -> list  (probe: SELECT * FROM products LIMIT 2)
-        rows_products = await sqlite.read_query(caller, query="SELECT * FROM products LIMIT 2")
-        print(f"read_query(products): {len(rows_products)} row(s)")
+        # read_query -> Any  (probed args: query='SELECT * FROM users')
+        # Row keys follow the caller's SELECT projection, so the shape spec
+        # leaves this Any on purpose.
+        rows = await sqlite.read_query(caller, query="SELECT * FROM users")
+        print(f"read_query: {type(rows).__name__} with {len(rows)} row(s)")
 
 
 if __name__ == "__main__":

@@ -1,37 +1,67 @@
-# Session Overview: huggingface MCP Server
+# huggingface — session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T15:42:26Z
-- **Duration:** 2m 38s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T06:00:32Z
+- **Duration:** 5m 40s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Tool Inventory
+## Tool inventory
 
-The HuggingFace MCP server currently exposes **4 tools**: `hf_whoami`, `hub_repo_search`, `hub_repo_details`, `hf_fs`. All 4 carry `annotations.readOnlyHint: true`, so all 4 were probed live; none were skipped.
+The server exposes **4 tools**, all of them read-only: `hf_whoami`, `hub_repo_search`,
+`hub_repo_details`, `hf_fs`. Every tool carries `annotations.readOnlyHint: true`, so the
+keyword fallback never ran as the deciding test. All 4 were probed; none were skipped.
 
-**Surface drift since the prior eval (2026-07-14, 7 tools).** `hf_doc_search`, `hf_doc_fetch`, and `space_search` are no longer present in `mcpgen list --schema` output. This run reflects only tools live at execution time — the stale `shapes.json` entries for those three retired tools (inherited from the prior run's file via `mcpgen merge`'s preserve-unprobed behavior) were removed by hand, along with their orphaned `*.probe-raw.json` files. No discriminator candidates were flagged (no stderr advisory) — expected with only 4 tools and no shared polymorphic-suspect param.
+`mcpgen` resolved to `uv run mcpgen` (0.9.0.dev1). Transport is hosted HTTP, so probes ran
+sequentially from a single driver thread with a 2 s interval — no fan-out.
 
-## Probing Results
+## mutating-skipped
 
-Consistent with the prior run, **all 4 probed tools return pre-formatted Markdown/plain-text strings**, not structured JSON — this holds even for `hub_repo_search` and `hub_repo_details`, which clearly wrap structured repo/dataset metadata internally. `_observed_shape: "str"` was accurate for every tool.
+None. No tool was flagged.
 
-- `hf_whoami` — called with no args; returned an anonymous-usage notice (join/settings links), no identity to scrub.
-- `hub_repo_search` — probed twice: a model query (`bert-base-uncased`) and a dataset query (`squad`), both with `repo_types` scoped and `limit: 5`. Both returned Markdown result lists.
-- `hub_repo_details` — probed twice: `bert-base-uncased` (model, `overview`) and `squad` (dataset, `overview` + `dataset_structure`) to exercise the multi-operation path. Both returned prose/Markdown detail blocks.
-- `hf_fs` — probed with an `ls hf://models/trending --limit 5` operation and a `search hf://papers transformers` operation, covering two of the six documented sub-commands. Both returned large Markdown listings (the `search` probe alone was ~49 KB), confirming the tool is a text-formatting shim over the Hub filesystem regardless of sub-command.
+## Annotation note
 
-No probe hit a quota, rate-limit, or auth error this run (server is usable anonymously without degraded responses), so no `_probe_status: "inconclusive"` markers were needed.
+All four tools pair `readOnlyHint: true` with `idempotentHint: false`, which the skill's
+contradiction check treats as a server contradicting itself. Read in context it is not one:
+these are open-world reads over a live hub (`openWorldHint: true`), so repeated calls
+legitimately return different results without anything being written. The hint was left
+trusted and the observation recorded here rather than converting all four tools to
+mutating-suspect, which would have dropped coverage to zero on a server that only reads.
 
-## Shape Decisions
+## Discriminators
 
-Since all 4 probed tools return `str`:
+`discriminators: N/A`. No advisory fired on `list --schema`, and the precondition confirms
+why: the only scalar parameters shared across tools are `limit`, `offset`, `sort`, and
+`query`, all on the engine denylist. `operations` is shared by `hub_repo_details` and
+`hf_fs` but is an array, so it fails the scalar test.
 
-- **`unwrap`:** `[]` for all tools — no vendor envelope; the MCP `text` content field is the final string value.
-- **`return_model`:** `null` for all tools — a `TypedDict` isn't applicable to plain string responses; no primitive-name model was fabricated.
-- **`return_container`:** omitted — no list of records returned.
-- **`fields`:** `{}` for all tools — no stable scalar fields to extract from a string.
-- **`probed_args`:** no PII scrubbing required — all values are public strings (repo IDs, search terms, `hf://` URIs).
+`repo_type` on `hub_repo_details` is a plausible per-tool shape switcher, so it was checked
+directly: `repo_type=model` and `repo_type=dataset` (with `operations` widened) both return
+Markdown prose. No structural variance, so no variant models were emitted.
 
-## Generated Module
+## Shape decisions
 
-The regenerated `huggingface.py` (10.4 KB, 4 async functions) parsed cleanly via `ast.parse`. A second `codegen` invocation with identical inputs produced a byte-identical file (idempotency confirmed by diff). All 4 functions return `-> Any`, the honest type given every tool returns unstructured text — no `TypedDict` models were warranted. `eval-kit verify huggingface` passed `ast`, `signatures`, `idempotency`, and `pii`; `roundtrip` was skipped (no shaped, non-mutating tool exists to round-trip). Final verdict: **pass**.
+Every probe returned `_observed_shape: "str"`, and the guarded JSON-in-string test reported
+`NOT_JSON` for all four raw captures. This server is **prose-by-design**: it renders
+Markdown for humans, not JSON records. `hub_repo_search` returns a Markdown report with
+`##`/`###` headings per repo; `hf_fs` returns a Markdown table per operation; `hub_repo_details`
+returns a repo card; `hf_whoami` returns an anonymous-auth notice.
+
+That notice is a genuine success payload, not a failure — the tool's job is to describe the
+auth context, and anonymous is a valid context. It is therefore recorded as a plain `"str"`
+shape, **not** `_probe_status: inconclusive`.
+
+Consequently all four entries keep `unwrap: []`, `return_model: null`, and empty `fields`.
+There is no envelope to strip and no record to type; inventing a `TypedDict` here would
+state an authoritative lie about a payload that is text.
+
+One real finding did come out of the schemas: `hub_repo_search.limit` is declared
+`"type": "number"` but is a result count, so `input_overrides: {"limit": "int"}` was set. The
+regenerated signature reads `limit: int | None` instead of `float | None`. Enum params
+rendered as `Literal[...]` automatically, including the nested list-item enums on
+`repo_types` and `operations`.
+
+## Verification
+
+`ast.parse` on the regenerated `huggingface.py` succeeds. All four wrappers correctly read
+`-> Any`, which is the honest return type for a server whose every tool returns prose.
+`run.py` is generated by the harness's verify stage, not here.

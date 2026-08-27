@@ -1,64 +1,64 @@
-# Session Overview — memory
+# memory — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-07-14T08:24:04Z
-- **Duration:** 2m 42s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T05:57:28Z
+- **Duration:** 3m 55s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Summary
+## Seeding
 
-The `memory` server (`@modelcontextprotocol/server-memory`, stdio, no auth) exposes 9
-tools: 6 mutating (`create_entities`, `create_relations`, `add_observations`,
-`delete_entities`, `delete_observations`, `delete_relations`) and 3 read-only
-(`read_graph`, `search_nodes`, `open_nodes`). Running as a non-interactive subagent,
-`AskUserQuestion` was unavailable, so tool selection followed the skill's subagent
-fallback: probe every non-mutating tool, skip every mutating tool entirely. No
-discriminator candidates were flagged by `mcpgen list --schema` — the three probed
-tools take unrelated args (`names`, no args, `query`).
+Both harness seed commands ran before the skill and both succeeded: `create_entities`
+(Ada Lovelace, Analytical Engine) and `create_relations` (Ada Lovelace —programmed→
+Analytical Engine). Seeding mattered: the read tools return
+`{"entities": [], "relations": []}` against an empty store, leaving inner element shapes
+unobservable. With the store populated, every probe carried real records.
 
-## Probe results
+## Tool selection
 
-Because mutating tools were never invoked, each `mcpgen probe` call hit a fresh
-in-memory knowledge graph with no prior entities or relations (`npx` launches a new
-server process per `mcpgen` invocation, and this server keeps no on-disk state
-between processes). All three probed tools returned the identical, unsurprising
-shape:
+The server exposes **9 tools**. All nine carry `annotations`, and every one declares
+`readOnlyHint`, so step 2b's primary path decided the whole set with no keyword guessing:
 
-```json
-{"entities": [], "relations": []}
-```
+- **3 probed** (`readOnlyHint: true`, agreeing annotations, names clean under the
+  contradiction check): `read_graph`, `search_nodes`, `open_nodes`.
+- **6 skipped as mutating** (`readOnlyHint: false`, stated by the server): `create_entities`,
+  `create_relations`, `add_observations`, `delete_entities`, `delete_observations`,
+  `delete_relations`. The three `delete_*` tools also carry `destructiveHint: true`.
 
-No errors, quota issues, or auth failures — the server just runs an ephemeral local
-store. This matches the skill's "empty-store" case: the inner element shape of
-`entities`/`relations` is unobservable from a zero-sample probe, so both were left
-typed as a bare `list` rather than fabricated as nested `TypedDict`s.
+`discriminators: N/A` — `mcpgen list --schema` emitted no advisory, and no candidate could
+clear the precondition: the only scalar parameter shared shape-wise is `query`, which is on
+the engine's own denylist; every other parameter is an array.
 
-## Shape decisions
+## Probe results and shape decisions
 
-All three read tools (`read_graph`, `search_nodes`, `open_nodes`) share the exact
-same top-level shape (`entities: list`, `relations: list`), so they were unified
-under a single `TypedDict` — **`KnowledgeGraph`** — with `unwrap: []` (no vendor
-envelope to strip) and no `return_container` (each call returns one graph object,
-not a list of them). Sharing one model name across three tools is valid per the
-skill's collision rule since their `fields` dicts are identical. The 6 mutating
-tools were left untouched at `-> Any`, matching the skill's guard against probing
-destructive/mutating tools without explicit confirmation.
+All three probes returned success payloads on the first attempt. The surprise was the
+absence of one: the memory server ships **no vendor envelope**. Each tool returns the
+record directly as `{"entities": [...], "relations": [...]}`, so `unwrap` is `[]` for all
+three and the generated bodies `cast(...)` rather than `_dig(...)`.
 
-`probed_args` for `open_nodes`/`search_nodes` (originally `"test"` values) were
-replaced with `<example-*>` placeholders in `memory.shapes.json` as a precaution;
-the gitignored `memory.verify.json` sidecar retains the real args for the
-roundtrip check.
+The three shapes are byte-for-byte identical in structure, which is why all three share a
+single `return_model: "KnowledgeGraph"` — the skill permits a shared name exactly when the
+`fields` dicts match, and here they do. `return_container` is omitted: the unwrapped value
+is one dict, not a list of records.
+
+`fields` records both top-level keys as `list[dict]`. Neither is a scalar, but both were
+observed non-empty, and typing them `list[dict]` states the level that was actually seen
+while leaving the element shape unmodeled, per the depth guard. Promoting `Entity` and
+`Relation` to real nested models is not expressible — codegen only emits models named by
+`return_model`.
+
+One genuine oddity: `search_nodes(query="Ada")` returned a single entity (Ada Lovelace)
+alongside a relation whose `to` endpoint, "Analytical Engine", is **not** in the returned
+entity list. The server filters entities by the query but does not restrict relations to
+edges between surviving nodes, so callers must treat returned relations as possibly
+dangling. This is behavior, not shape.
+
+`input_overrides` is empty — no schema lied. `probed_args` were left unscrubbed: the values
+are harness-authored public fixtures ("Ada Lovelace", "Analytical Engine", "Ada") committed
+already in `servers/servers.toml`, not user PII, and keeping them functional lets the
+roundtrip verifier replay from the committed artifact.
 
 ## Verification
 
-The regenerated `memory.py` parses cleanly under `ast.parse`. `eval-kit verify
-memory` passed all 5 checks (ast, signatures, idempotency, pii, roundtrip) — the
-roundtrip check made a live call to `open_nodes` and got back a typed
-`KnowledgeGraph` result. Verdict: **pass**.
-
-## Follow-up
-
-To capture the real inner shape of `entities`/`relations` (name, entityType,
-observations, from/to/relationType fields), re-run probing after seeding the store
-via `mcpgen call memory create_entities ...` — deferred here since mutating tools
-are out of scope for a non-interactive subagent run.
+The regenerated module parses (`ast.parse`) and imports cleanly. All three shaped
+signatures read `-> KnowledgeGraph`; the six mutating tools correctly remain `-> Any`.
+Runner generation was left to the harness verify stage, as instructed.

@@ -7,8 +7,10 @@
     "source": "live",
     "probed_args": {
       "repoName": "modelcontextprotocol/servers",
-      "question": "What is the purpose of this repository?"
-    }
+      "question": "What transports does the MCP specification define?"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 1986
   },
   "read_wiki_contents": {
     "unwrap": [],
@@ -18,7 +20,9 @@
     "source": "live",
     "probed_args": {
       "repoName": "modelcontextprotocol/servers"
-    }
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 394357
   },
   "read_wiki_structure": {
     "unwrap": [],
@@ -28,6 +32,8 @@
     "source": "live",
     "probed_args": {
       "repoName": "modelcontextprotocol/servers"
-    }
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 1190
   }
 }

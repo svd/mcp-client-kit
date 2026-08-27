@@ -14,7 +14,7 @@ SERVER = 'sequential-thinking'
 
 
 
-class ThoughtResult(TypedDict, total=False):
+class ThoughtStatus(TypedDict, total=False):
     thoughtNumber: int
     totalThoughts: int
     nextThoughtNeeded: bool
@@ -22,7 +22,7 @@ class ThoughtResult(TypedDict, total=False):
     thoughtHistoryLength: int
 
 
-async def sequentialthinking(caller: McpCaller, *, thought: str, thoughtNumber: int, totalThoughts: int, nextThoughtNeeded: bool | None = None, isRevision: bool | None = None, revisesThought: int | None = None, branchFromThought: int | None = None, branchId: str | None = None, needsMoreThoughts: bool | None = None) -> ThoughtResult:
+async def sequentialthinking(caller: McpCaller, *, thought: str, thoughtNumber: int, totalThoughts: int, nextThoughtNeeded: bool | None = None, isRevision: bool | None = None, revisesThought: int | None = None, branchFromThought: int | None = None, branchId: str | None = None, needsMoreThoughts: bool | None = None) -> ThoughtStatus:
     """A detailed tool for dynamic and reflective problem-solving through thoughts.
     This tool helps analyze problems through a flexible thinking process that can adapt and evolve.
     Each thought can build on, question, or revise previous insights as understanding deepens.
@@ -102,6 +102,6 @@ async def sequentialthinking(caller: McpCaller, *, thought: str, thoughtNumber: 
         args["branchId"] = branchId
     if needsMoreThoughts is not None:
         args["needsMoreThoughts"] = needsMoreThoughts
-    return cast("ThoughtResult", await caller.call(SERVER, "sequentialthinking", args))
+    return cast("ThoughtStatus", await caller.call(SERVER, "sequentialthinking", args))
 
 sequentialthinking.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'thought': {'type': 'string', 'description': 'Your current thinking step'}, 'nextThoughtNeeded': {'description': 'Whether another thought step is needed', 'type': 'boolean'}, 'thoughtNumber': {'type': 'integer', 'minimum': 1, 'maximum': 9007199254740991, 'description': 'Current thought number (numeric value, e.g., 1, 2, 3)'}, 'totalThoughts': {'type': 'integer', 'minimum': 1, 'maximum': 9007199254740991, 'description': 'Estimated total thoughts needed (numeric value, e.g., 5, 10)'}, 'isRevision': {'description': 'Whether this revises previous thinking', 'type': 'boolean'}, 'revisesThought': {'description': 'Which thought is being reconsidered', 'type': 'integer', 'minimum': 1, 'maximum': 9007199254740991}, 'branchFromThought': {'description': 'Branching point thought number', 'type': 'integer', 'minimum': 1, 'maximum': 9007199254740991}, 'branchId': {'description': 'Branch identifier', 'type': 'string'}, 'needsMoreThoughts': {'description': 'If more thoughts are needed', 'type': 'boolean'}}, 'required': ['thought', 'thoughtNumber', 'totalThoughts']}

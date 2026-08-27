@@ -6,8 +6,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "message": "hello from eval"
-    }
+      "message": "hello from mcpgen probe"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 31,
+    "_note": "Prose payload; JSON-in-string test returned NOT_JSON. Genuine text tool."
   },
   "get-annotated-message": {
     "unwrap": [],
@@ -25,7 +28,10 @@
       {
         "messageType": "debug"
       }
-    ]
+    ],
+    "_observed_shape": "str",
+    "_observed_bytes": 44,
+    "_note": "Prose payload; JSON-in-string test returned NOT_JSON. Genuine text tool. messageType='error' returns the literal text 'Error: Operation failed' \u2014 that is the demo's content, not a probe failure; 'success' and 'debug' returned prose too."
   },
   "get-env": {
     "unwrap": [],
@@ -34,7 +40,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {},
-    "_note": "observed shape is a dict[str, str] of ~32 npm/shell env vars specific to the probing machine (NODE, PATH, HOME, npm_config_*, ...). Field names are not stable across environments (CI, other machines), so no TypedDict was minted — return stays Any to avoid overfitting to one probe's env."
+    "_observed_shape": "dict[str, str]",
+    "_observed_bytes": 3590,
+    "_note": "Probe observed 33 keys, all environment variables of THIS machine's npx launch. Key set is machine-specific, so no TypedDict is honest; stays Any."
   },
   "get-resource-links": {
     "unwrap": [],
@@ -45,7 +53,12 @@
     "probed_args": {
       "count": 3
     },
-    "_note": "tool returns MCP resource_link content blocks; McpCaller reduces the response to its text summary only ('Here are 3 resource links...'), the structured link objects are invisible to probe. Return stays Any."
+    "_observed_shape": [
+      "str",
+      "...x4"
+    ],
+    "_observed_bytes": 353,
+    "_note": "Raw capture shows a HETEROGENEOUS list: element 0 is a prose string, elements 1..n are resource_link dicts {type, uri, name}. _observed_shape's ['str','...x4'] renders only element 0 and under-describes the payload. No uniform element type, so no model."
   },
   "get-resource-reference": {
     "unwrap": [],
@@ -60,14 +73,18 @@
       },
       {
         "resourceType": "Blob",
-        "resourceId": 1
+        "resourceId": 2
       }
     ],
-    "_note": "returns an embedded MCP resource (Text or Blob); McpCaller surfaces only the text envelope, structured resource content (uri, mimeType, blob/text data) is not visible to probe. Return stays Any."
+    "_observed_shape": [
+      "str"
+    ],
+    "_observed_bytes": 211,
+    "_note": "Raw capture shows a heterogeneous 3-element list: prose, then a resource metadata dict {type, mimeType, has_text, has_blob}, then prose. Binary/resource block, so the dict is an envelope descriptor, not the record. Stays Any."
   },
   "get-structured-content": {
     "unwrap": [],
-    "return_model": "WeatherConditions",
+    "return_model": "WeatherReading",
     "input_overrides": {},
     "fields": {
       "temperature": "int",
@@ -75,9 +92,19 @@
       "humidity": "int"
     },
     "source": "live",
-    "probed_args": {
-      "location": "New York"
-    }
+    "probed_args": [
+      {
+        "location": "New York"
+      },
+      {
+        "location": "Chicago"
+      },
+      {
+        "location": "Los Angeles"
+      }
+    ],
+    "_observed_bytes": 73,
+    "_note": "Identical key set across all three enum locations; ints stayed int in every probe."
   },
   "get-sum": {
     "unwrap": [],
@@ -88,7 +115,10 @@
     "probed_args": {
       "a": 2,
       "b": 3
-    }
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 26,
+    "_note": "Prose payload; JSON-in-string test returned NOT_JSON. Genuine text tool."
   },
   "get-tiny-image": {
     "unwrap": [],
@@ -97,50 +127,12 @@
     "fields": {},
     "source": "live",
     "probed_args": {},
-    "_note": "returns an MCP image content block (base64 + mimeType); McpCaller surfaces only accompanying text ('Here's the image you requested:'), the binary payload is invisible to probe. Return stays Any per image/binary guidance."
-  },
-  "gzip-file-as-resource": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": [
-      {
-        "outputType": "resourceLink"
-      },
-      {
-        "outputType": "resource"
-      }
+    "_observed_shape": [
+      "str",
+      "...x3"
     ],
-    "_note": "outputType='resourceLink' yields a short text summary; outputType='resource' yields an embedded binary resource (gzip blob) with no accompanying text at all, so probe observed an empty string for that variant. Content is not modelable from text-only probing. Return stays Any."
-  },
-  "simulate-research-query": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "topic": "renewable energy trends",
-      "ambiguous": false
-    }
-  },
-  "toggle-simulated-logging": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {}
-  },
-  "toggle-subscriber-updates": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {}
+    "_observed_bytes": 133,
+    "_note": "Image tool: image blocks surface as metadata envelopes, never the base64 bytes. Left as Any per the media rule."
   },
   "trigger-long-running-operation": {
     "unwrap": [],
@@ -150,7 +142,10 @@
     "source": "live",
     "probed_args": {
       "duration": 1,
-      "steps": 1
-    }
+      "steps": 2
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 66,
+    "_note": "Prose payload; JSON-in-string test returned NOT_JSON. Genuine text tool."
   }
 }

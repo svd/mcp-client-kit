@@ -9,12 +9,12 @@
     "source": "live",
     "probed_args": {
       "urls": [
-        "https://example.com"
+        "https://modelcontextprotocol.io/introduction"
       ],
-      "maxCharacters": 500
+      "maxCharacters": 1500
     },
     "_observed_shape": "str",
-    "_observed_bytes": 374
+    "_observed_bytes": 1601
   },
   "web_search_exa": {
     "unwrap": [],
@@ -25,10 +25,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "blog post comparing React and Vue performance",
-      "numResults": 2
+      "query": "blog post explaining the Model Context Protocol architecture",
+      "numResults": 3
     },
     "_observed_shape": "str",
-    "_observed_bytes": 14662
+    "_observed_bytes": 25084
   }
 }

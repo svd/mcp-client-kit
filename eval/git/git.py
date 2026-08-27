@@ -91,6 +91,8 @@ git_create_branch.__schema__ = {'properties': {'repo_path': {'title': 'Repo Path
 async def git_diff(caller: McpCaller, *, repo_path: str, target: str, context_lines: int | None = None) -> Any:
     """Shows differences between branches or commits
 
+    Returns a large payload (~1993 KB observed) — prefer narrower queries where available.
+
     Args:
         repo_path:
         target:
@@ -121,6 +123,8 @@ git_diff_staged.__schema__ = {'properties': {'repo_path': {'title': 'Repo Path',
 
 async def git_diff_unstaged(caller: McpCaller, *, repo_path: str, context_lines: int | None = None) -> Any:
     """Shows changes in the working directory that are not yet staged
+
+    Returns a large payload (~201 KB observed) — prefer narrower queries where available.
 
     Args:
         repo_path:

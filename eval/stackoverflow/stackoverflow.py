@@ -32,11 +32,8 @@ class SearchQuestionItem(TypedDict, total=False):
     view_count: int
     answer_count: int
     is_answered: bool
-    creation_date: int
     accepted_answer_id: int
-    tags: list
-    owner: dict
-    answers: list
+    creation_date: int
 
 
 def _dig_list(obj: Any, path: tuple[str, ...]) -> list:

@@ -1,28 +1,4 @@
 {
-  "firecrawl_agent_status": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "id": "00000000-0000-4000-8000-000000000000"
-    },
-    "_observed_shape": "str",
-    "_probe_status": "inconclusive"
-  },
-  "firecrawl_check_crawl_status": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "id": "00000000-0000-4000-8000-000000000000"
-    },
-    "_observed_shape": "str",
-    "_probe_status": "inconclusive"
-  },
   "firecrawl_developer_search": {
     "unwrap": [],
     "return_model": null,
@@ -33,62 +9,49 @@
       "query": "python asyncio TaskGroup cancellation semantics",
       "k": 3
     },
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "_observed_bytes": 2543
   },
   "firecrawl_map": {
     "unwrap": [
       "links"
     ],
-    "return_model": "MapLink",
-    "input_overrides": {},
-    "fields": {
-      "url": "str",
-      "title": "str"
-    },
-    "source": "live",
-    "probed_args": {
-      "url": "https://example.com",
-      "limit": 5
-    },
-    "return_container": "list"
-  },
-  "firecrawl_monitor_check": {
-    "unwrap": [],
     "return_model": null,
     "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {
-      "id": "00000000-0000-4000-8000-000000000000",
-      "checkId": "00000000-0000-4000-8000-000000000000"
+      "url": "https://docs.python.org",
+      "sitemap": "only",
+      "limit": 10
     },
-    "_observed_shape": "str",
-    "_probe_status": "inconclusive"
-  },
-  "firecrawl_monitor_checks": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "id": "00000000-0000-4000-8000-000000000000",
-      "limit": 3
-    },
-    "_observed_shape": "str",
-    "_probe_status": "inconclusive"
-  },
-  "firecrawl_monitor_get": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": {
-      "id": "00000000-0000-4000-8000-000000000000"
-    },
-    "_observed_shape": "str",
-    "_probe_status": "inconclusive"
+    "_observed_bytes": 331,
+    "return_container": "list",
+    "discriminator": "sitemap",
+    "variants": {
+      "include": {
+        "return_model": "MapLink",
+        "fields": {
+          "url": "str",
+          "title": "str",
+          "description": "str"
+        }
+      },
+      "skip": {
+        "return_model": "MapLink",
+        "fields": {
+          "url": "str",
+          "title": "str",
+          "description": "str"
+        }
+      },
+      "only": {
+        "return_model": "MapLinkUrlOnly",
+        "fields": {
+          "url": "str"
+        }
+      }
+    }
   },
   "firecrawl_monitor_list": {
     "unwrap": [
@@ -101,30 +64,31 @@
     "probed_args": {
       "limit": 5
     },
-    "_observed_shape": {
-      "success": "bool",
-      "data": [
-        "<empty>"
-      ]
-    },
-    "return_container": "list"
+    "_observed_bytes": 29,
+    "return_container": "list",
+    "_inner_shape_unobserved": "account has zero monitors; data was []"
   },
   "firecrawl_parse": {
     "unwrap": [],
-    "return_model": "ParseResponse",
+    "return_model": "ParseUploadTicket",
     "input_overrides": {},
     "fields": {
       "success": "bool",
       "mode": "str",
-      "message": "str"
+      "message": "str",
+      "upload": "dict",
+      "nextToolCall": "dict",
+      "notes": "list[str]"
     },
     "source": "live",
     "probed_args": {
-      "filePath": "<example-file-path>.html",
+      "filePath": "<example-file-path>.csv",
       "formats": [
         "markdown"
       ]
-    }
+    },
+    "_observed_bytes": 5240,
+    "probe_args_scrubbed": true
   },
   "firecrawl_research_inspect_paper": {
     "unwrap": [],
@@ -133,9 +97,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "paperId": "arxiv:2503.23278"
+      "paperId": "10.1038/nature14539"
     },
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "_observed_bytes": 95
   },
   "firecrawl_research_read_paper": {
     "unwrap": [],
@@ -144,11 +109,12 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "paperId": "arxiv:2503.23278",
-      "question": "What security threats are identified?",
-      "k": 2
+      "paperId": "arxiv:1908.11775",
+      "question": "How is attention formulated as a kernel?",
+      "k": 3
     },
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "_observed_bytes": 12228
   },
   "firecrawl_research_related_papers": {
     "unwrap": [],
@@ -158,13 +124,14 @@
     "source": "live",
     "probed_args": {
       "seed_ids": [
-        "arxiv:2503.23278"
+        "arxiv:1908.11775"
       ],
-      "intent": "find related work on MCP security",
+      "intent": "find follow-up work on kernel attention",
       "mode": "similar",
       "k": 3
     },
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "_observed_bytes": 2034
   },
   "firecrawl_research_search_github": {
     "unwrap": [],
@@ -173,10 +140,57 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "model context protocol server",
+      "query": "model context protocol server implementation",
       "k": 3
     },
-    "_observed_shape": "str"
+    "_observed_shape": "str",
+    "_observed_bytes": 4145
+  },
+  "firecrawl_scrape": {
+    "unwrap": [],
+    "return_model": "ScrapeResult",
+    "input_overrides": {},
+    "fields": {
+      "markdown": "str",
+      "html": "str",
+      "summary": "str",
+      "links": "list[str]",
+      "metadata": "dict"
+    },
+    "source": "live",
+    "probed_args": {
+      "url": "https://example.com",
+      "formats": [
+        "markdown",
+        "links",
+        "html",
+        "summary"
+      ]
+    },
+    "_observed_bytes": 1217
+  },
+  "firecrawl_search": {
+    "unwrap": [
+      "data"
+    ],
+    "return_model": "SearchResults",
+    "input_overrides": {},
+    "fields": {
+      "web": "list",
+      "news": "list",
+      "images": "list"
+    },
+    "source": "live",
+    "probed_args": {
+      "query": "golden retriever",
+      "limit": 3,
+      "sources": [
+        {
+          "type": "images"
+        }
+      ]
+    },
+    "_observed_bytes": 1102
   },
   "firecrawl_research_search_papers": {
     "unwrap": [],
@@ -185,41 +199,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "retrieval augmented generation",
+      "query": "transformer attention mechanism",
       "k": 3
     },
-    "_observed_shape": "str"
-  },
-  "firecrawl_scrape": {
-    "unwrap": [],
-    "return_model": "ScrapeResult",
-    "input_overrides": {},
-    "fields": {
-      "markdown": "str",
-      "metadata": "dict"
-    },
-    "source": "live",
-    "probed_args": {
-      "url": "https://example.com",
-      "formats": [
-        "markdown"
-      ]
-    }
-  },
-  "firecrawl_search": {
-    "unwrap": [],
-    "return_model": "SearchResponse",
-    "input_overrides": {},
-    "fields": {
-      "success": "bool",
-      "data": "dict",
-      "creditsUsed": "int",
-      "id": "str"
-    },
-    "source": "live",
-    "probed_args": {
-      "query": "model context protocol",
-      "limit": 3
-    }
+    "_observed_shape": "str",
+    "_observed_bytes": 2130
   }
 }

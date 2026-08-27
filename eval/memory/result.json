@@ -12,17 +12,17 @@
   "check_details": {
     "ast": "",
     "signatures": "",
-    "idempotency": "offline determinism check (stub schemas only \u2014 no memory.mcpgen.json on disk)",
+    "idempotency": "offline determinism check (real tool schemas from memory.mcpgen.json)",
     "pii": "",
-    "roundtrip": "live call to 'open_nodes' returned typed result"
+    "roundtrip": "live call to 'read_graph' returned typed result"
   },
   "modes_hit": [
     "B"
   ],
   "verdict": "pass",
   "versions": {
-    "engine": "0.8.0.dev1",
-    "skill_ref": "v0.0.4-63-gec447d2-dirty",
+    "engine": "0.9.0.dev1",
+    "skill_ref": "v0.0.4-156-gfd9eda8",
     "skill_path": "~/src/mcp-client-kit"
   }
 }

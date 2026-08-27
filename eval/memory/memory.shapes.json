@@ -1,26 +1,11 @@
 {
-  "open_nodes": {
-    "unwrap": [],
-    "return_model": "KnowledgeGraph",
-    "input_overrides": {},
-    "fields": {
-      "entities": "list",
-      "relations": "list"
-    },
-    "source": "live",
-    "probed_args": {
-      "names": [
-        "<example-entity-name>"
-      ]
-    }
-  },
   "read_graph": {
     "unwrap": [],
     "return_model": "KnowledgeGraph",
     "input_overrides": {},
     "fields": {
-      "entities": "list",
-      "relations": "list"
+      "entities": "list[dict]",
+      "relations": "list[dict]"
     },
     "source": "live",
     "probed_args": {}
@@ -30,12 +15,28 @@
     "return_model": "KnowledgeGraph",
     "input_overrides": {},
     "fields": {
-      "entities": "list",
-      "relations": "list"
+      "entities": "list[dict]",
+      "relations": "list[dict]"
     },
     "source": "live",
     "probed_args": {
-      "query": "<example-query>"
+      "query": "Ada"
+    }
+  },
+  "open_nodes": {
+    "unwrap": [],
+    "return_model": "KnowledgeGraph",
+    "input_overrides": {},
+    "fields": {
+      "entities": "list[dict]",
+      "relations": "list[dict]"
+    },
+    "source": "live",
+    "probed_args": {
+      "names": [
+        "Ada Lovelace",
+        "Analytical Engine"
+      ]
     }
   }
 }

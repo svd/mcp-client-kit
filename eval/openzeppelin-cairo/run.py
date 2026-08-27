@@ -3,6 +3,11 @@ Smoke-test runner for generated openzeppelin-cairo/ wrappers.
 Transport: Streamable HTTP  (https://mcp.openzeppelin.com/contracts/cairo/mcp)
 Auth: none (public endpoint)
 
+Args come from openzeppelin-cairo.verify.json (real, pre-scrub probe args).
+Every tool returns Any — the server answers with a Markdown code block holding
+Cairo source, so each block prints the payload type and size instead of drilling
+into fields. No tool declares a discriminator, so each is called once.
+
 Usage:
     python eval/openzeppelin-cairo/run.py
 """
@@ -18,6 +23,7 @@ _spec = importlib.util.spec_from_file_location(
     "openzeppelin_cairo",
     os.path.join(os.path.dirname(__file__), "openzeppelin-cairo.py"),
 )
+assert _spec is not None and _spec.loader is not None
 openzeppelin_cairo = importlib.util.module_from_spec(_spec)
 sys.modules["openzeppelin_cairo"] = openzeppelin_cairo
 _spec.loader.exec_module(openzeppelin_cairo)
@@ -27,13 +33,12 @@ from mcpgen import McpBridgeCaller
 SERVER_URL = "https://mcp.openzeppelin.com/contracts/cairo/mcp"
 
 
-def _preview(label: str, src) -> None:
-    """Every tool here returns Any — in practice a Markdown code block (str)."""
-    if isinstance(src, str):
-        head = src.strip().splitlines()[0] if src.strip() else ""
-        print(f"{label}: str, {len(src)} chars, first line {head!r}")
+def _summarize(label: str, value: object) -> None:
+    """Every tool returns Any; report the payload type and size."""
+    if isinstance(value, str):
+        print(f"{label}: str, {len(value)} chars")
     else:
-        print(f"{label}: {type(src).__name__}")
+        print(f"{label}: {type(value).__name__}")
 
 
 async def main() -> None:
@@ -42,72 +47,59 @@ async def main() -> None:
     # One connection for the whole run: a single initialize() instead of
     # reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating tools: (none — every tool only renders Cairo source
-        # into a Markdown code block and explicitly does not write to disk).
-        # Args below are the real pre-scrub probe args from
-        # openzeppelin-cairo.verify.json.
+        # Skipped mutating tools: none — all eight tools render source code
+        # and, per their descriptions, do not write to disk.
 
-        # cairo_custom -> Any  (bare scaffold; simplest surface first)
+        # cairo-custom -> Any  (blank scaffold; simplest shape first)
         custom = await openzeppelin_cairo.cairo_custom(caller, name="MyContract")
-        _preview("cairo_custom", custom)
+        _summarize("cairo-custom", custom)
 
-        # cairo_erc20 -> Any
-        erc20 = await openzeppelin_cairo.cairo_erc20(
-            caller, name="MyToken", symbol="MTK", decimals="18", mintable=True
-        )
-        _preview("cairo_erc20", erc20)
-
-        # cairo_erc721 -> Any
-        erc721 = await openzeppelin_cairo.cairo_erc721(
-            caller, name="MyNFT", symbol="MNFT", baseUri="https://example.com/nft/"
-        )
-        _preview("cairo_erc721", erc721)
-
-        # cairo_erc1155 -> Any
-        erc1155 = await openzeppelin_cairo.cairo_erc1155(
-            caller,
-            name="MyMultiToken",
-            baseUri="https://example.com/token/{id}.json",
-        )
-        _preview("cairo_erc1155", erc1155)
-
-        # cairo_account -> Any  (probed twice — one call per `type` variant)
-        account_stark = await openzeppelin_cairo.cairo_account(
+        # cairo-account -> Any
+        account = await openzeppelin_cairo.cairo_account(
             caller, name="MyAccount", type="stark"
         )
-        _preview("cairo_account(stark)", account_stark)
+        _summarize("cairo-account", account)
 
-        account_eth = await openzeppelin_cairo.cairo_account(
-            caller, name="MyAccount", type="eth"
+        # cairo-erc20 -> Any
+        erc20 = await openzeppelin_cairo.cairo_erc20(
+            caller, name="MyToken", symbol="MTK", decimals="18"
         )
-        _preview("cairo_account(eth)", account_eth)
+        _summarize("cairo-erc20", erc20)
 
-        # cairo_multisig -> Any
+        # cairo-erc721 -> Any
+        erc721 = await openzeppelin_cairo.cairo_erc721(
+            caller, name="MyNFT", symbol="MNFT"
+        )
+        _summarize("cairo-erc721", erc721)
+
+        # cairo-erc1155 -> Any
+        erc1155 = await openzeppelin_cairo.cairo_erc1155(
+            caller, name="MyMultiToken", baseUri="https://example.com/tokens/"
+        )
+        _summarize("cairo-erc1155", erc1155)
+
+        # cairo-governor -> Any  (governance over the token standards above)
+        governor = await openzeppelin_cairo.cairo_governor(
+            caller, name="MyGovernor", delay="1 day", period="1 week"
+        )
+        _summarize("cairo-governor", governor)
+
+        # cairo-multisig -> Any
         multisig = await openzeppelin_cairo.cairo_multisig(
             caller, name="MyMultisig", quorum="2"
         )
-        _preview("cairo_multisig", multisig)
+        _summarize("cairo-multisig", multisig)
 
-        # cairo_vesting -> Any
+        # cairo-vesting -> Any
         vesting = await openzeppelin_cairo.cairo_vesting(
             caller,
             name="MyVesting",
-            startDate="2026-03-15T14:30",
-            duration="1 year",
-            cliffDuration="90 days",
+            startDate="2026-01-01T00:00:00",
+            duration="90 day",
+            cliffDuration="30 day",
             schedule="linear",
         )
-        _preview("cairo_vesting", vesting)
-
-        # cairo_governor -> Any  (largest output; depends on a votes token above)
-        governor = await openzeppelin_cairo.cairo_governor(
-            caller,
-            name="MyGovernor",
-            delay="1 day",
-            period="1 week",
-            votes="erc20votes",
-        )
-        _preview("cairo_governor", governor)
+        _summarize("cairo-vesting", vesting)
 
 
 if __name__ == "__main__":

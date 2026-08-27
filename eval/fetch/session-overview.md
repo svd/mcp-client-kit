@@ -1,37 +1,64 @@
-# Session Overview: fetch
+# fetch — session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T15:44:27Z
-- **Duration:** 3m 3s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T06:02:04Z
+- **Duration:** 2m 27s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Server Summary
+## Tool surface
 
-The `fetch` MCP server (launched via `uvx mcp-server-fetch`) exposes a single tool: `fetch`. This tool fetches a URL from the internet and returns its content, optionally converted to Markdown. There is no authentication required, and the tool carries no `readOnlyHint` annotation — its description was read semantically and found non-mutating, so it was probed directly under the subagent fallback (probe all non-mutating tools).
+`mcpgen list fetch --schema` returned exactly **one tool**: `fetch`. It was probed;
+nothing was skipped. The server publishes no `annotations`, so the step-2b fallback
+applied: `fetch` is a read verb matching no mutating keyword, so the tool was cleared as
+non-mutating. No seed commands were configured.
 
-**Tools exposed:** 1
-**Tools probed:** 1 (`fetch`)
-**Tools skipped:** 0 (no mutating tools present, no discriminator candidates)
+`discriminators: N/A`. The advisory precondition needs a scalar parameter declared by
+two or more tools under the same name; a one-tool server cannot satisfy it, and the
+`list --schema` stderr carried no advisory. Pass 2 was skipped outright.
 
-## Probe Results
+## Probing
 
-The `fetch` tool was probed with `{"url": "https://example.com"}`, a stable, PII-free public domain reserved for documentation/testing (IANA-reserved, RFC 2606). The live `mcpgen probe` call produced a part file with `_observed_shape: "str"` and `_observed_bytes: 188`: the response is a plain Markdown-rendered string of the page body, with no JSON envelope and no structured fields.
+Two probes went out in a single invocation against `https://example.com` — a public
+documentation domain, so nothing in `probed_args` is PII and the scrub pass changed
+nothing. The pair varied `raw` (`false` → simplified markdown, `true` → source HTML) to
+see whether the flag switched the response shape. It does not: both merged to
+`_observed_shape: "str"`, 696 bytes.
 
-As in prior runs, the `uvx`-based cold start emitted npm/Node package-installation noise to stdout (`added 40 packages…`, `found 0 vulnerabilities`, `Downloaded lxml`), which produced several spurious "Failed to parse JSONRPC message" warnings in the mcpgen client. This is package-manager bootstrap chatter, not a protocol failure — the probe still completed and returned a valid 188-byte shape once the server's real JSON-RPC stream started. The response was a genuine content payload, not an error string, so no `_probe_status: "inconclusive"` marking was needed.
+The one interesting result is a negative one. Content-retrieval servers frequently
+double-encode — the record arrives as a JSON string inside the MCP envelope — so the raw
+payload was captured with `mcpgen call --out` and run through the guarded JSON-in-string
+test, which returned `NOT_JSON (JSONDecodeError)`. The payload is prose:
 
-## Shape Decisions
+```
+Contents of https://example.com/:
+This domain is for use in documentation examples ...
+```
 
-**Tool: `fetch`**
+That is a genuine success payload, not an error page, a quota message, or an auth
+failure — so `_probe_status: "inconclusive"` would be wrong here and was not written.
+`_observed_shape: "str"` is kept as the evidence that the shape was actually observed and
+is genuinely text.
 
-- **Unwrap path:** `[]` — no vendor envelope; the response is a bare text string
-- **Return model:** `null` — the result is a plain `str` with no sub-fields, so a `TypedDict` would misrepresent it as structured
-- **Return container:** omitted — the result is not a list
-- **Input overrides:** none — all schema types (`string`, `integer`, `boolean`) are accurate
-- **Fields:** empty — nothing to extract from an unstructured string
-- **PII scrubbing:** none required — `https://example.com` is a public reserved domain, not PII
+## Shape decisions
 
-The `_observed_shape`/`_observed_bytes` scaffolding keys were removed from `fetch.shapes.json` after confirming the shape is genuinely a plain string with no further structure to model.
+| Tool | unwrap | return_model | Why |
+|---|---|---|---|
+| `fetch` | `[]` (none) | `null` | Response is a bare markdown/HTML string with no vendor envelope. There is no key path to the record because the payload *is* the record. |
 
-## Codegen Output
+`return_model` stays `null` rather than being set to `str`: the skill forbids naming a
+Python primitive as a return model, and a `TypedDict` would claim a dict the wrapper never
+returns. Inventing an `unwrap` path to force runtime parsing was explicitly rejected —
+`_dig` would then return a field instead of the record. `fields` stays empty; a string has
+no top-level scalars to promote. `input_overrides` is empty — the declared `integer` and
+`boolean` types match what the server accepts.
 
-The regenerated module (`eval/fetch/fetch.py`) parsed cleanly (`ast.parse` succeeds). It defines a single async function `fetch(caller, *, url, max_length=None, start_index=None, raw=None) -> Any` with the full `__schema__` attribute embedded. The `-> Any` return annotation is correct and honest given the plain-string runtime shape; optional server-defaulted parameters (`max_length=5000`, `start_index=0`, `raw=False`) render as `int | None` / `int | None` / `bool | None` with `None`-guard assembly of the call args.
+This is the `no_shaped_tool_by_design` case: the single tool returns prose, so `-> Any` is
+the honest signature, not a coverage gap.
+
+## Verification
+
+The regenerated module parsed cleanly (`ast.parse` OK). Codegen re-consumed the shape-spec
+(`shapes: eval/fetch/fetch.shapes.json (1 tool(s))`) and, correctly finding no
+`return_model`, emitted the module byte-identical to the pre-shape stub at 2328 bytes —
+the expected outcome when the judgment pass concludes there is nothing to shape.
+`run.py` is the harness verify stage's job and was not generated here.

@@ -9,6 +9,8 @@
       "repo_path": "<example-repo-path>",
       "branch_type": "local"
     },
+    "_observed_shape": "str",
+    "_observed_bytes": 106,
     "probe_args_scrubbed": true
   },
   "git_diff": {
@@ -19,8 +21,10 @@
     "source": "live",
     "probed_args": {
       "repo_path": "<example-repo-path>",
-      "target": "HEAD~1"
+      "target": "main"
     },
+    "_observed_shape": "str",
+    "_observed_bytes": 2040927,
     "probe_args_scrubbed": true
   },
   "git_diff_staged": {
@@ -32,6 +36,8 @@
     "probed_args": {
       "repo_path": "<example-repo-path>"
     },
+    "_observed_shape": "str",
+    "_observed_bytes": 19,
     "probe_args_scrubbed": true
   },
   "git_diff_unstaged": {
@@ -43,6 +49,8 @@
     "probed_args": {
       "repo_path": "<example-repo-path>"
     },
+    "_observed_shape": "str",
+    "_observed_bytes": 206116,
     "probe_args_scrubbed": true
   },
   "git_log": {
@@ -53,8 +61,10 @@
     "source": "live",
     "probed_args": {
       "repo_path": "<example-repo-path>",
-      "max_count": 5
+      "max_count": 3
     },
+    "_observed_shape": "str",
+    "_observed_bytes": 2549,
     "probe_args_scrubbed": true
   },
   "git_show": {
@@ -67,6 +77,8 @@
       "repo_path": "<example-repo-path>",
       "revision": "HEAD"
     },
+    "_observed_shape": "str",
+    "_observed_bytes": 3331,
     "probe_args_scrubbed": true
   },
   "git_status": {
@@ -78,6 +90,8 @@
     "probed_args": {
       "repo_path": "<example-repo-path>"
     },
+    "_observed_shape": "str",
+    "_observed_bytes": 2187,
     "probe_args_scrubbed": true
   }
 }

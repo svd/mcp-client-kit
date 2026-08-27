@@ -1,40 +1,67 @@
-# Session Overview: codegraph
+# codegraph — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T15:42:11Z
-- **Duration:** 2m 19s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T05:57:28Z
+- **Duration:** 3m 11s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Server Summary
+## Server surface
 
-The `codegraph` MCP server is a local code-intelligence tool that indexes this repo's workspace into a SQLite knowledge graph via a shared daemon. It exposes **5 tools**, all non-mutating read-only operations (`codegraph_search`, `codegraph_context`, `codegraph_node`, `codegraph_explore`, `codegraph_trace`). All 5 were probed; none were skipped — the keyword/semantic heuristic found no mutating verbs, and no `annotations.readOnlyHint` was set on any tool.
+`codegraph` exposes **5 tools**, all read-only: `codegraph_search`, `codegraph_context`,
+`codegraph_node`, `codegraph_explore`, `codegraph_trace`. The server sets no
+`annotations`, so the step-2b keyword fallback decided the verdict: no tool name carries
+a mutating whole word, and no description hints at a write.
+**All 5 selected, all 5 probed, 0 skipped.** Local
+`stdio` transport, so the full set was kept rather than pruned, and probes went out as a
+single unpaced batch.
 
-`mcpgen list --schema` flagged `projectPath` as a discriminator candidate spanning all 5 tools. It was auto-disqualified at Pass 1 — `projectPath` matches the "Path / repo identity" pattern verbatim (it lets a caller point at a different indexed codebase), a context-routing argument rather than a response-shape switch. No variant probing was required.
+## mutating-skipped
 
-## Probe Results
+None.
 
-Each tool was probed once, live, against this repo itself. The first probe round used a plausible but nonexistent symbol name (`verify_roundtrip`); `codegraph_search`, `codegraph_node`, and `codegraph_trace` correctly returned "not found" / "no results" responses for it. Rather than accept those empty-result probes as representative, the actual function name was located via `grep` (`check_roundtrip`, `eval_harness/verify.py:259`) and all three tools were re-probed with the corrected symbol, producing genuine non-empty payloads. Final args: `codegraph_search(query="check_roundtrip")`, `codegraph_node(symbol="check_roundtrip")`, `codegraph_context(task="How does the roundtrip verifier work?")`, `codegraph_explore(query="verify.py roundtrip check")`, `codegraph_trace(from="main", to="check_roundtrip")`.
+## Discriminators
 
-All 5 responses were **rendered Markdown text** (headings, code fences, bullet lists) rather than structured JSON, and none parsed via `json.loads()` — ruling out the JSON-in-string case. This matches codegraph's design intent: its tools hand an LLM narrative context directly, not machine-parseable records.
+`mcpgen list --schema` raised one candidate: `projectPath`, spanning all five tools.
+Pass 1 auto-disqualifies it by name — it is on the path-identity list. It selects *which*
+indexed project answers, never the response's shape. Nothing survived Pass 1, so Pass 2
+made no live calls. **discriminators: N/A.**
 
-`codegraph_trace` was the most interesting probe: no static call path exists between `main` and `check_roundtrip` (invoked through argparse dispatch, not a direct call edge). The tool reported the dynamic-dispatch break and inlined both endpoints' bodies plus their file-level neighbors instead of failing silently.
+## Probe results — the surprise
 
-**Per-tool shape decisions** (all identical: `_observed_shape: "str"`, `unwrap: []`, `return_model: null`, remains `-> Any`):
+Every one of the five tools returned `_observed_shape: "str"`. That is not a probe
+failure and not an empty store: each payload was a substantial, successful response
+(466 B for `codegraph_context`, 1.2 KB for `search` and `node`, 12.4 KB for `trace`,
+14.7 KB for `explore`). Raw payloads were captured with `call --out` and run through the
+JSON-in-string guard — all five came back **`NOT_JSON`**. The bodies are hand-formatted
+Markdown reports (`## Search Results (10 found)`, `### verify_server (function)`,
+`**Location:** eval_harness/verify.py:691`), authored for a model to read rather than a
+client to parse. No `_probe_status: inconclusive` marker was added anywhere: nothing was
+inconclusive, the shape was observed and it is genuinely a string.
 
-- **`codegraph_search`** — Markdown listing of matched symbols with locations/snippets.
-- **`codegraph_context`** — Markdown document of entry points, related symbols, and inlined code for `check_roundtrip`.
-- **`codegraph_node`** — Markdown summary of `check_roundtrip`'s location, signature, and caller/callee trail.
-- **`codegraph_explore`** — Markdown source of 19 symbols across 4 files grouped by file.
-- **`codegraph_trace`** — Markdown dynamic-dispatch-break report with both endpoints inlined.
+One oddity: `codegraph_context` returned the *smallest* payload of the five — the server
+detected a small project (16 indexed files) and returned an advisory steering the caller
+away from a follow-up `codegraph_explore` call instead of a fuller context dump.
 
-None of the five had a structured record to promote to a `TypedDict` — `-> Any` is honest and correct, not an under-modeled gap. Per skill guards, `return_model` was left `null` rather than set to the primitive name `"str"`.
+## Shape decisions
 
-## Notable Details
+There is no envelope to strip and no record to type. For all five tools:
+`unwrap: []`, `return_container` unset, `fields: {}`, `return_model: null` — so every
+wrapper honestly stays `-> Any`. Inventing a `TypedDict` over prose would state an
+authoritative lie about a shape that does not exist. `_observed_shape` was kept as
+evidence of *why* each entry is null. This is the `no_shaped_tool_by_design` case, not a
+coverage gap.
 
-- **`codegraph_trace` parameter renaming**: `from` is a Python keyword; `mcpgen codegen` handled it automatically — the wrapper signature uses `from_: str` and translates it back to `{"from": from_}` in the call body.
-- **`codegraph_search.kind` enum**: correctly typed as `Literal['function', 'method', 'class', 'interface', 'type', 'variable', 'route', 'component'] | None`.
-- **PII scrub**: no PII in any `probed_args` — all probe arguments are generic code-search terms and symbol names from this repo's own public source, so no scrubbing was required.
+The one substantive edit was `input_overrides`: `limit`, `maxNodes`, and `maxFiles`
+declare JSON Schema `number` but are result counts with integer defaults (10, 20, 12), so
+each was overridden to `int` rather than shipping a `float` signature.
 
-## Final Module
+Two things codegen got right unprompted: `codegraph_trace`'s `from` parameter — a Python
+keyword — renders as `from_` and maps back to the wire key `"from"`; and
+`codegraph_search`'s `kind` enum renders as a `Literal[...]` of its eight node kinds.
 
-`eval/codegraph/codegraph.py` parsed cleanly with `ast.parse`; all 5 async functions have correct signatures. `eval-kit verify codegraph` passed all applicable checks (`ast`, `signatures`, `idempotency`, `pii`); `roundtrip` was skipped (`no_shaped_non_mutating_tool` — all five tools legitimately return `Any`). Overall verdict: **pass**.
+## Verification
+
+`ast.parse` clean after both regenerations. `probed_args` hold only symbol names and
+free-text queries — no emails, UUIDs, tokens, or personal names — so the post-merge scrub
+had nothing to replace. `run.py` is the harness's own verify stage's job and was not
+generated here.

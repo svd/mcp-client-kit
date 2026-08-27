@@ -7,7 +7,7 @@ caller's concern, not this module's.
 from __future__ import annotations
 
 import json
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast, overload
 
 from mcpgen.seam import McpCaller
 
@@ -15,11 +15,21 @@ SERVER = 'aws-knowledge'
 
 
 
-class RegionalAvailability(TypedDict, total=False):
-    products: dict
-    service_apis: dict
-    cfn_resources: dict
-    next_token: str
+class ServiceApiAvailability(TypedDict, total=False):
+    service_apis: dict[str, str]
+    next_token: str | None
+    failed_regions: Any | None
+
+
+class CfnResourceAvailability(TypedDict, total=False):
+    cfn_resources: dict[str, str]
+    next_token: str | None
+    failed_regions: Any | None
+
+
+class ProductAvailability(TypedDict, total=False):
+    products: dict[str, Any]
+    next_token: str | None
     failed_regions: Any | None
 
 
@@ -37,19 +47,16 @@ class DocumentationPage(TypedDict, total=False):
     end_index: int
     truncated: bool
     redirected_url: str | None
-
-
-class SkillDocument(TypedDict, total=False):
-    skill_content: str
+    error_code: str | None
 
 
 class SearchResultItem(TypedDict, total=False):
     rank_order: int
     title: str
-    context: str
     url: str
-    skill_description: str
+    context: str
     skill_name: str
+    skill_description: str
 
 
 def _dig(obj: Any, path: tuple[str, ...]) -> Any:
@@ -107,7 +114,16 @@ def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
     return cur
 
 
-async def aws___get_regional_availability(caller: McpCaller, *, resource_type: str, regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> RegionalAvailability:
+@overload
+async def aws___get_regional_availability(caller: McpCaller, *, resource_type: Literal['api'], regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> ServiceApiAvailability: ...
+
+@overload
+async def aws___get_regional_availability(caller: McpCaller, *, resource_type: Literal['cfn'], regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> CfnResourceAvailability: ...
+
+@overload
+async def aws___get_regional_availability(caller: McpCaller, *, resource_type: Literal['product'], regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> ProductAvailability: ...
+
+async def aws___get_regional_availability(caller: McpCaller, *, resource_type: str, regions: list[str] | None = None, filters: list[str] | None = None, next_token: str | None = None, region: str | None = None) -> ServiceApiAvailability | CfnResourceAvailability | ProductAvailability:
     """AWS resource availability per region.
 
     - Max 10 regions; multi-region needs `filters`; single-region supports `next_token`.
@@ -143,7 +159,7 @@ async def aws___get_regional_availability(caller: McpCaller, *, resource_type: s
     if region is not None:
         args["region"] = region
     result = await caller.call(SERVER, "aws___get_regional_availability", args)
-    return cast("RegionalAvailability", _dig(result, ('content', 'result', )))
+    return cast("ServiceApiAvailability | CfnResourceAvailability | ProductAvailability", _dig(result, ('content', 'result', )))
 
 aws___get_regional_availability.__schema__ = {'type': 'object', 'properties': {'regions': {'type': 'array', 'items': {'type': 'string'}, 'description': 'AWS region codes (max 10). Multi-region requires `filters`; single-region supports `next_token`.'}, 'resource_type': {'type': 'string', 'description': "Required: 'product' | 'api' | 'cfn'."}, 'filters': {'type': 'array', 'items': {'type': 'string'}, 'description': "Use exact AWS product or sub-feature name.\n\n- product: 'Amazon Bedrock' (service), or sub-features like 'Comprehend Auto Scaling', 'Latency-Based Routing', 'PrivateLink Support'. When the user names a specific sub-feature, filter on the sub-feature -- do NOT generalize to the parent service ('Amazon Comprehend'); that returns availability for the wrong scope.\n- api: 'SdkServiceId+Operation' (e.g. 'CloudFormation+CreateStack', 'IAM+GetSSHPublicKey') or 'SdkServiceId' (e.g. 'EC2'). Use a literal '+' between service and operation -- not space, colon, or hyphen.\n- cfn: 'AWS::EC2::Instance', 'AWS::Lambda::Function'.\n\nInclude every region the user named; don't add filters they didn't request.\n\nValues must EXACTLY match AWS's catalog (e.g. 'AWS Lambda', not 'Lambda' or 'AWS Lambda Service'). If unsure of the exact name, first call once for one region with NO filters to list valid names, then filter on the exact match."}, 'next_token': {'type': 'string', 'description': 'Pagination token. Single-region, no filters only.'}, 'region': {'type': 'string', 'description': 'Unused; use `regions`.'}}, 'required': ['resource_type']}
 
@@ -184,7 +200,7 @@ async def aws___read_documentation(caller: McpCaller, *, requests: list[dict] | 
 aws___read_documentation.__schema__ = {'type': 'object', 'properties': {'requests': {'type': 'array', 'items': {'type': 'object', 'properties': {'url': {'type': 'string', 'description': 'Doc URL with allow-listed prefix; use exact URL from search.'}, 'max_length': {'type': 'integer', 'description': 'Chars returned (default 10000).'}, 'start_index': {'type': 'integer', 'description': 'Char offset (default 0). Use prior `end_index` to continue, or TOC offset to jump.'}}, 'required': ['url']}, 'description': 'List of `{url, max_length?, start_index?}`. Batch 2-5.'}}, 'required': []}
 
 
-async def aws___retrieve_skill(caller: McpCaller, *, skill_name: str, file: str | None = None) -> SkillDocument:
+async def aws___retrieve_skill(caller: McpCaller, *, skill_name: str, file: str | None = None) -> Any:
     """Retrieve an AWS skill (workflows, references). Returns SKILL.md, or `file` if given.
 
     Call `search_documentation` FIRST and copy `skill_name` verbatim -- it is an opaque registry ID. Never guess or fabricate `skill_name` or `file`.
@@ -197,7 +213,7 @@ async def aws___retrieve_skill(caller: McpCaller, *, skill_name: str, file: str 
     if file is not None:
         args["file"] = file
     result = await caller.call(SERVER, "aws___retrieve_skill", args)
-    return cast("SkillDocument", _dig(result, ('content', )))
+    return _dig(result, ('content', 'skill_content', ))
 
 aws___retrieve_skill.__schema__ = {'type': 'object', 'properties': {'file': {'type': 'string', 'description': "Optional file path within the skill, copied as cited (e.g. `references/architecture.md`). Don't add or strip a `references/` prefix. Omit for SKILL.md."}, 'skill_name': {'type': 'string', 'description': 'Required. Exact `skill_name` from a search_documentation result, copied verbatim. Do not invent or modify.'}}, 'required': ['skill_name']}
 

@@ -6,10 +6,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyAccount"
+      "name": "EvalAccount"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 853
+    "_observed_bytes": 857
   },
   "solidity-custom": {
     "unwrap": [],
@@ -18,7 +18,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyContract"
+      "name": "EvalCustom"
     },
     "_observed_shape": "str",
     "_observed_bytes": 111
@@ -30,11 +30,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyMulti",
-      "uri": "https://example.com/metadata/{id}.json"
+      "name": "EvalMulti",
+      "uri": "https://example.com/{id}.json"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 563
+    "_observed_bytes": 556
   },
   "solidity-erc20": {
     "unwrap": [],
@@ -43,11 +43,12 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyToken",
-      "symbol": "MTK"
+      "name": "EvalToken",
+      "symbol": "EVT",
+      "decimals": "18"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 422
+    "_observed_bytes": 428
   },
   "solidity-erc721": {
     "unwrap": [],
@@ -56,27 +57,25 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyNFT",
-      "symbol": "MNFT"
+      "name": "EvalNFT",
+      "symbol": "ENFT"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 291
+    "_observed_bytes": 295
   },
   "solidity-governor": {
     "unwrap": [],
     "return_model": null,
-    "input_overrides": {
-      "decimals": "int"
-    },
+    "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyGovernor",
+      "name": "EvalGov",
       "delay": "1 day",
       "period": "1 week"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 3298
+    "_observed_bytes": 3292
   },
   "solidity-rwa": {
     "unwrap": [],
@@ -85,8 +84,8 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyAsset",
-      "symbol": "MRWA"
+      "name": "EvalRWA",
+      "symbol": "ERWA"
     },
     "_observed_shape": "str",
     "_observed_bytes": 423
@@ -98,10 +97,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyStable",
-      "symbol": "MSTB"
+      "name": "EvalStable",
+      "symbol": "EUSD"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 426
+    "_observed_bytes": 432
   }
 }

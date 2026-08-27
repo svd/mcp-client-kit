@@ -1,7 +1,7 @@
 {
   "get_commit": {
     "unwrap": [],
-    "return_model": "CommitDetail",
+    "return_model": "Commit",
     "input_overrides": {},
     "fields": {
       "sha": "str",
@@ -11,7 +11,7 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "sha": "main"
+      "sha": "84ef3481c697a6bdf3bdb5777c50ba54346a1afe"
     }
   },
   "get_file_contents": {
@@ -24,7 +24,8 @@
       "owner": "microsoft",
       "repo": "vscode",
       "path": "README.md"
-    }
+    },
+    "_untyped_reason": "resource/media envelope: response is [status_str, resource-metadata]; the record itself (file bytes/text) is never in the payload"
   },
   "get_label": {
     "unwrap": [],
@@ -33,7 +34,7 @@
     "fields": {
       "color": "str",
       "description": "str",
-      "id": "str",
+      "id": "int",
       "name": "str"
     },
     "source": "live",
@@ -58,6 +59,7 @@
       "id": "int",
       "created_at": "str",
       "published_at": "str",
+      "updated_at": "str",
       "url": "str",
       "html_url": "str",
       "assets_url": "str",
@@ -74,7 +76,7 @@
   },
   "get_me": {
     "unwrap": [],
-    "return_model": "GitHubUser",
+    "return_model": "AuthenticatedUser",
     "input_overrides": {},
     "fields": {
       "login": "str",
@@ -100,6 +102,7 @@
       "id": "int",
       "created_at": "str",
       "published_at": "str",
+      "updated_at": "str",
       "url": "str",
       "html_url": "str",
       "assets_url": "str",
@@ -112,12 +115,12 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "tag": "1.128.0"
+      "tag": "1.135.0"
     }
   },
   "get_tag": {
     "unwrap": [],
-    "return_model": "GitTag",
+    "return_model": "TagRef",
     "input_overrides": {},
     "fields": {
       "ref": "str",
@@ -128,7 +131,7 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "tag": "1.128.0"
+      "tag": "v1.19.3"
     }
   },
   "get_team_members": {
@@ -138,21 +141,24 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "org": "microsoft",
-      "team_slug": "vscode"
+      "org": "<example-org>",
+      "team_slug": "engineering"
     },
-    "_probe_status": "inconclusive"
+    "probe_args_scrubbed": true,
+    "_probe_status": "inconclusive",
+    "_untyped_reason": "no success payload observed"
   },
   "get_teams": {
     "unwrap": [],
-    "return_model": "TeamOrgSummary",
-    "return_container": "list",
+    "return_model": "TeamGroup",
     "input_overrides": {},
     "fields": {
-      "org": "str"
+      "org": "str",
+      "teams": "list"
     },
     "source": "live",
-    "probed_args": {}
+    "probed_args": {},
+    "return_container": "list"
   },
   "issue_read": {
     "unwrap": [],
@@ -160,26 +166,17 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "method": "get",
-        "owner": "microsoft",
-        "repo": "vscode",
-        "issue_number": 250000
-      },
-      {
-        "method": "get_comments",
-        "owner": "microsoft",
-        "repo": "vscode",
-        "issue_number": 250000,
-        "perPage": 3
-      }
-    ]
+    "probed_args": {
+      "method": "get",
+      "owner": "microsoft",
+      "repo": "vscode",
+      "issue_number": 332877
+    },
+    "_untyped_reason": "discriminator `method` resolved to option 3: variants span dict/list containers, which mcpgen applies tool-wide"
   },
   "list_branches": {
     "unwrap": [],
-    "return_model": "Branch",
-    "return_container": "list",
+    "return_model": "BranchSummary",
     "input_overrides": {},
     "fields": {
       "name": "str",
@@ -190,13 +187,13 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "perPage": 5
-    }
+      "perPage": 3
+    },
+    "return_container": "list"
   },
   "list_commits": {
     "unwrap": [],
     "return_model": "CommitSummary",
-    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "sha": "str",
@@ -206,37 +203,47 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "perPage": 5
-    }
+      "perPage": 3
+    },
+    "return_container": "list"
   },
   "list_issue_fields": {
     "unwrap": [],
     "return_model": null,
-    "return_container": "list",
     "input_overrides": {},
     "fields": {},
     "source": "live",
     "probed_args": {
-      "owner": "microsoft"
-    }
+      "owner": "microsoft",
+      "repo": "vscode"
+    },
+    "_untyped_reason": "returned [] on every probe; inner element shape unobservable"
   },
   "list_issue_types": {
     "unwrap": [],
-    "return_model": null,
+    "return_model": "IssueType",
     "input_overrides": {},
-    "fields": {},
+    "fields": {
+      "id": "int",
+      "node_id": "str",
+      "name": "str",
+      "description": "str",
+      "color": "str",
+      "created_at": "str",
+      "updated_at": "str"
+    },
     "source": "live",
     "probed_args": {
-      "owner": "microsoft"
+      "owner": "microsoft",
+      "repo": "vscode"
     },
-    "_probe_status": "inconclusive"
+    "return_container": "list"
   },
   "list_issues": {
     "unwrap": [
       "issues"
     ],
     "return_model": "IssueSummary",
-    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "number": "int",
@@ -250,14 +257,14 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "perPage": 3,
-      "state": "OPEN"
-    }
+      "state": "OPEN",
+      "perPage": 3
+    },
+    "return_container": "list"
   },
   "list_pull_requests": {
     "unwrap": [],
     "return_model": "PullRequestSummary",
-    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "number": "int",
@@ -274,14 +281,14 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "perPage": 3,
-      "state": "open"
-    }
+      "state": "all",
+      "perPage": 3
+    },
+    "return_container": "list"
   },
   "list_releases": {
     "unwrap": [],
     "return_model": "ReleaseSummary",
-    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "id": "int",
@@ -297,8 +304,9 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "perPage": 5
-    }
+      "perPage": 3
+    },
+    "return_container": "list"
   },
   "list_repository_collaborators": {
     "unwrap": [],
@@ -307,16 +315,17 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "owner": "microsoft",
-      "repo": "vscode",
+      "owner": "<example-owner>",
+      "repo": "ubiquity-4konverta",
       "perPage": 3
     },
-    "_probe_status": "inconclusive"
+    "probe_args_scrubbed": true,
+    "_probe_status": "inconclusive",
+    "_untyped_reason": "no success payload observed"
   },
   "list_tags": {
     "unwrap": [],
     "return_model": "TagSummary",
-    "return_container": "list",
     "input_overrides": {},
     "fields": {
       "name": "str",
@@ -326,8 +335,9 @@
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "perPage": 5
-    }
+      "perPage": 3
+    },
+    "return_container": "list"
   },
   "pull_request_read": {
     "unwrap": [],
@@ -335,21 +345,13 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "method": "get",
-        "owner": "microsoft",
-        "repo": "vscode",
-        "pullNumber": 332572
-      },
-      {
-        "method": "get_files",
-        "owner": "microsoft",
-        "repo": "vscode",
-        "pullNumber": 332572,
-        "perPage": 3
-      }
-    ]
+    "probed_args": {
+      "method": "get",
+      "owner": "microsoft",
+      "repo": "vscode",
+      "pullNumber": 332876
+    },
+    "_untyped_reason": "discriminator `method` resolved to option 3: variants span dict/list/str containers, which mcpgen applies tool-wide"
   },
   "run_secret_scanning": {
     "unwrap": [],
@@ -357,100 +359,166 @@
     "input_overrides": {},
     "fields": {
       "numBytesScanned": "int",
-      "blobsScanned": "int"
+      "blobsScanned": "int",
+      "secrets": "list"
     },
     "source": "live",
     "probed_args": {
       "owner": "microsoft",
       "repo": "vscode",
-      "files": [
-        "const key = \"<example-secret-string>\";"
-      ]
+      "files": "AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
     }
   },
   "search_code": {
-    "unwrap": [],
-    "return_model": "SearchCodeResult",
+    "unwrap": [
+      "items"
+    ],
+    "return_model": "SearchCodeItem",
     "input_overrides": {},
     "fields": {
-      "total_count": "int",
-      "incomplete_results": "bool"
+      "name": "str",
+      "path": "str",
+      "sha": "str",
+      "repository": "str"
     },
     "source": "live",
     "probed_args": {
-      "query": "McpCaller repo:microsoft/vscode",
+      "query": "language:python def main",
       "perPage": 3
-    }
+    },
+    "return_container": "list"
   },
   "search_commits": {
-    "unwrap": [],
-    "return_model": "SearchCommitsResult",
+    "unwrap": [
+      "items"
+    ],
+    "return_model": "SearchCommitItem",
     "input_overrides": {},
     "fields": {
-      "total_count": "int",
-      "incomplete_results": "bool"
+      "sha": "str",
+      "html_url": "str"
     },
     "source": "live",
     "probed_args": {
-      "query": "repo:microsoft/vscode fix bug",
+      "query": "repo:microsoft/vscode fix",
       "perPage": 3
-    }
+    },
+    "return_container": "list"
   },
   "search_issues": {
-    "unwrap": [],
-    "return_model": "SearchIssuesResult",
+    "unwrap": [
+      "items"
+    ],
+    "return_model": "SearchIssueItem",
     "input_overrides": {},
     "fields": {
-      "total_count": "int",
-      "incomplete_results": "bool"
+      "author_association": "str",
+      "body": "str",
+      "comments": "int",
+      "comments_url": "str",
+      "created_at": "str",
+      "events_url": "str",
+      "html_url": "str",
+      "id": "int",
+      "labels_url": "str",
+      "locked": "bool",
+      "node_id": "str",
+      "number": "int",
+      "repository_url": "str",
+      "state": "str",
+      "title": "str",
+      "updated_at": "str",
+      "url": "str"
     },
     "source": "live",
     "probed_args": {
-      "query": "repo:microsoft/vscode is:issue label:bug",
+      "query": "terminal crash",
+      "owner": "microsoft",
+      "repo": "vscode",
       "perPage": 3
-    }
+    },
+    "return_container": "list"
   },
   "search_pull_requests": {
-    "unwrap": [],
-    "return_model": "SearchPRsResult",
+    "unwrap": [
+      "items"
+    ],
+    "return_model": "SearchPullRequestItem",
     "input_overrides": {},
     "fields": {
-      "total_count": "int",
-      "incomplete_results": "bool",
-      "search_type": "str"
+      "id": "int",
+      "number": "int",
+      "state": "str",
+      "locked": "bool",
+      "title": "str",
+      "body": "str",
+      "author_association": "str",
+      "comments": "int",
+      "created_at": "str",
+      "updated_at": "str",
+      "url": "str",
+      "html_url": "str",
+      "comments_url": "str",
+      "events_url": "str",
+      "labels_url": "str",
+      "repository_url": "str",
+      "node_id": "str",
+      "draft": "bool"
     },
     "source": "live",
     "probed_args": {
-      "query": "repo:microsoft/vscode is:pr is:open",
+      "query": "repo:microsoft/vscode is:pr",
       "perPage": 3
-    }
+    },
+    "return_container": "list"
   },
   "search_repositories": {
-    "unwrap": [],
-    "return_model": "SearchReposResult",
+    "unwrap": [
+      "items"
+    ],
+    "return_model": "SearchRepositoryItem",
     "input_overrides": {},
     "fields": {
-      "total_count": "int",
-      "incomplete_results": "bool"
+      "id": "int",
+      "name": "str",
+      "full_name": "str",
+      "description": "str",
+      "html_url": "str",
+      "language": "str",
+      "stargazers_count": "int",
+      "forks_count": "int",
+      "open_issues_count": "int",
+      "updated_at": "str",
+      "created_at": "str",
+      "private": "bool",
+      "fork": "bool",
+      "archived": "bool",
+      "default_branch": "str"
     },
     "source": "live",
     "probed_args": {
-      "query": "vscode language:typescript stars:>10000",
+      "query": "vscode",
       "perPage": 3
-    }
+    },
+    "return_container": "list"
   },
   "search_users": {
-    "unwrap": [],
-    "return_model": "SearchUsersResult",
+    "unwrap": [
+      "items"
+    ],
+    "return_model": "SearchUserItem",
     "input_overrides": {},
     "fields": {
-      "total_count": "int",
-      "incomplete_results": "bool"
+      "login": "str",
+      "id": "int",
+      "profile_url": "str",
+      "avatar_url": "str"
     },
     "source": "live",
     "probed_args": {
       "query": "torvalds",
       "perPage": 3
-    }
+    },
+    "return_container": "list"
   }
 }

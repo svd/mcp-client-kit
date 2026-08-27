@@ -2,50 +2,58 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T19:32:27Z
-- **Duration:** 2m 20s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T06:05:41Z
+- **Duration:** 3m 10s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface
+## Tool inventory
 
-The server exposes **8 tools**, all contract generators for the OpenZeppelin Solidity
-Wizard: `solidity-erc20`, `solidity-erc721`, `solidity-erc1155`, `solidity-stablecoin`,
-`solidity-rwa`, `solidity-account`, `solidity-governor`, `solidity-custom`. None carries
-`annotations`, so the keyword + semantic fallback decided safety. Every description ends
-with "Does not write to disk", which settles it: these are pure functions from an options
-object to source text. **All 8 were probed, none skipped.**
+`mcpgen list --schema` returned **8 tools**, all of the same family: `solidity-erc20`,
+`solidity-erc721`, `solidity-erc1155`, `solidity-stablecoin`, `solidity-rwa`,
+`solidity-account`, `solidity-governor`, `solidity-custom`. Each is a contract
+*generator* — the description for every one ends "Returns the source code of the
+generated contract, formatted in a Markdown code block. Does not write to disk."
 
-## Probe results
+No tool ships `annotations`, so the step-2b keyword fallback decided mutability. No name
+splits into a mutating whole word, and the descriptions explicitly disclaim writes, so
+**all 8 were selected and probed; none were skipped.** No seed commands were configured
+and none were needed.
 
-Every tool returned the same thing — a plain `str` containing a Markdown-fenced Solidity
-file. Payloads ranged from 111 bytes (`solidity-custom`, an empty contract body) to
-3298 bytes (`solidity-governor`, which pulls in the full Governor stack). Raw payloads were
-captured for `solidity-custom` and `solidity-erc20` to rule out the JSON-in-string case:
-both are literal ```` ```solidity ```` blocks, not serialized structures, so `json.loads()`
-would fail and `_observed_shape: "str"` stands as the honest answer. These are genuine
-successes, not quota or auth errors — no `_probe_status: inconclusive` was warranted.
+## Discriminators
+
+The `list` advisory flagged seven candidates: `crossChainBridging`, `decimals`, `name`,
+`namespacePrefix`, `premint`, `premintChainId`, `symbol`. Pass 2 probed
+`solidity-erc721` with and without `crossChainBridging="custom"`: both responses
+observed as `"str"` (295 vs 311 bytes — a content difference, not a shape one). The
+verdict is **inconclusive but moot** — every tool on this server returns a flat string,
+so no discriminator can switch a return *shape*. Resolution taken: option 3
+(unwrap-only / `Any`), which is what the honest shape already is.
+
+## Surprises
+
+The first `solidity-erc20` probe passed `decimals: 18` as a JSON number and came back
+with `MCP error -32602: expected string, received number`. That response observes as
+`"str"` and would have been indistinguishable from a real result had the raw payload not
+been captured. The schema is right and the probe was wrong: `decimals`, `premint`, and
+`premintChainId` are declared `"type": "string"` on the ERC-20-family tools, while
+`solidity-governor` declares its own `decimals` as `"number"`. Re-probed with
+schema-valid args, all 8 tools returned genuine Markdown-fenced Solidity.
+
+Second observation: this server expresses its enums as nested `anyOf` + `const` unions
+rather than an `enum` array, so codegen emits `Any` for `access`, `votes`, `upgradeable`,
+and `signer` instead of `Literal[...]`. Zero `Literal` types appear in the module.
 
 ## Shape decisions
 
-**No tool received a `return_model`.** There is no vendor envelope to strip
-(`unwrap: []` everywhere) and no record to model — the payload is the contract source
-itself. Minting a `TypedDict` here would be a lie about a string. All 8 wrappers correctly
-stay `-> Any`, and `fields` is empty for each.
+Identical for all 8 tools: `unwrap: []`, `return_model: null`, `return_container` unset,
+`fields: {}`, `source: "live"`. The payload is a Markdown code block of Solidity source —
+prose, not a record. The JSON-in-string test on the raw captures returned `NOT_JSON`
+(`JSONDecodeError`) for both `solidity-custom` and `solidity-erc20`, confirming there is
+no double-encoded record hiding inside the string. `_observed_shape: "str"` is kept as
+evidence of a genuine text-returning tool — these are observed successes, not
+`_probe_status: inconclusive`. `probed_args` hold only invented contract names
+(`EvalToken`, `EvalGov`) and a placeholder URI; nothing required scrubbing.
 
-The one substantive edit was an `input_override`: `solidity-governor.decimals` is declared
-`number` in the input schema but is a token decimal count (18 for ERC20Votes, 0 for
-ERC721Votes), so it was pinned to `int` rather than the mechanical `float`. `blockTime` and
-`quorumPercent` were left `float` — both plausibly accept fractional values.
+## Module
 
-The `mcpgen list` advisory flagged seven discriminator candidates (`name`, `symbol`,
-`decimals`, `premint`, `premintChainId`, `namespacePrefix`, `crossChainBridging`). All were
-discarded. `name` spans every tool in the set — a global context arg, Pass-1 disqualified.
-The rest failed Pass 2: no response is a dict, so none of these can appear as a response
-key. They are contract-configuration inputs that steer which Solidity features get emitted,
-not shape switches over a structured payload.
-
-## Outcome
-
-The regenerated module parses cleanly (`ast.parse` OK) with all 8 `async def` wrappers
-present. `eval-kit verify` returns **pass**: ast, signatures, idempotency, and pii all
-green; roundtrip skipped as `no_shaped_non_mutating_tool`, the expected result when nothing
-carries a return model.
+`ast.parse` clean. All 8 wrappers render `-> Any`, correctly, and the module carries
+embedded `__schema__` plus Args docstrings.

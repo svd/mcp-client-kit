@@ -5,23 +5,23 @@ Auth: none
 
 Usage:
     python eval/time/run.py
-
-Note: the generated wrapper module is named `time.py`, which collides with
-the Python stdlib `time` module. CPython's import system always resolves a
-bare `import time` to the builtin module regardless of sys.path, so a plain
-`import time` would silently import the stdlib module instead of the local
-wrapper (and every call below would raise AttributeError). We load the
-wrapper module directly from its file path under a distinct name to avoid
-the collision.
 """
 import asyncio
 import importlib.util
 import os
+import sys
 
-_MODULE_PATH = os.path.join(os.path.dirname(__file__), "time.py")
-_spec = importlib.util.spec_from_file_location("time_wrappers", _MODULE_PATH)
-assert _spec is not None and _spec.loader is not None
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+# The wrapper module file is "time.py", which collides with the stdlib `time`
+# module (already in sys.modules by the time this runs), so a plain `import
+# time` would silently pick up the stdlib one. Load it by path as
+# `time_wrappers` instead.
+_spec = importlib.util.spec_from_file_location(
+    "time_wrappers",
+    os.path.join(os.path.dirname(__file__), "time.py"),
+)
 time_wrappers = importlib.util.module_from_spec(_spec)
+sys.modules["time_wrappers"] = time_wrappers
 _spec.loader.exec_module(time_wrappers)
 
 from mcpgen import McpBridgeCaller
@@ -30,24 +30,43 @@ from mcpgen import McpBridgeCaller
 async def main() -> None:
     caller = McpBridgeCaller(cmd="uvx mcp-server-time")
 
-    # Skipped mutating tools: (none — all tools are read-only)
-
+    # One connection for the whole run: a single initialize() and a single
+    # subprocess, instead of reconnecting for every tool call.
     async with caller.connected():
-        # get_current_time -> CurrentTime  (probed with 2 timezone variants)
-        current_ny = await time_wrappers.get_current_time(caller, timezone="America/New_York")
-        print(f"get_current_time(America/New_York): datetime={current_ny.get('datetime')!r}  day_of_week={current_ny.get('day_of_week')!r}")
+        # Skipped mutating tools: none — this server is read-only.
+        # Args below are the real probed args from time.verify.json.
 
-        current_tokyo = await time_wrappers.get_current_time(caller, timezone="Asia/Tokyo")
-        print(f"get_current_time(Asia/Tokyo): datetime={current_tokyo.get('datetime')!r}  day_of_week={current_tokyo.get('day_of_week')!r}")
+        # get_current_time -> CurrentTime  (probed variant: UTC)
+        now_utc = await time_wrappers.get_current_time(caller, timezone="UTC")
+        print(
+            f"get_current_time(UTC): timezone={now_utc.get('timezone')!r} "
+            f"datetime={now_utc.get('datetime')!r} "
+            f"day_of_week={now_utc.get('day_of_week')!r} "
+            f"is_dst={now_utc.get('is_dst')!r}"
+        )
+
+        # get_current_time -> CurrentTime  (probed variant: America/New_York)
+        now_ny = await time_wrappers.get_current_time(caller, timezone="America/New_York")
+        print(
+            f"get_current_time(America/New_York): timezone={now_ny.get('timezone')!r} "
+            f"datetime={now_ny.get('datetime')!r} "
+            f"day_of_week={now_ny.get('day_of_week')!r} "
+            f"is_dst={now_ny.get('is_dst')!r}"
+        )
 
         # convert_time -> TimeConversion
-        converted = await time_wrappers.convert_time(
+        conversion = await time_wrappers.convert_time(
             caller,
-            source_timezone="America/New_York",
+            source_timezone="UTC",
             time="14:30",
             target_timezone="Asia/Tokyo",
         )
-        print(f"convert_time: time_difference={converted.get('time_difference')!r}")
+        print(
+            f"convert_time(UTC 14:30 -> Asia/Tokyo): "
+            f"source={conversion.get('source')!r} "
+            f"target={conversion.get('target')!r} "
+            f"time_difference={conversion.get('time_difference')!r}"
+        )
 
 
 if __name__ == "__main__":

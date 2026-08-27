@@ -1,11 +1,34 @@
 {
+  "hf_fs": {
+    "unwrap": [],
+    "return_model": null,
+    "input_overrides": {},
+    "fields": {},
+    "source": "live",
+    "probed_args": {
+      "operations": [
+        {
+          "cmd": "ls",
+          "args": [
+            "hf://models/trending",
+            "--limit",
+            "5"
+          ]
+        }
+      ]
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 1035
+  },
   "hf_whoami": {
     "unwrap": [],
     "return_model": null,
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {}
+    "probed_args": {},
+    "_observed_shape": "str",
+    "_observed_bytes": 321
   },
   "hub_repo_details": {
     "unwrap": [],
@@ -13,81 +36,31 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "repo_ids": [
-          "bert-base-uncased"
-        ],
-        "repo_type": "model",
-        "operations": [
-          "overview"
-        ]
-      },
-      {
-        "repo_ids": [
-          "squad"
-        ],
-        "repo_type": "dataset",
-        "operations": [
-          "overview",
-          "dataset_structure"
-        ]
-      }
-    ]
+    "probed_args": {
+      "repo_ids": [
+        "openai/gpt-oss-120b"
+      ],
+      "repo_type": "model"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 1961
   },
   "hub_repo_search": {
     "unwrap": [],
     "return_model": null,
-    "input_overrides": {},
+    "input_overrides": {
+      "limit": "int"
+    },
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "query": "bert-base-uncased",
-        "repo_types": [
-          "model"
-        ],
-        "limit": 5
-      },
-      {
-        "query": "squad",
-        "repo_types": [
-          "dataset"
-        ],
-        "limit": 5
-      }
-    ]
-  },
-  "hf_fs": {
-    "unwrap": [],
-    "return_model": null,
-    "input_overrides": {},
-    "fields": {},
-    "source": "live",
-    "probed_args": [
-      {
-        "operations": [
-          {
-            "cmd": "ls",
-            "args": [
-              "hf://models/trending",
-              "--limit",
-              "5"
-            ]
-          }
-        ]
-      },
-      {
-        "operations": [
-          {
-            "cmd": "search",
-            "args": [
-              "hf://papers",
-              "transformers"
-            ]
-          }
-        ]
-      }
-    ]
+    "probed_args": {
+      "query": "bert",
+      "repo_types": [
+        "model"
+      ],
+      "limit": 3
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 1475
   }
 }

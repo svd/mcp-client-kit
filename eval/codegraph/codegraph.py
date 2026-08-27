@@ -14,7 +14,7 @@ SERVER = 'codegraph'
 
 
 
-async def codegraph_context(caller: McpCaller, *, task: str, maxNodes: float | None = None, includeCode: bool | None = None, projectPath: str | None = None) -> Any:
+async def codegraph_context(caller: McpCaller, *, task: str, maxNodes: int | None = None, includeCode: bool | None = None, projectPath: str | None = None) -> Any:
     """PRIMARY TOOL — call FIRST for any "how does X work"/architecture/bug question. Returns entry points + related symbols + key code in one call; usually answers without further search/Read/Grep. Provides CODE context, not product requirements.
 
     Args:
@@ -35,8 +35,8 @@ async def codegraph_context(caller: McpCaller, *, task: str, maxNodes: float | N
 codegraph_context.__schema__ = {'type': 'object', 'properties': {'task': {'type': 'string', 'description': 'Description of the task, bug, or feature to build context for'}, 'maxNodes': {'type': 'number', 'description': 'Maximum symbols to include (default: 20)', 'default': 20}, 'includeCode': {'type': 'boolean', 'description': 'Include code snippets for key symbols (default: true)', 'default': True}, 'projectPath': {'type': 'string', 'description': 'Path to a different project with .codegraph/ initialized. If omitted, uses current project. Use this to query other codebases.'}}, 'required': ['task']}
 
 
-async def codegraph_explore(caller: McpCaller, *, query: str, maxFiles: float | None = None, projectPath: str | None = None) -> Any:
-    """Source of SEVERAL related symbols grouped by file, in one capped call. Query is a bag of symbol/file names (not a question). Returned source is verbatim Read-equivalent — do not re-open shown files. Prefer over chained codegraph_node. Budget: make at most 1 calls for this project (11 files indexed).
+async def codegraph_explore(caller: McpCaller, *, query: str, maxFiles: int | None = None, projectPath: str | None = None) -> Any:
+    """Source of SEVERAL related symbols grouped by file, in one capped call. Query is a bag of symbol/file names (not a question). Returned source is verbatim Read-equivalent — do not re-open shown files. Prefer over chained codegraph_node. Budget: make at most 1 calls for this project (16 files indexed).
 
     Args:
         query: Symbol names, file names, or short code terms to explore (e.g., "AuthService loginUser session-manager", "GraphTraverser BFS impact traversal.ts"). Use codegraph_search first to find relevant names.
@@ -71,7 +71,7 @@ async def codegraph_node(caller: McpCaller, *, symbol: str, includeCode: bool | 
 codegraph_node.__schema__ = {'type': 'object', 'properties': {'symbol': {'type': 'string', 'description': 'Name of the symbol to get details for'}, 'includeCode': {'type': 'boolean', 'description': 'Include full source code (default: false to minimize context)', 'default': False}, 'projectPath': {'type': 'string', 'description': 'Path to a different project with .codegraph/ initialized. If omitted, uses current project. Use this to query other codebases.'}}, 'required': ['symbol']}
 
 
-async def codegraph_search(caller: McpCaller, *, query: str, kind: Literal['function', 'method', 'class', 'interface', 'type', 'variable', 'route', 'component'] | None = None, limit: float | None = None, projectPath: str | None = None) -> Any:
+async def codegraph_search(caller: McpCaller, *, query: str, kind: Literal['function', 'method', 'class', 'interface', 'type', 'variable', 'route', 'component'] | None = None, limit: int | None = None, projectPath: str | None = None) -> Any:
     """Quick symbol search by name. Returns locations only (no code). Use codegraph_context instead for comprehensive task context.
 
     Args:

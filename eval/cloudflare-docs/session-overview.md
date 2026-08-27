@@ -2,54 +2,58 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T19:32:27Z
-- **Duration:** 1m 30s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T06:05:16Z
+- **Duration:** 1m 51s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface
+## Server surface
 
-`https://docs.mcp.cloudflare.com/mcp` (streamable HTTP, no auth) exposes **2 tools**, both
-probed, none skipped:
+`mcpgen list cloudflare-docs --schema` returned **2 tools**, both carrying
+`annotations.readOnlyHint: true`:
 
-- `search_cloudflare_documentation` — one required `query: string`, no enums
+- `search_cloudflare_documentation` — one required `query: string`
 - `migrate_pages_to_workers_guide` — no parameters at all
 
-Both carry `annotations.readOnlyHint: true`, so the step-2b mutation heuristic never had to
-run and the subagent fallback (probe all non-mutating tools) selected the full set. `mcpgen
-list` emitted no discriminator advisory — with only one input parameter across the whole
-server there are no shared params to be polymorphic about, so step 2.g resolved to nothing.
+Neither name trips the mutating keyword test, and neither annotation is
+self-contradicting, so the hints stood unchallenged. **Both tools were probed; none
+were skipped.** No seed commands apply — the server is a stateless hosted docs index.
+
+`discriminators: N/A`. The only shared-name candidate across the two tools would have
+to be `query`, which sits on the engine's own denylist, and `migrate_pages_to_workers_guide`
+declares no properties whatsoever. No advisory fired on the `list` stderr, and Pass 2
+was skipped outright.
 
 ## Probing
 
-Two live calls, one per tool. Both returned `_observed_shape: "str"` — 16 470 bytes for the
-search and 5 716 bytes for the migration guide. Because a bare `"str"` is ambiguous between
-"genuine text tool" and "the probe hit a quota/auth wall", both raw payloads were captured
-with `mcpgen call` and read directly. Neither is an error:
+Two live probes against `https://docs.mcp.cloudflare.com/mcp`, paced 2 s apart as the
+hosted-endpoint rule requires. Both returned successfully on the first attempt — no
+challenges, no 5xx, no retries. Observed sizes: 16,470 bytes for the search, 5,716 for
+the guide.
 
-- The search response is a stream of pseudo-XML documentation chunks —
-  `<url>…</url><title>…</title><text>…</text>` repeated per semantic match, with markdown
-  and fenced Wrangler config inside the `<text>` blocks. It is not JSON: `json.loads()`
-  fails at char 0, so the step-3 JSON-in-string escape hatch does not apply and no
-  `_json_unwrap` annotation was added.
-- The migration guide is a static markdown document ("Migrate Cloudflare Pages to Workers
-  using the guide below: # Cloudflare Pages to Workers Migration Guide …").
-
-Since these are real successes rather than failed probes, no `_probe_status:
-"inconclusive"` marker was written — that field is reserved for quota/auth walls, and
-adding it here would misreport a healthy server.
+Both collapsed to `_observed_shape: "str"`, which triggered the JSON-in-string check.
+Raw payloads were captured with `mcpgen call --out` and tested with the guarded
+`json.loads` snippet: **both reported `NOT_JSON`**. The payloads are genuinely prose,
+not double-encoded records. `search_cloudflare_documentation` returns an XML-ish
+transcript of semantically matched chunks — repeated `<result><url>…</url>
+<title>…</title><text>…</text></result>` blocks of Markdown — and
+`migrate_pages_to_workers_guide` returns a single Markdown migration guide. Neither is
+an error payload, so no `_probe_status: inconclusive` marker was warranted.
 
 ## Shape decisions
 
-Both tools: `unwrap: []`, `return_model: null`, no `return_container`, no
-`input_overrides`, empty `fields`, `source: "live"`. There is no vendor envelope to strip
-and no record to model — the payload *is* prose. Minting a `TypedDict` would be an
-authoritative lie about a string. `_observed_shape` was kept as evidence for the verifier.
-`probed_args` needed no scrubbing: the only value is the literal search query
-`"How do I bind a KV namespace to a Worker?"`, which is functional, not PII.
+Nothing to shape, honestly. For both tools: `unwrap: []`, `return_model: null`,
+`return_container` omitted, `fields: {}`, `source: "live"`. There is no vendor envelope
+to strip and no record to type — inventing a `TypedDict` over a Markdown blob would be
+exactly the authoritative lie the skill's guards forbid. `_observed_shape: "str"` is
+retained as evidence so the verifier can tell a genuine text-returning tool from a probe
+that never observed anything.
 
-## Outcome
+`probed_args` needed no scrubbing: the single value is a free-text docs question
+(`"How do I bind a KV namespace to a Worker?"`), functional and non-identifying.
 
-The regenerated module parses cleanly (`ast.parse` OK) and both wrappers correctly read
-`-> Any`. `eval-kit verify` returns **pass**: ast, signatures, idempotency, and pii all
-pass; roundtrip skips with `no_shaped_non_mutating_tool`, which is the expected result for
-a server where nothing is shapeable. This is an honest-`Any` server, not an under-typed
-one.
+## Regeneration
+
+`mcpgen codegen … --embed-schema` re-ran with the merged shapes auto-detected (2 tools).
+The module **parsed cleanly** under `ast.parse`. Both wrappers correctly read `-> Any`,
+and `search_cloudflare_documentation` carries the expected keyword-only `query: str`.
+This is the `no_shaped_tool_by_design` outcome: every tool on this server returns prose,
+so `Any` is the accurate return type, not a coverage gap.

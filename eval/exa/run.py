@@ -30,10 +30,11 @@ async def main() -> None:
         # Neither tool is discriminated, so one call each.
 
         # web_search_exa -> Any  (observed shape: str)
+        # Search first: web_fetch_exa is documented as the follow-up step.
         results = await exa.web_search_exa(
             caller,
-            query="blog post comparing React and Vue performance",
-            numResults=2,
+            query="blog post explaining the Model Context Protocol architecture",
+            numResults=3,
         )
         print(f"web_search_exa: {type(results).__name__} len={len(results)}")
         print(f"  head: {str(results)[:200]!r}")
@@ -41,8 +42,8 @@ async def main() -> None:
         # web_fetch_exa -> Any  (observed shape: str)
         page = await exa.web_fetch_exa(
             caller,
-            urls=["https://example.com"],
-            maxCharacters=500,
+            urls=["https://modelcontextprotocol.io/introduction"],
+            maxCharacters=1500,
         )
         print(f"web_fetch_exa: {type(page).__name__} len={len(page)}")
         print(f"  head: {str(page)[:200]!r}")

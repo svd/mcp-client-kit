@@ -6,7 +6,7 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyToken"
+      "name": "MyMulti"
     },
     "_observed_shape": "str",
     "_observed_bytes": 2041
@@ -18,10 +18,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyToken"
+      "name": "AlphaBeta"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2557
+    "_observed_bytes": 2569
   },
   "stylus-erc721": {
     "unwrap": [],
@@ -30,9 +30,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyToken"
+      "name": "MyNft"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2378
+    "_observed_bytes": 2370
   }
 }

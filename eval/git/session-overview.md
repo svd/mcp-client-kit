@@ -1,58 +1,59 @@
-# Session Overview — git
+# git — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T15:44:02Z
-- **Duration:** 1m 41s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T06:01:09Z
+- **Duration:** 2m 39s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## What happened
+## Surface and selection
 
-`mcpgen codegen` against the `git` server (launched via `uvx mcp-server-git`) discovered
-**12 tools**. Following the read-only/mutating split (`annotations.readOnlyHint`, no
-keyword fallback needed — every tool carried an explicit hint), **7 tools were probed**
-live: `git_status`, `git_diff_unstaged`, `git_diff_staged`, `git_diff`, `git_log`,
-`git_show`, `git_branch`. The remaining **5 were skipped as mutating**
-(`readOnlyHint: false`): `git_commit`, `git_add`, `git_reset`, `git_create_branch`,
-`git_checkout`. Running this repository's own working tree as the probe target
-(`repo_path` = this eval repo's checkout) gave every probed tool a realistic, non-empty
-payload to observe.
+`mcp-server-git` (stdio, `uvx mcp-server-git`, no auth) exposes **12 tools**. Every one
+carries a full `annotations` block, so tool selection took the primary path and the
+keyword heuristic was never needed. Seven tools declare `readOnlyHint: true` and were
+probed: `git_status`, `git_diff_unstaged`, `git_diff_staged`, `git_diff`, `git_log`,
+`git_show`, `git_branch`. Five declare `readOnlyHint: false` and were skipped without a
+live call.
 
-## Discriminator note
+The contradiction check cleared all seven: each pairs `readOnlyHint: true` with
+`destructiveHint: false` and `idempotentHint: true`, and no name passes the keyword
+test. No seed commands were configured, and none were needed — the eval repo itself is
+a populated git repository, so every read tool had real data to return.
 
-`mcpgen list` flagged two candidate discriminators: `branch_name` (spans `git_checkout`,
-`git_create_branch` — both mutating, out of scope) and `repo_path` (spans nearly every
-tool). `repo_path` matches the Pass-1 auto-disqualify pattern (path/repo identity, a
-global context arg) and never appears as a key inside any observed response — it's
-purely an input parameter, not a response-shape switch. No genuine discriminator applied
-to the probed set.
+## mutating-skipped
+
+- `git_commit` — `readOnlyHint: false`
+- `git_add` — `readOnlyHint: false`
+- `git_reset` — `readOnlyHint: false`, `destructiveHint: true`
+- `git_create_branch` — `readOnlyHint: false`
+- `git_checkout` — `readOnlyHint: false`
+
+## Discriminators
+
+The `list --schema` advisory raised two candidates. `repo_path` is auto-disqualified by
+Pass 1 as path identity. `branch_name` spans only `git_checkout` and `git_create_branch`
+— both mutating, both outside the selected set — so it is recorded unresolved rather
+than probed. Pass 2 made no calls.
 
 ## Shape decisions
 
-Every probed tool returns the MCP server's `TextContent` as a **plain string** — `git`
-here is a thin wrapper around the `git` CLI's stdout (status lines, unified diffs, `git
-log --oneline`-style entries, `git show` patches, and `git branch -v` listings). None of
-these responses are JSON-in-string (`json.loads()` was not attempted since the payloads
-are visibly diff/log text, not structured data), so for all 7 tools:
+Every one of the seven probes returned a payload, and every payload observed as bare
+`"str"`. This server is prose-only by design: it returns formatted git porcelain, not
+records. Each response opens with a human-readable label — `Repository status:`,
+`Unstaged changes:`, `Commit history:`, `Diff with main:`.
 
-- **`unwrap`**: `[]` — no envelope to strip, the string *is* the payload.
-- **`return_model`**: `null` — a `TypedDict` over free-form diff/log text would be a
-  false promise; the wrapper's `-> Any` (rendered as `str` at the call site) is the
-  honest type.
-- **`fields`**: `{}` — no stable scalar keys exist to extract from unstructured text.
+Because a bare `"str"` is also what a double-encoded record looks like, the JSON-in-string
+test was run on all seven raw payloads captured via `mcpgen call --out`. All seven
+returned `NOT_JSON` (`JSONDecodeError`). There is no envelope to unwrap and no record to
+model, so `unwrap` stays empty and `return_model` stays `null` across the board — the
+generated `-> Any` is the honest signature, not a coverage gap. No tool was recorded as
+`_probe_status: inconclusive`: every probe genuinely succeeded.
 
-Observed payload sizes ranged from tiny (`git_diff_staged`, 19 bytes — nothing staged)
-to substantial (`git_diff`, ~357 KB against `HEAD~1`, and `git_show`, ~299 KB for the
-`HEAD` commit) — both reflect this repo's real recent diff volume, not an anomaly.
-`probed_args` (all just `repo_path` plus one discriminating field like `revision` or
-`max_count`) were scrubbed to `<example-repo-path>` with `probe_args_scrubbed: true`,
-since the raw value embedded this machine's local username in the filesystem path; the
-gitignored `git.verify.json` sidecar retains the real path for the roundtrip verifier.
+One incidental observation: `git_show` leaks a Python repr into its text
+(`Author: <git.Actor "...">`) rather than formatting the author. That is a server-side
+quirk, not a shaping decision.
 
-## Verification
+`probed_args` held the absolute repo path, which embeds a username; all seven entries
+were scrubbed to `<example-repo-path>` and marked `probe_args_scrubbed: true`. The
+gitignored `git.verify.json` sidecar retains the real path for roundtrip.
 
-The regenerated `eval/git/git.py` (10,115 bytes, 12 wrapper functions) parses cleanly
-under `ast.parse`. `eval-kit verify git` passed all applicable checks: `ast`,
-`signatures`, `idempotency` (deterministic `render_module()` re-run), and `pii` (no raw
-identifiers left in the committed shapes file). `roundtrip` was skipped — expected, since
-every shaped tool returns `Any`/`str` rather than a `TypedDict`, so there's no typed
-non-mutating tool for the live-roundtrip check to exercise.
+The regenerated module parses cleanly (`ast.parse` OK, 10298 bytes, 12 functions).

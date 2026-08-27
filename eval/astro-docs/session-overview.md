@@ -1,47 +1,73 @@
-# astro-docs — generate-mcp-wrappers session overview
+# astro-docs — eval session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T19:32:27Z
-- **Duration:** 1m 17s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T06:05:18Z
+- **Duration:** 1m 41s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface
+## Engine
 
-`astro-docs` is a single-tool HTTP server at `https://mcp.docs.astro.build/mcp`, no auth.
-`mcpgen list --schema` returned exactly one tool, `search_astro_docs` ("Search the official
-Astro framework docs"), taking one required string param `query`. No `annotations` block was
-present, so the keyword + semantic fallback applied: `search` is a read verb with no mutating
-language in the description, so the tool was probed. One tool probed, zero skipped, zero
-mutating. With a single tool there were no shared params, so `mcpgen list` emitted no
-discriminator advisory and no polymorphic-suspect set existed to resolve.
+Resolved `mcpgen` invocation: `uv run mcpgen` (0.9.0.dev1). The bare `mcpgen` form is
+absent in this uv-managed project. Server reached through the config form,
+`MCPGEN_SERVERS=.mcp.eval.json`, which maps `astro-docs` to the streamable-HTTP endpoint
+`https://mcp.docs.astro.build/mcp`. No auth, no seed commands.
+
+## Tool surface
+
+`mcpgen list astro-docs --schema` returned exactly **one** tool:
+
+```
+Tools on astro-docs:
+  search_astro_docs — Search the official Astro framework docs
+```
+
+The server supplies no `annotations` block, so the mutating check fell back to the
+keyword heuristic: `search` leads the name, no mutating whole word appears, and the
+description describes a read. Selected — 1 of 1 tools probed, 0 skipped, no
+`mutating-skipped` entries.
+
+**discriminators: N/A.** A candidate needs two or more tools declaring the same scalar
+parameter; with a single tool the precondition cannot be met, and `query` sits on the
+engine's own denylist regardless. Pass 2 was skipped outright.
 
 ## Probing
 
-Ran as a workflow subagent, so the whole procedure executed as one inline driver thread —
-no recon or batch sub-subagents. A raw capture (`mcpgen call ... --out *.probe-raw.json`)
-came back at 26.7 KB and showed the server returns a single-key vendor envelope:
-`{"search_results": [...]}` with 10 hits. Nothing surprising: no error strings, no quota or
-auth failures, no JSON-in-string wrapping (mcpgen surfaced a parsed dict, not text), and no
-empty-list result that would have made the element shape unobservable.
+Three live probes, paced ≥ 2 s apart as the hosted-HTTP rule requires:
 
-Two live probes were merged in one `mcpgen probe` invocation (`"content collections"` and
-`"view transitions"`) to confirm the element shape was stable across queries rather than an
-artifact of one search. Both produced identical result records with four fields, all `str`
-in both probes and never null: `content`, `source_url`, `title`, `source_type`. Deep-merge
-widened nothing, which is itself the evidence that the shape is stable.
+1. `query="view transitions"` — 23,866 bytes observed.
+2. `query="zzzqxnonexistenttopic"` — 19,889 bytes observed.
+3. `query="view transitions"` again, so the merged `probed_args` carries the meaningful
+   query for the roundtrip verifier.
 
-## Shape decisions
+**The surprise was the nonsense query.** A term that matches nothing in the Astro docs
+still returned ten results with an identical field set — the backend is a dense/vector
+search that always fills its result window rather than returning `[]`. That is useful
+for shaping: there is no empty-list path to leave an inner element shape unobservable,
+and the `...x10` element count was identical across both queries, so the normalization
+rule (ignore `...xN`) was not even needed to call the two shapes equal.
 
-`search_astro_docs`: `unwrap: ["search_results"]` strips the envelope; `return_container:
-"list"` because the unwrapped value is a list of records, so the body digs via `_dig_list`;
-`return_model: "AstroDocSearchResult"` — a distinct, search-specific name, and the only
-model in the module, so no collision check was needed. All four top-level scalars were
-promoted; there is no nesting to over-model, and `content` stays a `str` (raw Markdown), not
-a parsed structure. `probed_args` are plain public search strings — no PII pattern matched,
-so nothing was scrubbed and the roundtrip verifier keeps working against the live server.
+## Shape decision
+
+One entry, one decision. The payload is a clean single-level envelope:
+
+```
+{"search_results": [{"content", "source_url", "title", "source_type"}, ...x10]}
+```
+
+- **unwrap:** `["search_results"]` — one vendor key strips to the record list.
+- **return_container:** `"list"` — the unwrapped value is a list of records, so the body
+  digs via `_dig_list` and defaults to `[]`.
+- **return_model:** `AstroDocSearchResult` — a new capitalized name, no collision risk
+  with only one tool in the module.
+- **fields:** all four top-level scalars, every one observed as `str` in both probes and
+  never null, so none is marked nullable. No depth was modelled beyond the record itself
+  because there is none to model — the elements are flat.
+- **probed_args:** `{"query": "view transitions"}`. Nothing here matches a PII pattern —
+  a search string is a functional value — so the scrub pass changed nothing.
 
 ## Verification
 
-Regenerated with `--shapes`; `ast.parse` succeeded and `search_astro_docs` reads
-`-> list[AstroDocSearchResult]`, not `Any`. Runner generation was skipped per the subagent
-fallback for step 7.
+The regenerated module parses cleanly under `ast.parse`, and the eval target holds:
+`search_astro_docs` reads `-> list[AstroDocSearchResult]` rather than `Any`, and its body
+digs `('search_results',)`. `run.py` is the harness verify stage's job and was not
+generated here.

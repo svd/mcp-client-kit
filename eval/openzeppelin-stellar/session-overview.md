@@ -2,54 +2,56 @@
 
 ## Run Metadata
 
-- **Executed:** 2026-08-26T14:48:03Z
-- **Duration:** 1m 49s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
+- **Executed:** 2026-08-27T06:07:34Z
+- **Duration:** 2m 54s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface
+## Tool inventory
 
-The server exposes **6 tools**, all contract generators: `stellar-account`,
-`stellar-fungible`, `stellar-governor`, `stellar-non-fungible`, `stellar-stablecoin`,
-`stellar-vault`. Every one is read-only by construction — each description ends with
-"Returns the source code of the generated contract, formatted in a Markdown code block.
-Does not write to disk." No `annotations` block is published, so the keyword+semantic
-fallback applied; nothing tripped it. **All 6 were probed, 0 skipped.** No seed commands
-were configured, and none were needed — the server holds no state.
+The server exposes **6 tools**, all Soroban contract-source generators:
+`stellar-account`, `stellar-fungible`, `stellar-governor`, `stellar-non-fungible`,
+`stellar-stablecoin`, `stellar-vault`. None carries an `annotations` block, so the
+step-2b fallback applied: the keyword test matches no name (`stellar-*` plus a contract
+kind), and every description ends with the same sentence — "Returns the source code of
+the generated contract, formatted in a Markdown code block. **Does not write to disk.**"
+That is an explicit server-side statement of read-only behaviour, so all 6 were selected
+and probed; **0 skipped**, no `mutating-skipped` entries.
 
-## Discriminator handling
+## Discriminators
 
-`mcpgen list` flagged four candidates: `name` (spans all 6 tools), `symbol` (4 tools),
-`decimals` and `premint` (fungible + stablecoin). All four were disqualified at Pass 2:
-every probed response is a bare `str`, so none of these parameters can appear as a key
-in an observed response dict. They are contract-configuration inputs, not response shape
-switches. No `discriminator`/`variants` blocks were emitted, and no single-variant model
-was minted.
+`mcpgen list` raised four candidates: `decimals` (2 tools), `name` (6), `premint` (2),
+`symbol` (4). All survive Pass 1 — none is on the engine denylist or the camelCase
+pagination/path additions. Pass 2 probed `stellar-fungible` at three distinct value sets
+(`symbol=ACME`; `symbol=BETA, decimals=18, premint=1000`; `symbol=GMA, decimals=2` with
+five feature flags on). All three observed `str` — identical shape, differing only in
+byte count (616 / 697 / 2967), which is content, not shape. **Verdict: inconclusive, not
+disproven.** It cannot be otherwise here: the response is a flat string in every case, so
+no argument can switch its structure. Because `return_model` stays `null` throughout, the
+inconclusive verdict costs nothing — nothing is typed more precisely than the probes
+justify.
 
 ## Probe results and shape decisions
 
-Every probe succeeded on the first call with minimal valid args (`name`, plus `symbol`
-where required). Responses ranged from 607 to 2183 bytes. Each one is a Markdown-fenced
-Rust source file — for example `stellar-vault` returned a `#![no_std]` Soroban contract
-importing `stellar_tokens::vault::{FungibleVault, Vault}`. `json.loads()` on the payload
-fails, so the JSON-in-string rule does not apply and `_observed_shape: "str"` stands as
-the honest answer.
+Every one of the 6 tools returned `_observed_shape: "str"` from a live call, at 608–2967
+bytes. Raw payloads were captured for `stellar-fungible` and `stellar-account` and both
+are genuine Rust source inside a ` ```rust ` fence — real success payloads, not error
+strings, so no `_probe_status: inconclusive` marker applies. The JSON-in-string test ran
+against both captures and returned `NOT_JSON` (`JSONDecodeError`): the payload is prose,
+not a double-encoded record.
 
-The shape decision is therefore identical for all six tools: `unwrap: []`,
-`return_model: null`, `fields: {}`, `return_container` omitted, `source: "live"`. There
-is no vendor envelope to strip and no record to model — the payload *is* the string.
-Minting a `TypedDict` here would be an authoritative lie about a scalar. This is the
-`no_shaped_tool_by_design` case, matching the sibling `openzeppelin-solidity` run.
+Consequently, for all six entries: `unwrap: []`, `return_model: null`,
+`return_container` omitted, `fields: {}`, `source: "live"`. There is no vendor envelope
+to strip and no record to model — inventing an unwrap path would make `_dig` return a
+substring of source code. `_observed_shape` was kept as evidence, per the harness rule.
+This is the `no_shaped_tool_by_design` case: a shaped return here would be a lie.
 
-One codegen observation worth recording: the `access`, `policy`, and `limitations`
-parameters declare their allowed values as `anyOf` arrays of `const` schemas rather than
-a flat `enum`, so `py_type()` widens them to `Any | None` instead of narrowing to
-`Literal['ownable', 'roles']`. That is a schema-shape gap on the server side, not a
-wrapper defect — the values are still documented in each function's Args docstring via
-`--embed-schema`.
+`probed_args` needed no scrubbing — every value is an invented contract name or symbol
+(`AcmeToken`, `AUSD`, `AcmeVault`), functional rather than personal.
 
-## Verification
+## Regeneration
 
-The regenerated module (29114 bytes) parses cleanly under `ast.parse`. All six
-signatures read `-> Any`, which is the correct and expected outcome for a server whose
-entire surface returns prose. `probed_args` needed no scrubbing: every value is a
-synthetic contract name (`MyToken`, `MVLT`) with no PII, and they must stay verbatim so
-the roundtrip verifier can replay a real call.
+`codegen` re-ran with the shapes file auto-detected (6 tools). The module parses cleanly
+under `ast.parse`; all six wrappers read `-> Any`, which is the honest signature. No
+`TypedDict` classes were emitted. No `Literal[...]` params appear either: `access` and
+`policy` express their choices through `anyOf`/`const` rather than a top-level `enum`
+array, so codegen renders `access: Any | None` — correct, if less precise than the
+schema allows.

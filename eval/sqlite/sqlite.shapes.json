@@ -36,17 +36,21 @@
   "read_query": {
     "unwrap": [],
     "return_model": null,
-    "return_container": "list",
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
+    "probed_args": {
+      "query": "SELECT * FROM users"
+    },
+    "_observed_shape": [
       {
-        "query": "SELECT * FROM users LIMIT 2"
-      },
-      {
-        "query": "SELECT * FROM products LIMIT 2"
+        "id": "int",
+        "name": "str",
+        "email": "str",
+        "active": "int",
+        "score": "float"
       }
-    ]
+    ],
+    "_shape_note": "Row keys are the caller's SELECT projection, not a server-fixed record. The observed shape above is one query's columns, not a type. Left as Any deliberately."
   }
 }

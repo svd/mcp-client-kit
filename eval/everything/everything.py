@@ -14,7 +14,7 @@ SERVER = 'everything'
 
 
 
-class WeatherConditions(TypedDict, total=False):
+class WeatherReading(TypedDict, total=False):
     temperature: int
     conditions: str
     humidity: int
@@ -85,14 +85,14 @@ async def get_resource_reference(caller: McpCaller, *, resourceType: Literal['Te
 get_resource_reference.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'resourceType': {'default': 'Text', 'type': 'string', 'enum': ['Text', 'Blob']}, 'resourceId': {'default': 1, 'description': 'ID of the text resource to fetch', 'type': 'number'}}}
 
 
-async def get_structured_content(caller: McpCaller, *, location: Literal['New York', 'Chicago', 'Los Angeles']) -> WeatherConditions:
+async def get_structured_content(caller: McpCaller, *, location: Literal['New York', 'Chicago', 'Los Angeles']) -> WeatherReading:
     """Returns structured content along with an output schema for client data validation
 
     Args:
         location: Choose city. One of: 'New York', 'Chicago', 'Los Angeles'
     """
     args: dict[str, Any] = {"location": location}
-    return cast("WeatherConditions", await caller.call(SERVER, "get-structured-content", args))
+    return cast("WeatherReading", await caller.call(SERVER, "get-structured-content", args))
 
 get_structured_content.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'location': {'type': 'string', 'enum': ['New York', 'Chicago', 'Los Angeles'], 'description': 'Choose city'}}, 'required': ['location']}
 

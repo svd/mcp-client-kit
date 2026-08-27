@@ -4,11 +4,13 @@
     "return_model": "TimeConversion",
     "input_overrides": {},
     "fields": {
+      "source": "dict",
+      "target": "dict",
       "time_difference": "str"
     },
     "source": "live",
     "probed_args": {
-      "source_timezone": "America/New_York",
+      "source_timezone": "UTC",
       "time": "14:30",
       "target_timezone": "Asia/Tokyo"
     }
@@ -26,10 +28,10 @@
     "source": "live",
     "probed_args": [
       {
-        "timezone": "America/New_York"
+        "timezone": "UTC"
       },
       {
-        "timezone": "Asia/Tokyo"
+        "timezone": "America/New_York"
       }
     ]
   }

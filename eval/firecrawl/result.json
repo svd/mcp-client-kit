@@ -4,27 +4,27 @@
   "auth": "bearer:FIRECRAWL_API_KEY",
   "checks": {
     "ast": "pass",
-    "signatures": "skip",
+    "signatures": "pass",
     "idempotency": "pass",
     "pii": "pass",
     "roundtrip": "pass"
   },
   "check_details": {
     "ast": "",
-    "signatures": "probe_inconclusive: 5 tool(s) had no observable success payload \u2014 shapes unknown: firecrawl_agent_status, firecrawl_check_crawl_status, firecrawl_monitor_check, firecrawl_monitor_checks, firecrawl_monitor_get",
+    "signatures": "",
     "idempotency": "offline determinism check (real tool schemas from firecrawl.mcpgen.json)",
     "pii": "",
-    "roundtrip": "live call to 'firecrawl_map' returned typed result"
+    "roundtrip": "live call to 'firecrawl_parse' returned typed result"
   },
   "modes_hit": [
     "A",
     "B",
-    "C"
+    "D"
   ],
-  "verdict": "partial",
+  "verdict": "pass",
   "versions": {
-    "engine": "0.8.0",
-    "skill_ref": "v0.8.0",
-    "skill_path": "~/src/mcp-client-kit-v0.8.0"
+    "engine": "0.9.0.dev1",
+    "skill_ref": "v0.0.4-156-gfd9eda8",
+    "skill_path": "~/src/mcp-client-kit"
   }
 }

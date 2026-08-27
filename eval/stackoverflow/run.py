@@ -8,31 +8,14 @@ Usage:
     mcpgen login stackoverflow
 
     # Then run:
-    python eval/stackoverflow/run.py
-
-Note: the wrapper module lives at eval/stackoverflow/stackoverflow.py, inside a
-directory of the same name. A bare `import stackoverflow` would resolve to the
-directory (as a namespace package) rather than the module, so we load the
-wrapper directly from its file path under a distinct module name.
-
-Args below are the real, pre-scrub probe args from stackoverflow.verify.json.
-Neither tool is discriminated (no `discriminator`/`variants` in shapes.json);
-both probe entries are emitted per tool because each exercises a distinct
-content kind (question vs. answer) / query domain.
+    python stackoverflow/run.py
 """
 import asyncio
-import importlib.util
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-_spec = importlib.util.spec_from_file_location(
-    "stackoverflow_wrappers",
-    os.path.join(os.path.dirname(__file__), "stackoverflow.py"),
-)
-stackoverflow = importlib.util.module_from_spec(_spec)
-sys.modules["stackoverflow_wrappers"] = stackoverflow
-_spec.loader.exec_module(stackoverflow)
+import stackoverflow
 
 from mcpgen import LoginWontHelp, McpBridgeCaller, ensure_login
 
@@ -56,57 +39,50 @@ async def main() -> None:
     # One connection for the whole run: one initialize() and one OAuth
     # pre-flight refresh, instead of one per tool call.
     async with caller.connected():
-        # Skipped mutating tools: (none — this server exposes only read tools)
+        # Skipped mutating tools: none — every tool on this server is readOnlyHint=true.
+        # Args below are the real probed values from stackoverflow.verify.json.
+        # No tool on this server is discriminated, so each probed arg-set is
+        # emitted as its own call to exercise the input variants that were probed.
 
-        # so_search -> list[SearchQuestionItem]
-        search_py = await stackoverflow.so_search(
+        # so_search -> list[SearchQuestionItem]  (lexical search; discovery step)
+        py_hits = await stackoverflow.so_search(
             caller, query="python asyncio gather exception handling"
         )
-        print(f"so_search(python): {len(search_py)} item(s)")
-        if search_py:
-            top = search_py[0]
+        print(f"so_search(python): {len(py_hits)} question(s)")
+        if py_hits:
+            top = py_hits[0]
             print(
                 f"  top: question_id={top.get('question_id')!r} "
-                f"score={top.get('score')!r} "
-                f"answers={top.get('answer_count')!r} "
-                f"title={top.get('title')!r}"
+                f"score={top.get('score')!r} title={top.get('title')!r}"
             )
 
         # so_search -> list[SearchQuestionItem]  (second probed query)
-        search_rs = await stackoverflow.so_search(
+        rust_hits = await stackoverflow.so_search(
             caller, query="rust borrow checker lifetime elision"
         )
-        print(f"so_search(rust): {len(search_rs)} item(s)")
-        if search_rs:
-            top = search_rs[0]
-            print(
-                f"  top: question_id={top.get('question_id')!r} "
-                f"is_answered={top.get('is_answered')!r} "
-                f"tags={top.get('tags')!r}"
-            )
+        print(f"so_search(rust): {len(rust_hits)} question(s)")
 
-        # get_content -> list[ContentItem]  (multi-request: question + answer)
-        combined = await stackoverflow.get_content(
-            caller, query="SO_Q54987361, SO_A54987732"
-        )
-        print(f"get_content(question+answer): {len(combined)} item(s)")
-        for item in combined:
-            print(
-                f"  Site={item.get('Site')!r} Type={item.get('Type')!r} "
-                f"Id={item.get('Id')!r} "
-                f"OriginalRequest={item.get('OriginalRequest')!r}"
-            )
-
-        # get_content -> list[ContentItem]  (second probed query: single question)
-        question = await stackoverflow.get_content(caller, query="SO_Q11227809")
+        # get_content -> list[ContentItem]  (single question id)
+        question = await stackoverflow.get_content(caller, query="SO_Q54987361")
         print(f"get_content(question): {len(question)} item(s)")
-        for item in question:
-            data = item.get("Data") or {}
+        if question:
+            item = question[0]
             print(
-                f"  Site={item.get('Site')!r} Type={item.get('Type')!r} "
-                f"Id={item.get('Id')!r} "
-                f"Data keys={sorted(data)[:5]}"
+                f"  item: Id={item.get('Id')!r} Type={item.get('Type')!r} "
+                f"Site={item.get('Site')!r}"
             )
+
+        # get_content -> list[ContentItem]  (single answer id)
+        answer = await stackoverflow.get_content(caller, query="SO_A54987732")
+        print(f"get_content(answer): {len(answer)} item(s)")
+
+        # get_content -> list[ContentItem]  (multi-id batch: question + answer)
+        batch = await stackoverflow.get_content(
+            caller, query="SO_Q54987361, SO_A75156486"
+        )
+        print(f"get_content(batch): {len(batch)} item(s)")
+        for entry in batch:
+            print(f"  - {entry.get('Type')!r} Id={entry.get('Id')!r}")
 
 
 if __name__ == "__main__":

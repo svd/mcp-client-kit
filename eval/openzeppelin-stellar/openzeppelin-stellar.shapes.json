@@ -6,10 +6,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyAccount"
+      "name": "AcmeAccount"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2183
+    "_observed_bytes": 2193
   },
   "stellar-fungible": {
     "unwrap": [],
@@ -18,11 +18,17 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyToken",
-      "symbol": "MTK"
+      "name": "GammaToken",
+      "symbol": "GMA",
+      "decimals": "2",
+      "mintable": true,
+      "burnable": true,
+      "pausable": true,
+      "access": "roles",
+      "upgradeable": true
     },
     "_observed_shape": "str",
-    "_observed_bytes": 607
+    "_observed_bytes": 2967
   },
   "stellar-governor": {
     "unwrap": [],
@@ -31,10 +37,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyGovernor"
+      "name": "AcmeGovernor"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2058
+    "_observed_bytes": 2066
   },
   "stellar-non-fungible": {
     "unwrap": [],
@@ -43,11 +49,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyNFT",
-      "symbol": "MNFT"
+      "name": "AcmeNft",
+      "symbol": "ANFT"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 702
+    "_observed_bytes": 710
   },
   "stellar-stablecoin": {
     "unwrap": [],
@@ -56,11 +62,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyStablecoin",
-      "symbol": "MSC"
+      "name": "AcmeUsd",
+      "symbol": "AUSD"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 627
+    "_observed_bytes": 608
   },
   "stellar-vault": {
     "unwrap": [],
@@ -69,10 +75,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "name": "MyVault",
-      "symbol": "MVLT"
+      "name": "AcmeVault",
+      "symbol": "AVLT"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 916
+    "_observed_bytes": 926
   }
 }

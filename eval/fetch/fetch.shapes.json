@@ -5,8 +5,18 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {
-      "url": "https://example.com"
-    }
+    "probed_args": [
+      {
+        "url": "https://example.com",
+        "max_length": 2000
+      },
+      {
+        "url": "https://example.com",
+        "raw": true,
+        "max_length": 2000
+      }
+    ],
+    "_observed_shape": "str",
+    "_observed_bytes": 696
   }
 }

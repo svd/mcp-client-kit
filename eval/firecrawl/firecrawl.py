@@ -7,7 +7,7 @@ caller's concern, not this module's.
 from __future__ import annotations
 
 import json
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast, overload
 
 from mcpgen.seam import McpCaller
 
@@ -18,24 +18,56 @@ SERVER = 'firecrawl'
 class MapLink(TypedDict, total=False):
     url: str
     title: str
+    description: str
 
 
-class ParseResponse(TypedDict, total=False):
+class MapLinkUrlOnly(TypedDict, total=False):
+    url: str
+
+
+class ParseUploadTicket(TypedDict, total=False):
     success: bool
     mode: str
     message: str
+    upload: dict
+    nextToolCall: dict
+    notes: list[str]
 
 
 class ScrapeResult(TypedDict, total=False):
     markdown: str
+    html: str
+    summary: str
+    links: list[str]
     metadata: dict
 
 
-class SearchResponse(TypedDict, total=False):
-    success: bool
-    data: dict
-    creditsUsed: int
-    id: str
+class SearchResults(TypedDict, total=False):
+    web: list
+    news: list
+    images: list
+
+
+def _dig(obj: Any, path: tuple[str, ...]) -> Any:
+    """Dig into a nested dict by key path; return obj unchanged if the path is absent.
+    If obj or the extracted value is a JSON-encoded string, parses it first."""
+    raw = obj
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            pass
+    cur = raw
+    for key in path:
+        if not isinstance(cur, dict) or key not in cur:
+            return raw
+        cur = cur[key]
+    if isinstance(cur, str):
+        try:
+            return json.loads(cur)
+        except (ValueError, TypeError):
+            pass
+    return cur
 
 
 def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
@@ -282,7 +314,16 @@ async def firecrawl_interact_stop(caller: McpCaller, *, scrapeId: str) -> Any:
 firecrawl_interact_stop.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'scrapeId': {'type': 'string'}}, 'required': ['scrapeId'], 'additionalProperties': False}
 
 
-async def firecrawl_map(caller: McpCaller, *, url: str, search: str | None = None, sitemap: Literal['include', 'skip', 'only'] | None = None, includeSubdomains: bool | None = None, limit: float | None = None, ignoreQueryParameters: bool | None = None) -> list[MapLink]:
+@overload
+async def firecrawl_map(caller: McpCaller, *, url: str, search: str | None = None, sitemap: Literal['include'], includeSubdomains: bool | None = None, limit: float | None = None, ignoreQueryParameters: bool | None = None) -> list[MapLink]: ...
+
+@overload
+async def firecrawl_map(caller: McpCaller, *, url: str, search: str | None = None, sitemap: Literal['only'], includeSubdomains: bool | None = None, limit: float | None = None, ignoreQueryParameters: bool | None = None) -> list[MapLinkUrlOnly]: ...
+
+@overload
+async def firecrawl_map(caller: McpCaller, *, url: str, search: str | None = None, sitemap: Literal['skip'], includeSubdomains: bool | None = None, limit: float | None = None, ignoreQueryParameters: bool | None = None) -> list[MapLink]: ...
+
+async def firecrawl_map(caller: McpCaller, *, url: str, search: str | None = None, sitemap: str, includeSubdomains: bool | None = None, limit: float | None = None, ignoreQueryParameters: bool | None = None) -> list[MapLink | MapLinkUrlOnly | MapLink]:
     """Enumerate URLs indexed under one website through Firecrawl without fetching each page's content. Use this when the request asks for a site's URL inventory, when several relevant pages must be located, or when the desired page URL is unknown. An optional `search` term narrows the URL list, while sitemap, subdomain, query-parameter, and result-limit options control coverage.
 
     Returns matching URLs rather than page bodies. Retrieve one page with `firecrawl_scrape`; collect content across multiple pages with `firecrawl_crawl`.
@@ -295,11 +336,9 @@ async def firecrawl_map(caller: McpCaller, *, url: str, search: str | None = Non
         limit:
         ignoreQueryParameters:
     """
-    args: dict[str, Any] = {"url": url}
+    args: dict[str, Any] = {"url": url, "sitemap": sitemap}
     if search is not None:
         args["search"] = search
-    if sitemap is not None:
-        args["sitemap"] = sitemap
     if includeSubdomains is not None:
         args["includeSubdomains"] = includeSubdomains
     if limit is not None:
@@ -307,7 +346,7 @@ async def firecrawl_map(caller: McpCaller, *, url: str, search: str | None = Non
     if ignoreQueryParameters is not None:
         args["ignoreQueryParameters"] = ignoreQueryParameters
     result = await caller.call(SERVER, "firecrawl_map", args)
-    return cast("list[MapLink]", _dig_list(result, ('links', )))
+    return cast("list[MapLink | MapLinkUrlOnly | MapLink]", _dig_list(result, ('links', )))
 
 firecrawl_map.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'url': {'type': 'string', 'format': 'uri'}, 'search': {'type': 'string'}, 'sitemap': {'type': 'string', 'enum': ['include', 'skip', 'only']}, 'includeSubdomains': {'type': 'boolean'}, 'limit': {'type': 'number'}, 'ignoreQueryParameters': {'type': 'boolean'}}, 'required': ['url'], 'additionalProperties': False}
 
@@ -484,7 +523,7 @@ async def firecrawl_monitor_update(caller: McpCaller, *, id: str, body: dict) ->
 firecrawl_monitor_update.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'id': {'type': 'string'}, 'body': {'type': 'object', 'propertyNames': {'type': 'string'}, 'additionalProperties': False}}, 'required': ['id', 'body'], 'additionalProperties': False}
 
 
-async def firecrawl_parse(caller: McpCaller, *, formats: list[Literal['markdown', 'html', 'rawHtml', 'links', 'summary', 'json', 'query']] | None = None, jsonOptions: dict | None = None, queryOptions: dict | None = None, parsers: list[Literal['pdf']] | None = None, pdfOptions: dict | None = None, onlyMainContent: bool | None = None, redactPII: bool | None = None, includeTags: list[str] | None = None, excludeTags: list[str] | None = None, removeBase64Images: bool | None = None, skipTlsVerification: bool | None = None, storeInCache: bool | None = None, zeroDataRetention: bool | None = None, maxAge: float | None = None, proxy: Literal['basic', 'auto'] | None = None, filePath: str | None = None, uploadRef: str | None = None, contentType: str | None = None, declaredSizeBytes: int | None = None) -> ParseResponse:
+async def firecrawl_parse(caller: McpCaller, *, formats: list[Literal['markdown', 'html', 'rawHtml', 'links', 'summary', 'json', 'query']] | None = None, jsonOptions: dict | None = None, queryOptions: dict | None = None, parsers: list[Literal['pdf']] | None = None, pdfOptions: dict | None = None, onlyMainContent: bool | None = None, redactPII: bool | None = None, includeTags: list[str] | None = None, excludeTags: list[str] | None = None, removeBase64Images: bool | None = None, skipTlsVerification: bool | None = None, storeInCache: bool | None = None, zeroDataRetention: bool | None = None, maxAge: float | None = None, proxy: Literal['basic', 'auto'] | None = None, filePath: str | None = None, uploadRef: str | None = None, contentType: str | None = None, declaredSizeBytes: int | None = None) -> ParseUploadTicket:
     """Parse one supported document into markdown, HTML, links, summary, targeted answers, or JSON matching a schema. Supported inputs include common HTML, PDF, Word, RTF, OpenDocument, and spreadsheet files; PDF parsing can be bounded with `pdfOptions.maxPages`.
 
     Local MCP reads `filePath` from the server filesystem. Hosted MCP uses two calls: first provide `filePath` to receive upload instructions, upload locally, then call again with the returned `uploadRef`; do not send both fields together. Remote web URLs belong in `firecrawl_scrape`.
@@ -551,7 +590,7 @@ async def firecrawl_parse(caller: McpCaller, *, formats: list[Literal['markdown'
         args["contentType"] = contentType
     if declaredSizeBytes is not None:
         args["declaredSizeBytes"] = declaredSizeBytes
-    return cast("ParseResponse", await caller.call(SERVER, "firecrawl_parse", args))
+    return cast("ParseUploadTicket", await caller.call(SERVER, "firecrawl_parse", args))
 
 firecrawl_parse.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'formats': {'type': 'array', 'items': {'type': 'string', 'enum': ['markdown', 'html', 'rawHtml', 'links', 'summary', 'json', 'query']}}, 'jsonOptions': {'type': 'object', 'properties': {'prompt': {'type': 'string'}, 'schema': {'type': 'object', 'propertyNames': {'type': 'string'}, 'additionalProperties': False}}, 'additionalProperties': False}, 'queryOptions': {'type': 'object', 'properties': {'prompt': {'type': 'string', 'maxLength': 10000}, 'mode': {'default': 'freeform', 'type': 'string', 'enum': ['directQuote', 'freeform']}}, 'required': ['prompt', 'mode'], 'additionalProperties': False}, 'parsers': {'type': 'array', 'items': {'type': 'string', 'enum': ['pdf']}}, 'pdfOptions': {'type': 'object', 'properties': {'maxPages': {'type': 'integer', 'minimum': 1, 'maximum': 10000}}, 'additionalProperties': False}, 'onlyMainContent': {'type': 'boolean'}, 'redactPII': {'type': 'boolean'}, 'includeTags': {'type': 'array', 'items': {'type': 'string'}}, 'excludeTags': {'type': 'array', 'items': {'type': 'string'}}, 'removeBase64Images': {'type': 'boolean'}, 'skipTlsVerification': {'type': 'boolean'}, 'storeInCache': {'type': 'boolean'}, 'zeroDataRetention': {'type': 'boolean'}, 'maxAge': {'type': 'number'}, 'proxy': {'type': 'string', 'enum': ['basic', 'auto']}, 'filePath': {'type': 'string', 'minLength': 1}, 'uploadRef': {'type': 'string', 'minLength': 1}, 'contentType': {'type': 'string'}, 'declaredSizeBytes': {'type': 'integer', 'exclusiveMinimum': 0, 'maximum': 9007199254740991}}, 'additionalProperties': False}
 
@@ -737,7 +776,7 @@ async def firecrawl_scrape(caller: McpCaller, *, url: str, formats: list[Literal
 firecrawl_scrape.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'url': {'type': 'string', 'format': 'uri'}, 'formats': {'type': 'array', 'items': {'type': 'string', 'enum': ['markdown', 'html', 'rawHtml', 'screenshot', 'links', 'summary', 'changeTracking', 'branding', 'json', 'query', 'audio']}}, 'jsonOptions': {'type': 'object', 'properties': {'prompt': {'type': 'string'}, 'schema': {'type': 'object', 'propertyNames': {'type': 'string'}, 'additionalProperties': False}}, 'additionalProperties': False}, 'queryOptions': {'type': 'object', 'properties': {'prompt': {'type': 'string', 'maxLength': 10000}, 'mode': {'default': 'freeform', 'type': 'string', 'enum': ['directQuote', 'freeform']}}, 'required': ['prompt', 'mode'], 'additionalProperties': False}, 'screenshotOptions': {'type': 'object', 'properties': {'fullPage': {'type': 'boolean'}, 'quality': {'type': 'number'}, 'viewport': {'type': 'object', 'properties': {'width': {'type': 'number'}, 'height': {'type': 'number'}}, 'required': ['width', 'height'], 'additionalProperties': False}}, 'additionalProperties': False}, 'parsers': {'type': 'array', 'items': {'type': 'string', 'enum': ['pdf']}}, 'pdfOptions': {'type': 'object', 'properties': {'maxPages': {'type': 'integer', 'minimum': 1, 'maximum': 10000}}, 'additionalProperties': False}, 'onlyMainContent': {'type': 'boolean'}, 'redactPII': {'type': 'boolean'}, 'includeTags': {'type': 'array', 'items': {'type': 'string'}}, 'excludeTags': {'type': 'array', 'items': {'type': 'string'}}, 'waitFor': {'type': 'number'}, 'mobile': {'type': 'boolean'}, 'skipTlsVerification': {'type': 'boolean'}, 'removeBase64Images': {'type': 'boolean'}, 'location': {'type': 'object', 'properties': {'country': {'type': 'string'}, 'languages': {'type': 'array', 'items': {'type': 'string'}}}, 'additionalProperties': False}, 'storeInCache': {'type': 'boolean'}, 'zeroDataRetention': {'type': 'boolean'}, 'maxAge': {'type': 'number'}, 'lockdown': {'type': 'boolean'}, 'proxy': {'type': 'string', 'enum': ['basic', 'stealth', 'enhanced', 'auto']}, 'profile': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'saveChanges': {'type': 'boolean'}}, 'required': ['name'], 'additionalProperties': False}}, 'required': ['url'], 'additionalProperties': False}
 
 
-async def firecrawl_search(caller: McpCaller, *, query: str, highlights: bool | None = None, limit: float | None = None, tbs: str | None = None, filter: str | None = None, location: str | None = None, includeDomains: list[str] | None = None, excludeDomains: list[str] | None = None, sources: list[dict] | None = None, categories: list[Literal['github', 'research', 'pdf', 'developer']] | None = None, enterprise: list[Literal['default', 'anon', 'zdr']] | None = None, scrapeOptions: dict | None = None) -> SearchResponse:
+async def firecrawl_search(caller: McpCaller, *, query: str, highlights: bool | None = None, limit: float | None = None, tbs: str | None = None, filter: str | None = None, location: str | None = None, includeDomains: list[str] | None = None, excludeDomains: list[str] | None = None, sources: list[dict] | None = None, categories: list[Literal['github', 'research', 'pdf', 'developer']] | None = None, enterprise: list[Literal['default', 'anon', 'zdr']] | None = None, scrapeOptions: dict | None = None) -> SearchResults:
     """Search web, news, or image sources and return ranked results. Operators include quoted phrases, `-term`, `site:host`, `inurl:term`, `intitle:term`, and `related:host`; the set is non-exhaustive. `includeDomains` and `excludeDomains` are mutually exclusive hostname filters; categories limit results to GitHub, research, PDF, or developer sources.
 
     For a programming question, add `categories: ["developer"]`. It searches an index of GitHub issues, merged pull requests, repository READMEs, and curated documentation sites, and returns the hits in `data.developer` beside the web results.
@@ -783,7 +822,8 @@ async def firecrawl_search(caller: McpCaller, *, query: str, highlights: bool | 
         args["enterprise"] = enterprise
     if scrapeOptions is not None:
         args["scrapeOptions"] = scrapeOptions
-    return cast("SearchResponse", await caller.call(SERVER, "firecrawl_search", args))
+    result = await caller.call(SERVER, "firecrawl_search", args)
+    return cast("SearchResults", _dig(result, ('data', )))
 
 firecrawl_search.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'query': {'type': 'string', 'minLength': 1}, 'highlights': {'type': 'boolean'}, 'limit': {'type': 'number'}, 'tbs': {'type': 'string'}, 'filter': {'type': 'string'}, 'location': {'type': 'string'}, 'includeDomains': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 253, 'pattern': '^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$'}}, 'excludeDomains': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 253, 'pattern': '^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$'}}, 'sources': {'type': 'array', 'items': {'type': 'object', 'properties': {'type': {'type': 'string', 'enum': ['web', 'images', 'news']}}, 'required': ['type'], 'additionalProperties': False}}, 'categories': {'type': 'array', 'items': {'type': 'string', 'enum': ['github', 'research', 'pdf', 'developer']}}, 'enterprise': {'type': 'array', 'items': {'type': 'string', 'enum': ['default', 'anon', 'zdr']}}, 'scrapeOptions': {'type': 'object', 'properties': {'formats': {'type': 'array', 'items': {'type': 'string', 'enum': ['markdown', 'html', 'rawHtml', 'screenshot', 'links', 'summary', 'changeTracking', 'branding', 'json', 'query', 'audio']}}, 'jsonOptions': {'type': 'object', 'properties': {'prompt': {'type': 'string'}, 'schema': {'type': 'object', 'propertyNames': {'type': 'string'}, 'additionalProperties': False}}, 'additionalProperties': False}, 'queryOptions': {'type': 'object', 'properties': {'prompt': {'type': 'string', 'maxLength': 10000}, 'mode': {'default': 'freeform', 'type': 'string', 'enum': ['directQuote', 'freeform']}}, 'required': ['prompt', 'mode'], 'additionalProperties': False}, 'screenshotOptions': {'type': 'object', 'properties': {'fullPage': {'type': 'boolean'}, 'quality': {'type': 'number'}, 'viewport': {'type': 'object', 'properties': {'width': {'type': 'number'}, 'height': {'type': 'number'}}, 'required': ['width', 'height'], 'additionalProperties': False}}, 'additionalProperties': False}, 'parsers': {'type': 'array', 'items': {'type': 'string', 'enum': ['pdf']}}, 'pdfOptions': {'type': 'object', 'properties': {'maxPages': {'type': 'integer', 'minimum': 1, 'maximum': 10000}}, 'additionalProperties': False}, 'onlyMainContent': {'type': 'boolean'}, 'redactPII': {'type': 'boolean'}, 'includeTags': {'type': 'array', 'items': {'type': 'string'}}, 'excludeTags': {'type': 'array', 'items': {'type': 'string'}}, 'waitFor': {'type': 'number'}, 'mobile': {'type': 'boolean'}, 'skipTlsVerification': {'type': 'boolean'}, 'removeBase64Images': {'type': 'boolean'}, 'location': {'type': 'object', 'properties': {'country': {'type': 'string'}, 'languages': {'type': 'array', 'items': {'type': 'string'}}}, 'additionalProperties': False}, 'storeInCache': {'type': 'boolean'}, 'zeroDataRetention': {'type': 'boolean'}, 'maxAge': {'type': 'number'}, 'lockdown': {'type': 'boolean'}, 'proxy': {'type': 'string', 'enum': ['basic', 'stealth', 'enhanced', 'auto']}, 'profile': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'saveChanges': {'type': 'boolean'}}, 'required': ['name'], 'additionalProperties': False}}, 'additionalProperties': False}}, 'required': ['query'], 'additionalProperties': False}
 

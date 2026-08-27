@@ -15,7 +15,7 @@ SERVER = 'github'
 
 
 
-class CommitDetail(TypedDict, total=False):
+class Commit(TypedDict, total=False):
     sha: str
     html_url: str
 
@@ -23,7 +23,7 @@ class CommitDetail(TypedDict, total=False):
 class Label(TypedDict, total=False):
     color: str
     description: str
-    id: str
+    id: int
     name: str
 
 
@@ -38,6 +38,7 @@ class Release(TypedDict, total=False):
     id: int
     created_at: str
     published_at: str
+    updated_at: str
     url: str
     html_url: str
     assets_url: str
@@ -47,24 +48,25 @@ class Release(TypedDict, total=False):
     node_id: str
 
 
-class GitHubUser(TypedDict, total=False):
+class AuthenticatedUser(TypedDict, total=False):
     login: str
     id: int
     profile_url: str
     avatar_url: str
 
 
-class GitTag(TypedDict, total=False):
+class TagRef(TypedDict, total=False):
     ref: str
     url: str
     node_id: str
 
 
-class TeamOrgSummary(TypedDict, total=False):
+class TeamGroup(TypedDict, total=False):
     org: str
+    teams: list
 
 
-class Branch(TypedDict, total=False):
+class BranchSummary(TypedDict, total=False):
     name: str
     sha: str
     protected: bool
@@ -73,6 +75,16 @@ class Branch(TypedDict, total=False):
 class CommitSummary(TypedDict, total=False):
     sha: str
     html_url: str
+
+
+class IssueType(TypedDict, total=False):
+    id: int
+    node_id: str
+    name: str
+    description: str
+    color: str
+    created_at: str
+    updated_at: str
 
 
 class IssueSummary(TypedDict, total=False):
@@ -115,37 +127,85 @@ class TagSummary(TypedDict, total=False):
 class SecretScanResult(TypedDict, total=False):
     numBytesScanned: int
     blobsScanned: int
+    secrets: list
 
 
-class SearchCodeResult(TypedDict, total=False):
-    total_count: int
-    incomplete_results: bool
+class SearchCodeItem(TypedDict, total=False):
+    name: str
+    path: str
+    sha: str
+    repository: str
 
 
-class SearchCommitsResult(TypedDict, total=False):
-    total_count: int
-    incomplete_results: bool
+class SearchCommitItem(TypedDict, total=False):
+    sha: str
+    html_url: str
 
 
-class SearchIssuesResult(TypedDict, total=False):
-    total_count: int
-    incomplete_results: bool
+class SearchIssueItem(TypedDict, total=False):
+    author_association: str
+    body: str
+    comments: int
+    comments_url: str
+    created_at: str
+    events_url: str
+    html_url: str
+    id: int
+    labels_url: str
+    locked: bool
+    node_id: str
+    number: int
+    repository_url: str
+    state: str
+    title: str
+    updated_at: str
+    url: str
 
 
-class SearchPRsResult(TypedDict, total=False):
-    total_count: int
-    incomplete_results: bool
-    search_type: str
+class SearchPullRequestItem(TypedDict, total=False):
+    id: int
+    number: int
+    state: str
+    locked: bool
+    title: str
+    body: str
+    author_association: str
+    comments: int
+    created_at: str
+    updated_at: str
+    url: str
+    html_url: str
+    comments_url: str
+    events_url: str
+    labels_url: str
+    repository_url: str
+    node_id: str
+    draft: bool
 
 
-class SearchReposResult(TypedDict, total=False):
-    total_count: int
-    incomplete_results: bool
+class SearchRepositoryItem(TypedDict, total=False):
+    id: int
+    name: str
+    full_name: str
+    description: str
+    html_url: str
+    language: str
+    stargazers_count: int
+    forks_count: int
+    open_issues_count: int
+    updated_at: str
+    created_at: str
+    private: bool
+    fork: bool
+    archived: bool
+    default_branch: str
 
 
-class SearchUsersResult(TypedDict, total=False):
-    total_count: int
-    incomplete_results: bool
+class SearchUserItem(TypedDict, total=False):
+    login: str
+    id: int
+    profile_url: str
+    avatar_url: str
 
 
 def _dig_list(obj: Any, path: tuple[str, ...]) -> list:
@@ -386,7 +446,7 @@ async def fork_repository(caller: McpCaller, *, owner: str, repo: str, organizat
 fork_repository.__schema__ = {'type': 'object', 'properties': {'organization': {'type': 'string', 'description': 'Organization to fork to'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['owner', 'repo']}
 
 
-async def get_commit(caller: McpCaller, *, owner: str, repo: str, sha: str, detail: Literal['none', 'stats', 'full_patch'] | None = None, page: float | None = None, perPage: float | None = None) -> CommitDetail:
+async def get_commit(caller: McpCaller, *, owner: str, repo: str, sha: str, detail: Literal['none', 'stats', 'full_patch'] | None = None, page: float | None = None, perPage: float | None = None) -> Commit:
     """Get details for a commit from a GitHub repository
 
     Args:
@@ -404,7 +464,7 @@ async def get_commit(caller: McpCaller, *, owner: str, repo: str, sha: str, deta
         args["page"] = page
     if perPage is not None:
         args["perPage"] = perPage
-    return cast("CommitDetail", await caller.call(SERVER, "get_commit", args))
+    return cast("Commit", await caller.call(SERVER, "get_commit", args))
 
 get_commit.__schema__ = {'type': 'object', 'properties': {'detail': {'type': 'string', 'description': 'Level of detail to include for changed files. "none" omits stats and files entirely. "stats" (default) includes per-file metadata: filename, status, and lines-of-code counts (additions, deletions, changes), with no patch content. "full_patch" additionally includes the unified diff content for each file and can be very large.', 'default': 'stats', 'enum': ['none', 'stats', 'full_patch']}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'sha': {'type': 'string', 'description': 'Commit SHA, branch name, or tag name'}}, 'required': ['owner', 'repo', 'sha']}
 
@@ -461,9 +521,9 @@ async def get_latest_release(caller: McpCaller, *, owner: str, repo: str) -> Rel
 get_latest_release.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['owner', 'repo']}
 
 
-async def get_me(caller: McpCaller) -> GitHubUser:
+async def get_me(caller: McpCaller) -> AuthenticatedUser:
     """Get details of the authenticated GitHub user. Use this when a request is about the user's own profile for GitHub. Or when information is missing to build other tool calls."""
-    return cast("GitHubUser", await caller.call(SERVER, "get_me", {}))
+    return cast("AuthenticatedUser", await caller.call(SERVER, "get_me", {}))
 
 get_me.__schema__ = {'type': 'object', 'properties': {}}
 
@@ -482,7 +542,7 @@ async def get_release_by_tag(caller: McpCaller, *, owner: str, repo: str, tag: s
 get_release_by_tag.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'tag': {'type': 'string', 'description': "Tag name (e.g., 'v1.0.0')"}}, 'required': ['owner', 'repo', 'tag']}
 
 
-async def get_tag(caller: McpCaller, *, owner: str, repo: str, tag: str) -> GitTag:
+async def get_tag(caller: McpCaller, *, owner: str, repo: str, tag: str) -> TagRef:
     """Get details about a specific git tag in a GitHub repository
 
     Args:
@@ -491,7 +551,7 @@ async def get_tag(caller: McpCaller, *, owner: str, repo: str, tag: str) -> GitT
         tag: Tag name
     """
     args: dict[str, Any] = {"owner": owner, "repo": repo, "tag": tag}
-    return cast("GitTag", await caller.call(SERVER, "get_tag", args))
+    return cast("TagRef", await caller.call(SERVER, "get_tag", args))
 
 get_tag.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'tag': {'type': 'string', 'description': 'Tag name'}}, 'required': ['owner', 'repo', 'tag']}
 
@@ -509,7 +569,7 @@ async def get_team_members(caller: McpCaller, *, org: str, team_slug: str) -> An
 get_team_members.__schema__ = {'type': 'object', 'properties': {'org': {'type': 'string', 'description': 'Organization login (owner) that contains the team.'}, 'team_slug': {'type': 'string', 'description': 'Team slug'}}, 'required': ['org', 'team_slug']}
 
 
-async def get_teams(caller: McpCaller, *, user: str | None = None) -> list[TeamOrgSummary]:
+async def get_teams(caller: McpCaller, *, user: str | None = None) -> list[TeamGroup]:
     """Get details of the teams the user is a member of. Limited to organizations accessible with current credentials
 
     Args:
@@ -518,7 +578,7 @@ async def get_teams(caller: McpCaller, *, user: str | None = None) -> list[TeamO
     args: dict[str, Any] = {}
     if user is not None:
         args["user"] = user
-    return cast("list[TeamOrgSummary]", await caller.call(SERVER, "get_teams", args))
+    return cast("list[TeamGroup]", await caller.call(SERVER, "get_teams", args))
 
 get_teams.__schema__ = {'type': 'object', 'properties': {'user': {'type': 'string', 'description': 'Username to get teams for. If not provided, uses the authenticated user.'}}}
 
@@ -550,7 +610,7 @@ async def issue_read(caller: McpCaller, *, issue_number: float, method: Literal[
 issue_read.__schema__ = {'type': 'object', 'properties': {'issue_number': {'type': 'number', 'description': 'The number of the issue'}, 'method': {'type': 'string', 'description': 'The read operation to perform on a single issue.\nOptions are:\n1. get - Get issue details. Also returns best-effort hierarchy flags (`has_parent`, `has_children`); `parent` and `sub_issues_summary` are optional relationship summaries, and `closed_by_pull_requests` summarizes the pull requests configured to close the issue as `total_count` plus up to 5 `references`.\n2. get_comments - Get issue comments.\n3. get_sub_issues - Get sub-issues (children) of the issue.\n4. get_parent - Get the parent issue, if this issue is a sub-issue of another.\n5. get_labels - Get labels assigned to the issue.\n', 'enum': ['get', 'get_comments', 'get_sub_issues', 'get_parent', 'get_labels']}, 'owner': {'type': 'string', 'description': 'The owner of the repository', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'The name of the repository', 'x-mcp-header': 'repo'}}, 'required': ['method', 'owner', 'repo', 'issue_number']}
 
 
-async def issue_write(caller: McpCaller, *, method: Literal['create', 'update'], owner: str, repo: str, assignees: list[str] | None = None, body: str | None = None, duplicate_of: float | None = None, issue_fields: list[dict] | None = None, issue_number: float | None = None, labels: list[str] | None = None, milestone: float | None = None, state: Literal['open', 'closed'] | None = None, state_reason: Literal['completed', 'not_planned', 'duplicate'] | None = None, title: str | None = None, type: Any | None = None) -> Any:
+async def issue_write(caller: McpCaller, *, method: Literal['create', 'update'], owner: str, repo: str, assignees: list[str] | None = None, body: str | None = None, duplicate_of: float | None = None, issue_fields: list[dict] | None = None, issue_number: float | None = None, labels: list[str] | None = None, milestone: float | None = None, parent_issue_number: float | None = None, parent_owner: str | None = None, parent_repo: str | None = None, state: Literal['open', 'closed'] | None = None, state_reason: Literal['completed', 'not_planned', 'duplicate'] | None = None, title: str | None = None, type: Any | None = None) -> Any:
     """Create a new or update an existing issue in a GitHub repository.
 
     Args:
@@ -567,6 +627,9 @@ async def issue_write(caller: McpCaller, *, method: Literal['create', 'update'],
         issue_number: Issue number to update
         labels: Labels to apply to this issue
         milestone: Milestone number
+        parent_issue_number: Issue number of the parent issue. Only used when method is 'create' and cannot be combined with issue_fields. The new issue is created and attached to this parent in the same operation.
+        parent_owner: Repository owner of the parent issue. Must be provided with parent_repo. Omit both to use owner and repo. Only used when method is 'create' and parent_issue_number is provided.
+        parent_repo: Repository name of the parent issue. Must be provided with parent_owner. Omit both to use owner and repo. Only used when method is 'create' and parent_issue_number is provided.
         state: New state. One of: 'open', 'closed'
         state_reason: Reason for the state change. Ignored unless state is changed.. One of: 'completed', 'not_planned', 'duplicate'
         title: Issue title
@@ -587,6 +650,12 @@ async def issue_write(caller: McpCaller, *, method: Literal['create', 'update'],
         args["labels"] = labels
     if milestone is not None:
         args["milestone"] = milestone
+    if parent_issue_number is not None:
+        args["parent_issue_number"] = parent_issue_number
+    if parent_owner is not None:
+        args["parent_owner"] = parent_owner
+    if parent_repo is not None:
+        args["parent_repo"] = parent_repo
     if state is not None:
         args["state"] = state
     if state_reason is not None:
@@ -597,10 +666,10 @@ async def issue_write(caller: McpCaller, *, method: Literal['create', 'update'],
         args["type"] = type
     return await caller.call(SERVER, "issue_write", args)
 
-issue_write.__schema__ = {'type': 'object', 'properties': {'assignees': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Usernames to assign to this issue'}, 'body': {'type': 'string', 'description': 'Issue body content'}, 'duplicate_of': {'type': 'number', 'description': "Issue number that this issue is a duplicate of. Required when state_reason is 'duplicate'."}, 'issue_fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'delete': {'type': 'boolean', 'description': "Set to true to clear this field's current value on the issue. When false or omitted, this property is ignored. Cannot be true when 'value' or 'field_option_name' is provided."}, 'field_name': {'type': 'string', 'description': 'Issue field name (case-insensitive). Must match a field returned by list_issue_fields for this repository or its organization.'}, 'field_option_name': {'type': 'string', 'description': "Option name for single-select fields. Validated against the field's options before the API call. Cannot be combined with 'value' or 'delete: true'."}, 'value': {'type': ['string', 'number', 'boolean'], 'description': "Value to set. Use for text, number, and date fields (date as YYYY-MM-DD). For single-select fields, prefer 'field_option_name' so the option is validated before the API call. Cannot be combined with 'field_option_name' or 'delete: true'."}}, 'required': ['field_name'], 'additionalProperties': False}, 'description': "Issue field values to set or clear. Each item requires 'field_name' and exactly one of 'value', 'field_option_name', or 'delete: true'."}, 'issue_number': {'type': 'number', 'description': 'Issue number to update'}, 'labels': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Labels to apply to this issue'}, 'method': {'type': 'string', 'description': "Write operation to perform on a single issue.\nOptions are:\n- 'create' - creates a new issue.\n- 'update' - updates an existing issue.\n", 'enum': ['create', 'update']}, 'milestone': {'type': 'number', 'description': 'Milestone number'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'state': {'type': 'string', 'description': 'New state', 'enum': ['open', 'closed']}, 'state_reason': {'type': 'string', 'description': 'Reason for the state change. Ignored unless state is changed.', 'enum': ['completed', 'not_planned', 'duplicate']}, 'title': {'type': 'string', 'description': 'Issue title'}, 'type': {'description': "Type of this issue. For updates, pass null to remove the current type. Only use if issue types are enabled for this repository. Use list_issue_types to get valid type values for this repository or its owner organization. If the repository doesn't support issue types, omit this parameter.", 'anyOf': [{'type': 'string', 'minLength': 1}, {'type': 'null'}]}}, 'required': ['method', 'owner', 'repo']}
+issue_write.__schema__ = {'type': 'object', 'properties': {'assignees': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Usernames to assign to this issue'}, 'body': {'type': 'string', 'description': 'Issue body content'}, 'duplicate_of': {'type': 'number', 'description': "Issue number that this issue is a duplicate of. Required when state_reason is 'duplicate'."}, 'issue_fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'delete': {'type': 'boolean', 'description': "Set to true to clear this field's current value on the issue. When false or omitted, this property is ignored. Cannot be true when 'value' or 'field_option_name' is provided."}, 'field_name': {'type': 'string', 'description': 'Issue field name (case-insensitive). Must match a field returned by list_issue_fields for this repository or its organization.'}, 'field_option_name': {'type': 'string', 'description': "Option name for single-select fields. Validated against the field's options before the API call. Cannot be combined with 'value' or 'delete: true'."}, 'value': {'type': ['string', 'number', 'boolean'], 'description': "Value to set. Use for text, number, and date fields (date as YYYY-MM-DD). For single-select fields, prefer 'field_option_name' so the option is validated before the API call. Cannot be combined with 'field_option_name' or 'delete: true'."}}, 'required': ['field_name'], 'additionalProperties': False}, 'description': "Issue field values to set or clear. Each item requires 'field_name' and exactly one of 'value', 'field_option_name', or 'delete: true'."}, 'issue_number': {'type': 'number', 'description': 'Issue number to update'}, 'labels': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Labels to apply to this issue'}, 'method': {'type': 'string', 'description': "Write operation to perform on a single issue.\nOptions are:\n- 'create' - creates a new issue.\n- 'update' - updates an existing issue.\n", 'enum': ['create', 'update']}, 'milestone': {'type': 'number', 'description': 'Milestone number'}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'parent_issue_number': {'type': 'number', 'description': "Issue number of the parent issue. Only used when method is 'create' and cannot be combined with issue_fields. The new issue is created and attached to this parent in the same operation.", 'minimum': 1}, 'parent_owner': {'type': 'string', 'description': "Repository owner of the parent issue. Must be provided with parent_repo. Omit both to use owner and repo. Only used when method is 'create' and parent_issue_number is provided."}, 'parent_repo': {'type': 'string', 'description': "Repository name of the parent issue. Must be provided with parent_owner. Omit both to use owner and repo. Only used when method is 'create' and parent_issue_number is provided."}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}, 'state': {'type': 'string', 'description': 'New state', 'enum': ['open', 'closed']}, 'state_reason': {'type': 'string', 'description': 'Reason for the state change. Ignored unless state is changed.', 'enum': ['completed', 'not_planned', 'duplicate']}, 'title': {'type': 'string', 'description': 'Issue title'}, 'type': {'description': "Type of this issue. For updates, pass null to remove the current type. Only use if issue types are enabled for this repository. Use list_issue_types to get valid type values for this repository or its owner organization. If the repository doesn't support issue types, omit this parameter.", 'anyOf': [{'type': 'string', 'minLength': 1}, {'type': 'null'}]}}, 'required': ['method', 'owner', 'repo']}
 
 
-async def list_branches(caller: McpCaller, *, owner: str, repo: str, page: float | None = None, perPage: float | None = None) -> list[Branch]:
+async def list_branches(caller: McpCaller, *, owner: str, repo: str, page: float | None = None, perPage: float | None = None) -> list[BranchSummary]:
     """List branches in a GitHub repository
 
     Args:
@@ -614,7 +683,7 @@ async def list_branches(caller: McpCaller, *, owner: str, repo: str, page: float
         args["page"] = page
     if perPage is not None:
         args["perPage"] = perPage
-    return cast("list[Branch]", await caller.call(SERVER, "list_branches", args))
+    return cast("list[BranchSummary]", await caller.call(SERVER, "list_branches", args))
 
 list_branches.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['owner', 'repo']}
 
@@ -671,7 +740,7 @@ async def list_issue_fields(caller: McpCaller, *, owner: str, repo: str | None =
 list_issue_fields.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'The account owner of the repository or organization. The name is not case sensitive.', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'The name of the repository. When provided, returns fields for this specific repository (inherited from its organization). When omitted, returns org-level fields directly.', 'x-mcp-header': 'repo'}}, 'required': ['owner']}
 
 
-async def list_issue_types(caller: McpCaller, *, owner: str, repo: str | None = None) -> Any:
+async def list_issue_types(caller: McpCaller, *, owner: str, repo: str | None = None) -> list[IssueType]:
     """List supported issue types for a repository or its owner organization. When repo is omitted, returns org-level issue types directly.
 
     Args:
@@ -681,7 +750,7 @@ async def list_issue_types(caller: McpCaller, *, owner: str, repo: str | None = 
     args: dict[str, Any] = {"owner": owner}
     if repo is not None:
         args["repo"] = repo
-    return await caller.call(SERVER, "list_issue_types", args)
+    return cast("list[IssueType]", await caller.call(SERVER, "list_issue_types", args))
 
 list_issue_types.__schema__ = {'type': 'object', 'properties': {'owner': {'type': 'string', 'description': 'The account owner of the repository or organization.', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'The name of the repository. When provided, returns issue types for this specific repository. When omitted, returns org-level issue types directly.', 'x-mcp-header': 'repo'}}, 'required': ['owner']}
 
@@ -969,7 +1038,7 @@ async def run_secret_scanning(caller: McpCaller, *, files: Any, owner: str, repo
 run_secret_scanning.__schema__ = {'type': 'object', 'properties': {'files': {'description': 'A single string or an array of strings containing file contents, snippets, or diff hunks to scan for secrets. These must be raw contents, not repository file paths.', 'anyOf': [{'type': 'string', 'minLength': 1}, {'type': 'array', 'items': {'type': 'string'}, 'minItems': 1, 'maxItems': 100}]}, 'owner': {'type': 'string', 'description': 'Repository owner', 'x-mcp-header': 'owner'}, 'repo': {'type': 'string', 'description': 'Repository name', 'x-mcp-header': 'repo'}}, 'required': ['files', 'owner', 'repo']}
 
 
-async def search_code(caller: McpCaller, *, query: str, fields: list[Literal['name', 'path', 'sha', 'repository', 'text_matches']] | None = None, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: str | None = None) -> SearchCodeResult:
+async def search_code(caller: McpCaller, *, query: str, fields: list[Literal['name', 'path', 'sha', 'repository', 'text_matches']] | None = None, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: str | None = None) -> list[SearchCodeItem]:
     """Fast and precise code search across ALL GitHub repositories using GitHub's native search engine. Best for finding exact symbols, functions, classes, or specific code patterns.
 
     Args:
@@ -991,12 +1060,13 @@ async def search_code(caller: McpCaller, *, query: str, fields: list[Literal['na
         args["perPage"] = perPage
     if sort is not None:
         args["sort"] = sort
-    return cast("SearchCodeResult", await caller.call(SERVER, "search_code", args))
+    result = await caller.call(SERVER, "search_code", args)
+    return cast("list[SearchCodeItem]", _dig_list(result, ('items', )))
 
 search_code.__schema__ = {'type': 'object', 'properties': {'fields': {'type': 'array', 'items': {'type': 'string', 'enum': ['name', 'path', 'sha', 'repository', 'text_matches']}, 'description': "Subset of fields to return for each code search result. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'repository' and 'text_matches' in particular drops the largest per-result data."}, 'order': {'type': 'string', 'description': 'Sort order for results', 'enum': ['asc', 'desc']}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': 'Search query (GitHub code search REST). Implicit AND between terms; supports `OR`, `NOT`, and `"quoted phrase"` for exact match. Qualifiers: `repo:owner/repo`, `org:`, `user:`, `language:`, `path:dir` (prefix match), `filename:exact.ext`, `extension:`, `in:file`, `in:path`, `size:`, `is:archived`, `is:fork`. Max 256 chars. Examples: `WithContext language:go org:github`; `"package main" repo:o/r`; `func extension:go path:cmd repo:o/r`; `NOT TODO language:go repo:o/r`.'}, 'sort': {'type': 'string', 'description': "Sort field ('indexed' only)"}}, 'required': ['query']}
 
 
-async def search_commits(caller: McpCaller, *, query: str, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: Literal['author-date', 'committer-date'] | None = None) -> SearchCommitsResult:
+async def search_commits(caller: McpCaller, *, query: str, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: Literal['author-date', 'committer-date'] | None = None) -> list[SearchCommitItem]:
     """Search for commits across GitHub repositories using GitHub's commit search syntax. Useful for finding specific changes, authors, or messages across one or many repositories. Searches the default branch only.
 
     Args:
@@ -1015,12 +1085,13 @@ async def search_commits(caller: McpCaller, *, query: str, order: Literal['asc',
         args["perPage"] = perPage
     if sort is not None:
         args["sort"] = sort
-    return cast("SearchCommitsResult", await caller.call(SERVER, "search_commits", args))
+    result = await caller.call(SERVER, "search_commits", args)
+    return cast("list[SearchCommitItem]", _dig_list(result, ('items', )))
 
 search_commits.__schema__ = {'type': 'object', 'properties': {'order': {'type': 'string', 'description': 'Sort order', 'enum': ['asc', 'desc']}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': 'Commit search query (GitHub commit search REST). Searches commit messages on the default branch only. Scope the search with `repo:owner/repo`, `org:`, or `user:` (queries without a scope qualifier match across all of GitHub and are usually not what you want). Other qualifiers: `author:`, `committer:`, `author-name:`, `committer-name:`, `author-email:`, `committer-email:`, `author-date:`, `committer-date:` (supports `>`, `<`, `>=`, `<=`, and `YYYY-MM-DD..YYYY-MM-DD` ranges), `merge:true|false`, `hash:`, `tree:`, `parent:`, `is:public`. Examples: `repo:owner/repo fix panic`; `org:github author:defunkt committer-date:>=2024-01-01`; `"refactor cache" repo:o/r`; `hash:abc1234 repo:o/r`.'}, 'sort': {'type': 'string', 'description': 'Sort by author or committer date (defaults to best match)', 'enum': ['author-date', 'committer-date']}}, 'required': ['query']}
 
 
-async def search_issues(caller: McpCaller, *, query: str, fields: list[Literal['number', 'title', 'body', 'state', 'state_reason', 'draft', 'locked', 'html_url', 'user', 'author_association', 'labels', 'assignee', 'assignees', 'milestone', 'comments', 'reactions', 'created_at', 'updated_at', 'closed_at', 'closed_by', 'type', 'repository_url', 'pull_request', 'field_values']] | None = None, order: Literal['asc', 'desc'] | None = None, owner: str | None = None, page: float | None = None, perPage: float | None = None, repo: str | None = None, sort: Literal['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated'] | None = None) -> SearchIssuesResult:
+async def search_issues(caller: McpCaller, *, query: str, fields: list[Literal['number', 'title', 'body', 'state', 'state_reason', 'draft', 'locked', 'html_url', 'user', 'author_association', 'labels', 'assignee', 'assignees', 'milestone', 'comments', 'reactions', 'created_at', 'updated_at', 'closed_at', 'closed_by', 'type', 'repository_url', 'pull_request', 'field_values']] | None = None, order: Literal['asc', 'desc'] | None = None, owner: str | None = None, page: float | None = None, perPage: float | None = None, repo: str | None = None, sort: Literal['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated'] | None = None) -> list[SearchIssueItem]:
     """Search issues using natural-language semantic matching. Best for conceptual or paraphrased queries (e.g. "login fails after password reset"). Already scoped to is:issue.
 
     Args:
@@ -1048,12 +1119,13 @@ async def search_issues(caller: McpCaller, *, query: str, fields: list[Literal['
         args["repo"] = repo
     if sort is not None:
         args["sort"] = sort
-    return cast("SearchIssuesResult", await caller.call(SERVER, "search_issues", args))
+    result = await caller.call(SERVER, "search_issues", args)
+    return cast("list[SearchIssueItem]", _dig_list(result, ('items', )))
 
 search_issues.__schema__ = {'type': 'object', 'properties': {'fields': {'type': 'array', 'items': {'type': 'string', 'enum': ['number', 'title', 'body', 'state', 'state_reason', 'draft', 'locked', 'html_url', 'user', 'author_association', 'labels', 'assignee', 'assignees', 'milestone', 'comments', 'reactions', 'created_at', 'updated_at', 'closed_at', 'closed_by', 'type', 'repository_url', 'pull_request', 'field_values']}, 'description': "Subset of fields to return for each issue result. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body', 'reactions', and 'labels' in particular drops the largest per-result data."}, 'order': {'type': 'string', 'description': 'Sort order', 'enum': ['asc', 'desc']}, 'owner': {'type': 'string', 'description': 'Optional repository owner. If provided with repo, only issues for this repository are listed.', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': 'The search query, as natural language. When the user gives alternative wordings, include them as plain words rather than joining them with OR.'}, 'repo': {'type': 'string', 'description': 'Optional repository name. If provided with owner, only issues for this repository are listed.', 'x-mcp-header': 'repo'}, 'sort': {'type': 'string', 'description': 'Sort field by number of matches of categories, defaults to best match', 'enum': ['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated']}}, 'required': ['query']}
 
 
-async def search_pull_requests(caller: McpCaller, *, query: str, fields: list[Literal['number', 'title', 'body', 'state', 'state_reason', 'draft', 'locked', 'html_url', 'user', 'author_association', 'labels', 'assignee', 'assignees', 'milestone', 'comments', 'reactions', 'created_at', 'updated_at', 'closed_at', 'closed_by', 'pull_request', 'repository_url']] | None = None, order: Literal['asc', 'desc'] | None = None, owner: str | None = None, page: float | None = None, perPage: float | None = None, repo: str | None = None, sort: Literal['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated'] | None = None) -> SearchPRsResult:
+async def search_pull_requests(caller: McpCaller, *, query: str, fields: list[Literal['number', 'title', 'body', 'state', 'state_reason', 'draft', 'locked', 'html_url', 'user', 'author_association', 'labels', 'assignee', 'assignees', 'milestone', 'comments', 'reactions', 'created_at', 'updated_at', 'closed_at', 'closed_by', 'pull_request', 'repository_url']] | None = None, order: Literal['asc', 'desc'] | None = None, owner: str | None = None, page: float | None = None, perPage: float | None = None, repo: str | None = None, sort: Literal['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated'] | None = None) -> list[SearchPullRequestItem]:
     """Search for pull requests in GitHub repositories using issues search syntax already scoped to is:pr
 
     Args:
@@ -1081,12 +1153,13 @@ async def search_pull_requests(caller: McpCaller, *, query: str, fields: list[Li
         args["repo"] = repo
     if sort is not None:
         args["sort"] = sort
-    return cast("SearchPRsResult", await caller.call(SERVER, "search_pull_requests", args))
+    result = await caller.call(SERVER, "search_pull_requests", args)
+    return cast("list[SearchPullRequestItem]", _dig_list(result, ('items', )))
 
 search_pull_requests.__schema__ = {'type': 'object', 'properties': {'fields': {'type': 'array', 'items': {'type': 'string', 'enum': ['number', 'title', 'body', 'state', 'state_reason', 'draft', 'locked', 'html_url', 'user', 'author_association', 'labels', 'assignee', 'assignees', 'milestone', 'comments', 'reactions', 'created_at', 'updated_at', 'closed_at', 'closed_by', 'pull_request', 'repository_url']}, 'description': "Subset of fields to return for each pull request result. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body', 'reactions', and 'labels' in particular drops the largest per-result data."}, 'order': {'type': 'string', 'description': 'Sort order', 'enum': ['asc', 'desc']}, 'owner': {'type': 'string', 'description': 'Optional repository owner. If provided with repo, only pull requests for this repository are listed.', 'x-mcp-header': 'owner'}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': 'Search query using GitHub pull request search syntax'}, 'repo': {'type': 'string', 'description': 'Optional repository name. If provided with owner, only pull requests for this repository are listed.', 'x-mcp-header': 'repo'}, 'sort': {'type': 'string', 'description': 'Sort field by number of matches of categories, defaults to best match', 'enum': ['comments', 'reactions', 'reactions-+1', 'reactions--1', 'reactions-smile', 'reactions-thinking_face', 'reactions-heart', 'reactions-tada', 'interactions', 'created', 'updated']}}, 'required': ['query']}
 
 
-async def search_repositories(caller: McpCaller, *, query: str, minimal_output: bool | None = None, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: Literal['stars', 'forks', 'help-wanted-issues', 'updated'] | None = None) -> SearchReposResult:
+async def search_repositories(caller: McpCaller, *, query: str, minimal_output: bool | None = None, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: Literal['stars', 'forks', 'help-wanted-issues', 'updated'] | None = None) -> list[SearchRepositoryItem]:
     """Find GitHub repositories by name, description, readme, topics, or other metadata. Perfect for discovering projects, finding examples, or locating specific repositories across GitHub.
 
     Args:
@@ -1108,12 +1181,13 @@ async def search_repositories(caller: McpCaller, *, query: str, minimal_output: 
         args["perPage"] = perPage
     if sort is not None:
         args["sort"] = sort
-    return cast("SearchReposResult", await caller.call(SERVER, "search_repositories", args))
+    result = await caller.call(SERVER, "search_repositories", args)
+    return cast("list[SearchRepositoryItem]", _dig_list(result, ('items', )))
 
 search_repositories.__schema__ = {'type': 'object', 'properties': {'minimal_output': {'type': 'boolean', 'description': 'Return minimal repository information (default: true). When false, returns full GitHub API repository objects.', 'default': True}, 'order': {'type': 'string', 'description': 'Sort order', 'enum': ['asc', 'desc']}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': "Repository search query. Examples: 'machine learning in:name stars:>1000 language:python', 'topic:react', 'user:facebook'. Supports advanced search syntax for precise filtering."}, 'sort': {'type': 'string', 'description': 'Sort repositories by field, defaults to best match', 'enum': ['stars', 'forks', 'help-wanted-issues', 'updated']}}, 'required': ['query']}
 
 
-async def search_users(caller: McpCaller, *, query: str, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: Literal['followers', 'repositories', 'joined'] | None = None) -> SearchUsersResult:
+async def search_users(caller: McpCaller, *, query: str, order: Literal['asc', 'desc'] | None = None, page: float | None = None, perPage: float | None = None, sort: Literal['followers', 'repositories', 'joined'] | None = None) -> list[SearchUserItem]:
     """Find GitHub users by username, real name, or other profile information. Useful for locating developers, contributors, or team members.
 
     Args:
@@ -1132,7 +1206,8 @@ async def search_users(caller: McpCaller, *, query: str, order: Literal['asc', '
         args["perPage"] = perPage
     if sort is not None:
         args["sort"] = sort
-    return cast("SearchUsersResult", await caller.call(SERVER, "search_users", args))
+    result = await caller.call(SERVER, "search_users", args)
+    return cast("list[SearchUserItem]", _dig_list(result, ('items', )))
 
 search_users.__schema__ = {'type': 'object', 'properties': {'order': {'type': 'string', 'description': 'Sort order', 'enum': ['asc', 'desc']}, 'page': {'type': 'number', 'description': 'Page number for pagination (min 1)', 'minimum': 1}, 'perPage': {'type': 'number', 'description': 'Results per page for pagination (min 1, max 100)', 'minimum': 1, 'maximum': 100}, 'query': {'type': 'string', 'description': "User search query. Examples: 'john smith', 'location:seattle', 'followers:>100'. Search is automatically scoped to type:user."}, 'sort': {'type': 'string', 'description': 'Sort users by number of followers or repositories, or when the person joined GitHub.', 'enum': ['followers', 'repositories', 'joined']}}, 'required': ['query']}
 

@@ -1,56 +1,67 @@
-# github — session overview
+# github — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T15:43:44Z
-- **Duration:** 7m 44s (wall-clock around the generate-mcp-wrappers skill run)
+- **Executed:** 2026-08-27T06:00:34Z
+- **Duration:** 17m 23s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Summary
+## Coverage
 
-The GitHub MCP server (`https://api.githubcopilot.com/mcp/`, bearer auth) exposes 44
-tools — unchanged in count from the prior eval run, though several tool schemas have
-shifted upstream since then (`get_file_contents` gained a `fields` filter param,
-`add_issue_comment.comment_id` tightened from `number` to `integer`,
-`create_or_update_file` gained `allow_symlink_write`, `search_pull_requests` gained a
-`fields`/`sort`/`order` surface). Running as a non-interactive subagent, every
-non-mutating tool (`readOnlyHint` / keyword+semantic fallback) was probed live and
-every mutating tool was skipped — 27 probed, 17 skipped. Skipped: the keyword-flagged
-mutators (`create_branch`, `create_or_update_file`, `create_pull_request`,
-`create_repository`, `delete_file`, `fork_repository`, `issue_write`,
-`merge_pull_request`, `pull_request_review_write`, `push_files`,
-`request_copilot_review`, `sub_issue_write`, `update_pull_request`,
-`update_pull_request_branch`), plus three comment/reaction tools that write real
-content despite not matching the mutating-keyword list (`add_comment_to_pending_review`,
-`add_issue_comment`, `add_reply_to_pull_request_comment`).
+The server exposes **44 tools** (the manifest's note of 35 is stale). Every tool carries
+`annotations.readOnlyHint`: **27 read-only selected, 17 mutating skipped** unprobed.
 
-All read probes ran against `microsoft/vscode` (tag `1.128.0`, PR `#332572`, issue
-`#250000` — the PR number was rediscovered live via `list_pull_requests` this run,
-since the previously-recorded PR had aged out of the "open" filter). 19 of 27 probed
-tools return a shaped `TypedDict` or `list[TypedDict]`: `CommitDetail`, `Label`,
-`Release` (shared by `get_latest_release`/`get_release_by_tag`), `GitHubUser`,
-`GitTag`, `TeamOrgSummary`, `Branch`, `CommitSummary`, `IssueSummary` (unwrapped from
-`issues`), `PullRequestSummary`, `ReleaseSummary`, `TagSummary`, `SecretScanResult`,
-and six `Search*Result` envelopes carrying `total_count`/`incomplete_results`
-(`search_pull_requests` additionally exposes a `search_type` field observed for the
-first time this run).
+One judgment call: `idempotentHint: false` appears on *all 44* tools, reads and writes alike.
+Read literally it would trip the self-contradiction check on every read-only tool and drop
+coverage to zero. Being uniform across the whole surface, it carries no per-tool information —
+it is the MCP spec default (meaningful only when `readOnlyHint` is false), not a server
+contradicting itself. Hints trusted. `destructiveHint: true` appears only on `delete_file`.
 
-Three tools returned genuine live errors and are marked `"_probe_status":
-"inconclusive"`: `list_issue_types` (404 — `microsoft` org has no custom issue-types
-feature enabled), `list_repository_collaborators` (403 — token lacks the collaborators
-scope on `microsoft/vscode`), and `get_team_members` (the guessed `team_slug: "vscode"`
-does not resolve to a real team — `get_teams` was re-probed with no `user` arg this
-run and confirmed the authenticated token belongs to org `EPAMHackathons` with zero
-team memberships, so no real team slug is discoverable to re-probe against). `get_teams`
-itself is now correctly modeled as `list[TeamOrgSummary]` from that self-scoped call
-(the prior run's arg of `user: "torvalds"` returned a bare `null` for a foreign user
-and was corrected). `issue_read` and `pull_request_read` stay `Any`: their `method`
-argument switches between dict-shaped (`get`) and list-shaped (`get_comments`,
-`get_files`) responses, structurally incompatible for a single model per the
-discriminator-fallback rule. `get_file_contents` stays `Any` (plain `str`, raw README
-content). `list_issue_fields` returned an empty list — inner element shape remains
-unobservable from zero samples.
+## Discriminators
 
-The regenerated module (100,991 bytes) parses cleanly via `ast.parse`. `eval-kit
-verify github` passed 4/5 checks (`ast`, `idempotency`, `pii`, `roundtrip`), with
-`signatures` skipped for the three inconclusive tools noted above — an honest,
-expected skip rather than a failure. Final verdict: **pass**.
+Of 16 advisory candidates, Pass 1 dropped pagination/window params and the all-mutating sets.
+Pass 2 probed the rest: **`sha`** (3 commits) differed only by an optional `deletions` key
+nested in `files[]` — identity ref, not a discriminator. **`tag`** (3 tags) was identical:
+inconclusive, resolved as one base model. **`state`** on `list_pull_requests` showed `closed`
+carrying `assignees`/`closed_at`/`merged_at`/`milestone`, but `all` matched `open` — the
+variance follows record content, not the argument, so option 2 (base model, `total=False`).
+
+Two real discriminators the advisory *could not* raise, since `method` is denylisted:
+**`pull_request_read`** (9 methods) and **`issue_read`** (5). All 14 variants were probed
+separately. Payloads differ radically — `get` a dict, `get_files`/`get_commits`/`get_reviews`
+lists, `get_diff` a bare **string**, `get_check_runs` its own envelope.
+
+**Engine gap — the headline finding.** `_render_overloaded` reads `return_container` once per
+tool and applies it to all variants, so a tool spanning dict/list/str cannot be typed
+faithfully. Both were resolved to **option 3 (unwrap-only `Any`)** rather than emitting
+overloads that type-error on 5 of 9 valid `pull_request_read` calls. Per-variant
+`return_container` would unlock both. `get_commit.detail` (3 values) stayed one base model:
+its variants differ only in non-scalar keys (`stats`, `files`) that `fields` cannot express.
+
+## Shape decisions
+
+**21 of 27** probed tools are typed across **20 TypedDicts** (`Release` shared by
+`get_latest_release` and `get_release_by_tag`, fields verified identical).
+
+- **Envelope unwraps:** `list_issues` → `unwrap: ["issues"]`; the six `search_*` tools →
+  `unwrap: ["items"]`. All `return_container: "list"`, digging via `_dig_list`.
+- **Bare lists** (`list_commits`, `list_tags`, `list_branches`, `list_releases`,
+  `list_pull_requests`, `list_issue_types`, `get_teams`) need no unwrap. Notably
+  `list_pull_requests` returns a bare list where `list_issues` returns an envelope — the same
+  server is inconsistent between sibling tools.
+
+Left untyped with cause: `get_file_contents` (returns `[status_string, resource-metadata]`;
+file bytes never appear — media rule), `list_issue_fields` (always `[]`, inner shape
+unobservable), and `get_team_members` / `list_repository_collaborators`, both marked
+`_probe_status: "inconclusive"` — the first returned `null`, the second `403 Resource not
+accessible by personal access token` on both `microsoft/vscode` *and* a repo the token owns,
+so it is a token-scope gap. One recovery: `list_issue_types` 404s at org level but succeeds
+when `repo` is supplied, turning an inconclusive entry into a real `list[IssueType]`.
+
+## Verification
+
+`ast.parse` clean and the module imports (104 KB, 44 wrappers). `list_issues` digs
+`('issues',)`, `search_code` digs `('items',)`, bare-list tools cast directly; all TypedDicts
+are `total=False`. Post-merge scrub replaced the PAT owner's login and org with
+`<example-owner>`/`<example-org>` (`probe_args_scrubbed: true`), keeping public
+`microsoft`/`vscode`, issue/PR numbers and SHAs as functional values; gitignored
+`github.verify.json` retains the real args for roundtrip.

@@ -1,7 +1,7 @@
 {
   "sequentialthinking": {
     "unwrap": [],
-    "return_model": "ThoughtResult",
+    "return_model": "ThoughtStatus",
     "input_overrides": {},
     "fields": {
       "thoughtNumber": "int",
@@ -13,18 +13,24 @@
     "source": "live",
     "probed_args": [
       {
-        "thought": "Step 1: identify the problem.",
-        "nextThoughtNeeded": true,
+        "thought": "Initial analysis step",
         "thoughtNumber": 1,
-        "totalThoughts": 2
+        "totalThoughts": 3,
+        "nextThoughtNeeded": true
       },
       {
-        "thought": "Step 2 (branch): explore an alternative approach.",
-        "nextThoughtNeeded": false,
+        "thought": "Branch exploration",
         "thoughtNumber": 2,
-        "totalThoughts": 2,
+        "totalThoughts": 3,
+        "nextThoughtNeeded": true,
         "branchFromThought": 1,
-        "branchId": "alt-approach"
+        "branchId": "alt-a"
+      },
+      {
+        "thought": "Final conclusion",
+        "thoughtNumber": 3,
+        "totalThoughts": 3,
+        "nextThoughtNeeded": false
       }
     ]
   }

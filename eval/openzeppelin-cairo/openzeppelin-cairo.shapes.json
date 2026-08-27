@@ -5,18 +5,12 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "name": "MyAccount",
-        "type": "stark"
-      },
-      {
-        "name": "MyAccount",
-        "type": "eth"
-      }
-    ],
+    "probed_args": {
+      "name": "MyAccount",
+      "type": "stark"
+    },
     "_observed_shape": "str",
-    "_observed_bytes": 2578
+    "_observed_bytes": 2453
   },
   "cairo-custom": {
     "unwrap": [],
@@ -38,10 +32,10 @@
     "source": "live",
     "probed_args": {
       "name": "MyMultiToken",
-      "baseUri": "https://example.com/token/{id}.json"
+      "baseUri": "https://example.com/tokens/"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2996
+    "_observed_bytes": 2988
   },
   "cairo-erc20": {
     "unwrap": [],
@@ -52,11 +46,10 @@
     "probed_args": {
       "name": "MyToken",
       "symbol": "MTK",
-      "decimals": "18",
-      "mintable": true
+      "decimals": "18"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2599
+    "_observed_bytes": 2285
   },
   "cairo-erc721": {
     "unwrap": [],
@@ -66,11 +59,10 @@
     "source": "live",
     "probed_args": {
       "name": "MyNFT",
-      "symbol": "MNFT",
-      "baseUri": "https://example.com/nft/"
+      "symbol": "MNFT"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 2531
+    "_observed_bytes": 2507
   },
   "cairo-governor": {
     "unwrap": [],
@@ -81,8 +73,7 @@
     "probed_args": {
       "name": "MyGovernor",
       "delay": "1 day",
-      "period": "1 week",
-      "votes": "erc20votes"
+      "period": "1 week"
     },
     "_observed_shape": "str",
     "_observed_bytes": 5936
@@ -108,12 +99,12 @@
     "source": "live",
     "probed_args": {
       "name": "MyVesting",
-      "startDate": "2026-03-15T14:30",
-      "duration": "1 year",
-      "cliffDuration": "90 days",
+      "startDate": "2026-01-01T00:00:00",
+      "duration": "90 day",
+      "cliffDuration": "30 day",
       "schedule": "linear"
     },
     "_observed_shape": "str",
-    "_observed_bytes": 1661
+    "_observed_bytes": 1659
   }
 }

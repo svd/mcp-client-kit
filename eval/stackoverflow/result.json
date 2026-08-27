@@ -22,7 +22,7 @@
   "verdict": "pass",
   "versions": {
     "engine": "0.9.0.dev1",
-    "skill_ref": "v0.0.4-67-g80a9a67",
+    "skill_ref": "v0.0.4-156-gfd9eda8",
     "skill_path": "~/src/mcp-client-kit"
   }
 }

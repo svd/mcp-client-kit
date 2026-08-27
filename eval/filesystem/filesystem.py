@@ -14,10 +14,10 @@ SERVER = 'filesystem'
 
 
 
-class MediaFile(TypedDict, total=False):
+class DirectoryNode(TypedDict, total=False):
+    name: str
     type: str
-    mimeType: str
-    has_data: bool
+    children: list
 
 
 async def create_directory(caller: McpCaller, *, path: str) -> Any:
@@ -32,7 +32,7 @@ async def create_directory(caller: McpCaller, *, path: str) -> Any:
 create_directory.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'path': {'type': 'string'}}, 'required': ['path']}
 
 
-async def directory_tree(caller: McpCaller, *, path: str, excludePatterns: list[str] | None = None) -> Any:
+async def directory_tree(caller: McpCaller, *, path: str, excludePatterns: list[str] | None = None) -> list[DirectoryNode]:
     """Get a recursive tree view of files and directories as a JSON structure. Each entry includes 'name', 'type' (file/directory), and 'children' for directories. Files have no children array, while directories always have a children array (which may be empty). The output is formatted with 2-space indentation for readability. Only works within allowed directories.
 
     Args:
@@ -42,7 +42,7 @@ async def directory_tree(caller: McpCaller, *, path: str, excludePatterns: list[
     args: dict[str, Any] = {"path": path}
     if excludePatterns is not None:
         args["excludePatterns"] = excludePatterns
-    return await caller.call(SERVER, "directory_tree", args)
+    return cast("list[DirectoryNode]", await caller.call(SERVER, "directory_tree", args))
 
 directory_tree.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'path': {'type': 'string'}, 'excludePatterns': {'default': [], 'type': 'array', 'items': {'type': 'string'}}}, 'required': ['path']}
 
@@ -140,14 +140,14 @@ async def read_file(caller: McpCaller, *, path: str, tail: float | None = None, 
 read_file.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'path': {'type': 'string'}, 'tail': {'description': 'If provided, returns only the last N lines of the file', 'type': 'number'}, 'head': {'description': 'If provided, returns only the first N lines of the file', 'type': 'number'}}, 'required': ['path']}
 
 
-async def read_media_file(caller: McpCaller, *, path: str) -> MediaFile:
+async def read_media_file(caller: McpCaller, *, path: str) -> Any:
     """Read a file and return it as a base64-encoded content block with its MIME type. Image and audio files are returned as image/audio content; any other file type is returned as an embedded resource. Only works within allowed directories.
 
     Args:
         path:
     """
     args: dict[str, Any] = {"path": path}
-    return cast("MediaFile", await caller.call(SERVER, "read_media_file", args))
+    return await caller.call(SERVER, "read_media_file", args)
 
 read_media_file.__schema__ = {'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {'path': {'type': 'string'}}, 'required': ['path']}
 

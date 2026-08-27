@@ -3,15 +3,37 @@ Smoke-test runner for generated firecrawl/ wrappers.
 Transport: Streamable HTTP  (https://mcp.firecrawl.dev/v2/mcp)
 Auth: Bearer token (set FIRECRAWL_API_KEY env var)
 
+Args come from firecrawl.verify.json (real, pre-scrub probe args).
+
+Two deviations from the verify.json args, both deliberate:
+  * firecrawl_map declares a discriminator (sitemap) with three variants
+    (include / skip / only); only "only" was probed. The "include" and "skip"
+    calls below reuse the probed url and limit, varying just the discriminator.
+  * firecrawl_parse was probed with an absolute path to a machine-local
+    scratchpad file. That path is not portable and must not be committed, so the
+    file is taken from FIRECRAWL_PARSE_FILE and the call is skipped when unset.
+
 Usage:
     FIRECRAWL_API_KEY=<token> python eval/firecrawl/run.py
 """
 import asyncio
+import importlib.util
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-import firecrawl
+# The wrapper module lives at eval/firecrawl/firecrawl.py, inside a directory
+# that is itself named "firecrawl". A plain `import firecrawl` with eval/ on
+# sys.path would resolve to that directory as a namespace package instead of the
+# module, so load the file by path as `firecrawl_wrappers`.
+_spec = importlib.util.spec_from_file_location(
+    "firecrawl_wrappers",
+    os.path.join(os.path.dirname(__file__), "firecrawl.py"),
+)
+assert _spec is not None and _spec.loader is not None
+firecrawl_wrappers = importlib.util.module_from_spec(_spec)
+sys.modules["firecrawl_wrappers"] = firecrawl_wrappers
+_spec.loader.exec_module(firecrawl_wrappers)
 
 from mcpgen import McpBridgeCaller
 
@@ -28,135 +50,156 @@ async def main() -> None:
     # One connection for the whole run: a single initialize() instead of
     # reconnecting for every tool call.
     async with caller.connected():
-        # Skipped mutating / job-creating tools: firecrawl_agent, firecrawl_crawl,
-        # firecrawl_feedback, firecrawl_interact, firecrawl_interact_stop,
-        # firecrawl_monitor_create, firecrawl_monitor_delete, firecrawl_monitor_run,
-        # firecrawl_monitor_update, firecrawl_search_feedback
-        # No tool in firecrawl.shapes.json carries a discriminator, so every tool
-        # below is exercised once. Args come from firecrawl.verify.json (real,
-        # pre-scrub values).
+        # Skipped mutating tools: firecrawl_monitor_create,
+        # firecrawl_monitor_update, firecrawl_monitor_delete,
+        # firecrawl_monitor_run, firecrawl_feedback, firecrawl_search_feedback,
+        # firecrawl_interact_stop.
+        # Also skipped (job-launching or id-dependent, never probed):
+        # firecrawl_agent, firecrawl_agent_status, firecrawl_crawl,
+        # firecrawl_check_crawl_status, firecrawl_interact,
+        # firecrawl_monitor_get, firecrawl_monitor_check,
+        # firecrawl_monitor_checks.
 
-        # firecrawl_map -> list[MapLink]
-        links = await firecrawl.firecrawl_map(
-            caller, url="https://example.com", limit=5
+        # firecrawl_search -> SearchResults  (unwrap: data)
+        search = await firecrawl_wrappers.firecrawl_search(
+            caller,
+            query="golden retriever",
+            limit=3,
+            sources=[{"type": "images"}],
         )
-        print(f"firecrawl_map: {len(links)} link(s)")
+        print(
+            f"firecrawl_search: web={len(search.get('web') or [])} "
+            f"news={len(search.get('news') or [])} "
+            f"images={len(search.get('images') or [])}"
+        )
 
         # firecrawl_scrape -> ScrapeResult
-        scraped = await firecrawl.firecrawl_scrape(
-            caller, url="https://example.com", formats=["markdown"]
+        scrape = await firecrawl_wrappers.firecrawl_scrape(
+            caller,
+            url="https://example.com",
+            formats=["markdown", "links", "html", "summary"],
         )
         print(
-            f"firecrawl_scrape: markdown_len="
-            f"{len(scraped.get('markdown') or '')}  "
-            f"metadata_keys={sorted((scraped.get('metadata') or {}).keys())[:3]}"
+            f"firecrawl_scrape: markdown={len(scrape.get('markdown') or '')}b "
+            f"links={len(scrape.get('links') or [])} "
+            f"title={(scrape.get('metadata') or {}).get('title')!r}"
         )
 
-        # firecrawl_search -> SearchResponse
-        found = await firecrawl.firecrawl_search(
-            caller, query="model context protocol", limit=3
+        # firecrawl_map -> list[MapLinkUrlOnly]  (discriminator sitemap="only")
+        map_only = await firecrawl_wrappers.firecrawl_map(
+            caller,
+            url="https://docs.python.org",
+            sitemap="only",
+            limit=10,
+        )
+        print(f"firecrawl_map(only): {len(map_only)} link(s)")
+
+        # firecrawl_map -> list[MapLink]  (discriminator sitemap="include")
+        map_include = await firecrawl_wrappers.firecrawl_map(
+            caller,
+            url="https://docs.python.org",
+            sitemap="include",
+            limit=10,
+        )
+        print(f"firecrawl_map(include): {len(map_include)} link(s)")
+
+        # firecrawl_map -> list[MapLink]  (discriminator sitemap="skip")
+        map_skip = await firecrawl_wrappers.firecrawl_map(
+            caller,
+            url="https://docs.python.org",
+            sitemap="skip",
+            limit=10,
+        )
+        print(f"firecrawl_map(skip): {len(map_skip)} link(s)")
+
+        # firecrawl_developer_search -> Any  (observed shape: str)
+        dev = await firecrawl_wrappers.firecrawl_developer_search(
+            caller,
+            query="python asyncio TaskGroup cancellation semantics",
+            k=3,
+        )
+        print(f"firecrawl_developer_search: {type(dev).__name__} len={len(str(dev))}")
+
+        # firecrawl_research_search_papers -> Any  (observed shape: str)
+        papers = await firecrawl_wrappers.firecrawl_research_search_papers(
+            caller,
+            query="transformer attention mechanism",
+            k=3,
         )
         print(
-            f"firecrawl_search: success={found.get('success')!r}  "
-            f"id={found.get('id')!r}  creditsUsed={found.get('creditsUsed')!r}"
+            f"firecrawl_research_search_papers: {type(papers).__name__} "
+            f"len={len(str(papers))}"
         )
 
-        # firecrawl_developer_search -> Any  (probe returned prose)
-        dev = await firecrawl.firecrawl_developer_search(
-            caller, query="python asyncio TaskGroup cancellation semantics", k=3
-        )
-        print(f"firecrawl_developer_search: {type(dev).__name__}")
-
-        # firecrawl_research_search_papers -> Any  (probe returned prose)
-        papers = await firecrawl.firecrawl_research_search_papers(
-            caller, query="retrieval augmented generation", k=3
-        )
-        print(f"firecrawl_research_search_papers: {type(papers).__name__}")
-
-        # firecrawl_research_search_github -> Any  (probe returned prose)
-        repos = await firecrawl.firecrawl_research_search_github(
-            caller, query="model context protocol server", k=3
-        )
-        print(f"firecrawl_research_search_github: {type(repos).__name__}")
-
-        # firecrawl_research_inspect_paper -> Any  (probe returned prose)
-        paper = await firecrawl.firecrawl_research_inspect_paper(
-            caller, paperId="arxiv:2503.23278"
-        )
-        print(f"firecrawl_research_inspect_paper: {type(paper).__name__}")
-
-        # firecrawl_research_read_paper -> Any  (probe returned prose)
-        passage = await firecrawl.firecrawl_research_read_paper(
+        # firecrawl_research_inspect_paper -> Any  (observed shape: str)
+        inspected = await firecrawl_wrappers.firecrawl_research_inspect_paper(
             caller,
-            paperId="arxiv:2503.23278",
-            question="What security threats are identified?",
-            k=2,
+            paperId="10.1038/nature14539",
         )
-        print(f"firecrawl_research_read_paper: {type(passage).__name__}")
+        print(
+            f"firecrawl_research_inspect_paper: {type(inspected).__name__} "
+            f"len={len(str(inspected))}"
+        )
 
-        # firecrawl_research_related_papers -> Any  (probe returned prose)
-        related = await firecrawl.firecrawl_research_related_papers(
+        # firecrawl_research_read_paper -> Any  (observed shape: str)
+        read = await firecrawl_wrappers.firecrawl_research_read_paper(
             caller,
-            seed_ids=["arxiv:2503.23278"],
-            intent="find related work on MCP security",
+            paperId="arxiv:1908.11775",
+            question="How is attention formulated as a kernel?",
+            k=3,
+        )
+        print(
+            f"firecrawl_research_read_paper: {type(read).__name__} "
+            f"len={len(str(read))}"
+        )
+
+        # firecrawl_research_related_papers -> Any  (observed shape: str)
+        related = await firecrawl_wrappers.firecrawl_research_related_papers(
+            caller,
+            seed_ids=["arxiv:1908.11775"],
+            intent="find follow-up work on kernel attention",
             mode="similar",
             k=3,
         )
-        print(f"firecrawl_research_related_papers: {type(related).__name__}")
+        print(
+            f"firecrawl_research_related_papers: {type(related).__name__} "
+            f"len={len(str(related))}"
+        )
 
-        # firecrawl_parse -> ParseResponse
-        # filePath below is the real probe path from firecrawl.verify.json; it lives
-        # in a machine-local scratchpad, so point it at any local HTML/PDF file.
-        parsed = await firecrawl.firecrawl_parse(
+        # firecrawl_research_search_github -> Any  (observed shape: str)
+        gh = await firecrawl_wrappers.firecrawl_research_search_github(
             caller,
-            filePath=(
-                "/private/tmp/claude-501/"
-                "-Users-Sviataslau-Svirydau-src-mcp-client-kit-eval/"
-                "ddfba483-0e92-4952-8aea-f18a53d6bdf6/scratchpad/probe-doc.html"
-            ),
-            formats=["markdown"],
+            query="model context protocol server implementation",
+            k=3,
         )
         print(
-            f"firecrawl_parse: success={parsed.get('success')!r}  "
-            f"mode={parsed.get('mode')!r}  message={parsed.get('message')!r}"
+            f"firecrawl_research_search_github: {type(gh).__name__} "
+            f"len={len(str(gh))}"
         )
 
-        # firecrawl_monitor_list -> Any  (list container, unwrapped from .data)
-        monitors = await firecrawl.firecrawl_monitor_list(caller, limit=5)
+        # firecrawl_monitor_list -> list  (unwrap: data)
+        # The probed account had zero monitors, so the element shape is
+        # unobserved and an empty list here is the expected result.
+        monitors = await firecrawl_wrappers.firecrawl_monitor_list(caller, limit=5)
         print(f"firecrawl_monitor_list: {len(monitors)} monitor(s)")
 
-        # The four id-addressed tools below were probed with placeholder UUIDs and
-        # returned no success payload (_probe_status: inconclusive). Substitute a real
-        # monitor / crawl / agent id to get a meaningful shape out of them.
-        placeholder_id = "00000000-0000-4000-8000-000000000000"
-
-        # firecrawl_monitor_get -> Any
-        monitor = await firecrawl.firecrawl_monitor_get(caller, id=placeholder_id)
-        print(f"firecrawl_monitor_get: {type(monitor).__name__}")
-
-        # firecrawl_monitor_checks -> Any
-        checks = await firecrawl.firecrawl_monitor_checks(
-            caller, id=placeholder_id, limit=3
-        )
-        print(f"firecrawl_monitor_checks: {type(checks).__name__}")
-
-        # firecrawl_monitor_check -> Any
-        check = await firecrawl.firecrawl_monitor_check(
-            caller, id=placeholder_id, checkId=placeholder_id
-        )
-        print(f"firecrawl_monitor_check: {type(check).__name__}")
-
-        # firecrawl_check_crawl_status -> Any
-        crawl_status = await firecrawl.firecrawl_check_crawl_status(
-            caller, id=placeholder_id
-        )
-        print(f"firecrawl_check_crawl_status: {type(crawl_status).__name__}")
-
-        # firecrawl_agent_status -> Any
-        agent_status = await firecrawl.firecrawl_agent_status(
-            caller, id=placeholder_id
-        )
-        print(f"firecrawl_agent_status: {type(agent_status).__name__}")
+        # firecrawl_parse -> ParseUploadTicket
+        # The probe used a local scratchpad CSV; point FIRECRAWL_PARSE_FILE at
+        # any readable local file to exercise this tool.
+        parse_file = os.environ.get("FIRECRAWL_PARSE_FILE")
+        if parse_file and os.path.isfile(parse_file):
+            ticket = await firecrawl_wrappers.firecrawl_parse(
+                caller,
+                filePath=parse_file,
+                formats=["markdown"],
+            )
+            print(
+                f"firecrawl_parse: success={ticket.get('success')!r} "
+                f"mode={ticket.get('mode')!r} "
+                f"notes={len(ticket.get('notes') or [])}"
+            )
+        else:
+            print("firecrawl_parse: skipped (set FIRECRAWL_PARSE_FILE to a local file)")
 
 
 if __name__ == "__main__":

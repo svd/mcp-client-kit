@@ -1,17 +1,28 @@
 """
 Smoke-test runner for generated github/ wrappers.
-Transport: HTTP  (https://api.githubcopilot.com/mcp/)
+Transport: Streamable HTTP  (https://api.githubcopilot.com/mcp/)
 Auth: Bearer token (set GITHUB_PAT env var)
 
 Usage:
-    GITHUB_PAT=<token> python github/run.py
+    GITHUB_PAT=<token> python eval/github/run.py
 """
 import asyncio
+import importlib.util
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-import github
+# The wrapper module lives at eval/github/github.py, inside a directory that is
+# itself named "github". A plain `import github` with eval/ on sys.path would
+# resolve to that directory as a namespace package instead of the module, so
+# load the file by path as `github_wrappers`.
+_spec = importlib.util.spec_from_file_location(
+    "github_wrappers",
+    os.path.join(os.path.dirname(__file__), "github.py"),
+)
+github_wrappers = importlib.util.module_from_spec(_spec)
+sys.modules["github_wrappers"] = github_wrappers
+_spec.loader.exec_module(github_wrappers)
 
 from mcpgen import McpBridgeCaller
 
@@ -25,132 +36,221 @@ async def main() -> None:
 
     caller = McpBridgeCaller(url=SERVER_URL, bearer=bearer)
 
-    # Skipped mutating tools: add_comment_to_pending_review, add_issue_comment,
-    # add_reply_to_pull_request_comment, create_branch, create_or_update_file,
-    # create_pull_request, create_repository, delete_file, fork_repository,
-    # issue_write, merge_pull_request, pull_request_review_write, push_files,
-    # request_copilot_review, run_secret_scanning, sub_issue_write,
-    # update_pull_request, update_pull_request_branch
+    # One connection for the whole run: a single initialize() instead of
+    # reconnecting for every tool call.
+    async with caller.connected():
+        # Skipped mutating tools: add_comment_to_pending_review, add_issue_comment,
+        # add_reply_to_pull_request_comment, create_branch, create_or_update_file,
+        # create_pull_request, create_repository, delete_file, fork_repository,
+        # issue_write, merge_pull_request, pull_request_review_write, push_files,
+        # request_copilot_review, sub_issue_write, update_pull_request,
+        # update_pull_request_branch.
+        #
+        # Args below are the real probed args from github.verify.json.
 
-    # get_me -> GitHubUser
-    me = await github.get_me(caller)
-    print(f"get_me: login={me.get('login')!r}  id={me.get('id')!r}")
+        # --- identity / org context -------------------------------------
+        # get_me -> AuthenticatedUser
+        me = await github_wrappers.get_me(caller)
+        print(f"get_me: login={me.get('login')!r}  id={me.get('id')!r}")
 
-    # get_teams -> Any
-    teams = await github.get_teams(caller)
-    print(f"get_teams: {type(teams).__name__}")
+        # get_teams -> list[TeamGroup]
+        teams = await github_wrappers.get_teams(caller)
+        print(f"get_teams: {len(teams)} org group(s)")
 
-    # get_team_members -> Any  (probe_status=inconclusive: may return quota/auth error)
-    team_members = await github.get_team_members(caller, org="microsoft", team_slug="vscode")
-    print(f"get_team_members: {type(team_members).__name__}")
+        # get_team_members -> Any
+        # Probe was inconclusive (no success payload observed), so the shape is
+        # unknown and the call may fail against a token without org team scope.
+        members = await github_wrappers.get_team_members(
+            caller, org="EPAMHackathons", team_slug="engineering"
+        )
+        print(f"get_team_members: {type(members).__name__}")
 
-    # list_branches -> list[Branch]
-    branches = await github.list_branches(caller, owner="microsoft", repo="vscode", perPage=5)
-    print(f"list_branches: {len(branches)} item(s)")
+        # --- repository discovery ---------------------------------------
+        # search_repositories -> list[SearchRepositoryItem]
+        repos = await github_wrappers.search_repositories(
+            caller, query="vscode", perPage=3
+        )
+        print(f"search_repositories: {len(repos)} repo(s)")
 
-    # list_commits -> list[CommitSummary]
-    commits = await github.list_commits(caller, owner="microsoft", repo="vscode", perPage=5)
-    print(f"list_commits: {len(commits)} item(s)")
+        # list_repository_collaborators -> Any
+        # Probe was inconclusive (no success payload observed); shape unknown.
+        collaborators = await github_wrappers.list_repository_collaborators(
+            caller, owner="svd", repo="ubiquity-4konverta", perPage=3
+        )
+        print(f"list_repository_collaborators: {type(collaborators).__name__}")
 
-    # list_tags -> list[TagSummary]
-    tags = await github.list_tags(caller, owner="microsoft", repo="vscode", perPage=5)
-    print(f"list_tags: {len(tags)} item(s)")
+        # --- branches / commits -----------------------------------------
+        # list_branches -> list[BranchSummary]
+        branches = await github_wrappers.list_branches(
+            caller, owner="microsoft", repo="vscode", perPage=3
+        )
+        print(f"list_branches: {len(branches)} branch(es)")
 
-    # get_commit -> CommitDetail
-    commit = await github.get_commit(caller, owner="microsoft", repo="vscode", sha="main", detail="stats")
-    print(f"get_commit: sha={commit.get('sha')!r}  html_url={commit.get('html_url')!r}")
+        # list_commits -> list[CommitSummary]
+        commits = await github_wrappers.list_commits(
+            caller, owner="microsoft", repo="vscode", perPage=3
+        )
+        print(f"list_commits: {len(commits)} commit(s)")
 
-    # get_file_contents -> Any
-    file_contents = await github.get_file_contents(caller, owner="microsoft", repo="vscode", path="README.md")
-    print(f"get_file_contents: {type(file_contents).__name__}")
+        # get_commit -> Commit
+        commit = await github_wrappers.get_commit(
+            caller,
+            owner="microsoft",
+            repo="vscode",
+            sha="84ef3481c697a6bdf3bdb5777c50ba54346a1afe",
+        )
+        print(f"get_commit: sha={commit.get('sha')!r}  url={commit.get('html_url')!r}")
 
-    # get_label -> Label
-    label = await github.get_label(caller, owner="microsoft", repo="vscode", name="bug")
-    print(f"get_label: name={label.get('name')!r}  color={label.get('color')!r}")
+        # --- tags / releases ---------------------------------------------
+        # list_tags -> list[TagSummary]
+        tags = await github_wrappers.list_tags(
+            caller, owner="microsoft", repo="vscode", perPage=3
+        )
+        print(f"list_tags: {len(tags)} tag(s)")
 
-    # get_latest_release -> Release
-    latest_release = await github.get_latest_release(caller, owner="microsoft", repo="vscode")
-    print(f"get_latest_release: tag_name={latest_release.get('tag_name')!r}  name={latest_release.get('name')!r}")
+        # get_tag -> TagRef
+        tag = await github_wrappers.get_tag(
+            caller, owner="microsoft", repo="vscode", tag="v1.19.3"
+        )
+        print(f"get_tag: ref={tag.get('ref')!r}")
 
-    # get_release_by_tag -> Release
-    release_by_tag = await github.get_release_by_tag(caller, owner="microsoft", repo="vscode", tag="1.128.0")
-    print(f"get_release_by_tag: tag_name={release_by_tag.get('tag_name')!r}  published_at={release_by_tag.get('published_at')!r}")
+        # list_releases -> list[ReleaseSummary]
+        releases = await github_wrappers.list_releases(
+            caller, owner="microsoft", repo="vscode", perPage=3
+        )
+        print(f"list_releases: {len(releases)} release(s)")
 
-    # get_tag -> GitTag
-    git_tag = await github.get_tag(caller, owner="microsoft", repo="vscode", tag="1.128.0")
-    print(f"get_tag: ref={git_tag.get('ref')!r}")
+        # get_latest_release -> Release
+        latest = await github_wrappers.get_latest_release(
+            caller, owner="microsoft", repo="vscode"
+        )
+        print(
+            f"get_latest_release: tag_name={latest.get('tag_name')!r}  "
+            f"name={latest.get('name')!r}"
+        )
 
-    # list_releases -> list[ReleaseSummary]
-    releases = await github.list_releases(caller, owner="microsoft", repo="vscode", perPage=5)
-    print(f"list_releases: {len(releases)} item(s)")
+        # get_release_by_tag -> Release
+        release = await github_wrappers.get_release_by_tag(
+            caller, owner="microsoft", repo="vscode", tag="1.135.0"
+        )
+        print(
+            f"get_release_by_tag: tag_name={release.get('tag_name')!r}  "
+            f"draft={release.get('draft')!r}"
+        )
 
-    # list_issues -> list[IssueSummary]
-    issues = await github.list_issues(caller, owner="microsoft", repo="vscode", perPage=3, state="OPEN")
-    print(f"list_issues: {len(issues)} item(s)")
+        # --- issue metadata ----------------------------------------------
+        # list_issue_types -> list[IssueType]
+        issue_types = await github_wrappers.list_issue_types(
+            caller, owner="microsoft", repo="vscode"
+        )
+        print(f"list_issue_types: {len(issue_types)} type(s)")
 
-    # list_pull_requests -> list[PullRequestSummary]
-    prs = await github.list_pull_requests(caller, owner="microsoft", repo="vscode", perPage=3, state="open")
-    print(f"list_pull_requests: {len(prs)} item(s)")
+        # list_issue_fields -> Any  (returned [] on every probe; element shape unknown)
+        issue_fields = await github_wrappers.list_issue_fields(
+            caller, owner="microsoft", repo="vscode"
+        )
+        print(f"list_issue_fields: {type(issue_fields).__name__}")
 
-    # list_repository_collaborators -> Any
-    collabs = await github.list_repository_collaborators(caller, owner="microsoft", repo="vscode", perPage=3)
-    print(f"list_repository_collaborators: {type(collabs).__name__}")
+        # get_label -> Label
+        label = await github_wrappers.get_label(
+            caller, owner="microsoft", repo="vscode", name="bug"
+        )
+        print(f"get_label: name={label.get('name')!r}  color={label.get('color')!r}")
 
-    # list_issue_fields -> Any  (list container)
-    issue_fields = await github.list_issue_fields(caller, owner="microsoft")
-    print(f"list_issue_fields: {type(issue_fields).__name__}")
+        # --- issues -------------------------------------------------------
+        # list_issues -> list[IssueSummary]
+        issues = await github_wrappers.list_issues(
+            caller, owner="microsoft", repo="vscode", state="OPEN", perPage=3
+        )
+        print(f"list_issues: {len(issues)} issue(s)")
 
-    # list_issue_types -> Any
-    issue_types = await github.list_issue_types(caller, owner="microsoft")
-    print(f"list_issue_types: {type(issue_types).__name__}")
+        # issue_read -> Any  (discriminator=method; only the 'get' variant was
+        # probed, so the other methods are not exercised here)
+        issue = await github_wrappers.issue_read(
+            caller,
+            method="get",
+            owner="microsoft",
+            repo="vscode",
+            issue_number=332877,
+        )
+        print(f"issue_read(get): {type(issue).__name__}")
 
-    # issue_read -> Any  (method=get)
-    issue_get = await github.issue_read(
-        caller, method="get", owner="microsoft", repo="vscode", issue_number=250000
-    )
-    print(f"issue_read(get): {type(issue_get).__name__}")
+        # --- pull requests -------------------------------------------------
+        # list_pull_requests -> list[PullRequestSummary]
+        prs = await github_wrappers.list_pull_requests(
+            caller, owner="microsoft", repo="vscode", state="all", perPage=3
+        )
+        print(f"list_pull_requests: {len(prs)} PR(s)")
 
-    # issue_read -> Any  (method=get_comments)
-    issue_comments = await github.issue_read(
-        caller, method="get_comments", owner="microsoft", repo="vscode", issue_number=250000, perPage=3
-    )
-    print(f"issue_read(get_comments): {type(issue_comments).__name__}")
+        # pull_request_read -> Any  (discriminator=method; only the 'get' variant
+        # was probed, so the other methods are not exercised here)
+        pr = await github_wrappers.pull_request_read(
+            caller,
+            method="get",
+            owner="microsoft",
+            repo="vscode",
+            pullNumber=332876,
+        )
+        print(f"pull_request_read(get): {type(pr).__name__}")
 
-    # pull_request_read -> Any  (method=get)
-    pr_get = await github.pull_request_read(
-        caller, method="get", owner="microsoft", repo="vscode", pullNumber=325746
-    )
-    print(f"pull_request_read(get): {type(pr_get).__name__}")
+        # --- file contents --------------------------------------------------
+        # get_file_contents -> Any  (resource/media envelope: the file bytes are
+        # never in the payload, only status + resource metadata)
+        contents = await github_wrappers.get_file_contents(
+            caller, owner="microsoft", repo="vscode", path="README.md"
+        )
+        print(f"get_file_contents: {type(contents).__name__}")
 
-    # pull_request_read -> Any  (method=get_files)
-    pr_files = await github.pull_request_read(
-        caller, method="get_files", owner="microsoft", repo="vscode", pullNumber=325746, perPage=3
-    )
-    print(f"pull_request_read(get_files): {type(pr_files).__name__}")
+        # --- cross-repo search ------------------------------------------------
+        # search_code -> list[SearchCodeItem]
+        code_hits = await github_wrappers.search_code(
+            caller, query="language:python def main", perPage=3
+        )
+        print(f"search_code: {len(code_hits)} hit(s)")
 
-    # search_repositories -> SearchReposResult
-    repos = await github.search_repositories(caller, query="vscode language:typescript stars:>10000", perPage=3)
-    print(f"search_repositories: total_count={repos.get('total_count')}  incomplete_results={repos.get('incomplete_results')}")
+        # search_commits -> list[SearchCommitItem]
+        commit_hits = await github_wrappers.search_commits(
+            caller, query="repo:microsoft/vscode fix", perPage=3
+        )
+        print(f"search_commits: {len(commit_hits)} hit(s)")
 
-    # search_code -> SearchCodeResult
-    code = await github.search_code(caller, query="McpCaller repo:microsoft/vscode", perPage=3)
-    print(f"search_code: total_count={code.get('total_count')}  incomplete_results={code.get('incomplete_results')}")
+        # search_issues -> list[SearchIssueItem]
+        issue_hits = await github_wrappers.search_issues(
+            caller,
+            query="terminal crash",
+            owner="microsoft",
+            repo="vscode",
+            perPage=3,
+        )
+        print(f"search_issues: {len(issue_hits)} hit(s)")
 
-    # search_commits -> SearchCommitsResult
-    search_commits_result = await github.search_commits(caller, query="repo:microsoft/vscode fix bug", perPage=3)
-    print(f"search_commits: total_count={search_commits_result.get('total_count')}  incomplete_results={search_commits_result.get('incomplete_results')}")
+        # search_pull_requests -> list[SearchPullRequestItem]
+        pr_hits = await github_wrappers.search_pull_requests(
+            caller, query="repo:microsoft/vscode is:pr", perPage=3
+        )
+        print(f"search_pull_requests: {len(pr_hits)} hit(s)")
 
-    # search_issues -> SearchIssuesResult
-    issues_search = await github.search_issues(caller, query="repo:microsoft/vscode is:issue label:bug", perPage=3)
-    print(f"search_issues: total_count={issues_search.get('total_count')}  incomplete_results={issues_search.get('incomplete_results')}")
+        # search_users -> list[SearchUserItem]
+        user_hits = await github_wrappers.search_users(
+            caller, query="torvalds", perPage=3
+        )
+        print(f"search_users: {len(user_hits)} hit(s)")
 
-    # search_pull_requests -> SearchPRsResult
-    prs_search = await github.search_pull_requests(caller, query="repo:microsoft/vscode is:pr is:open", perPage=3)
-    print(f"search_pull_requests: total_count={prs_search.get('total_count')}  incomplete_results={prs_search.get('incomplete_results')}")
-
-    # search_users -> SearchUsersResult
-    users = await github.search_users(caller, query="torvalds", perPage=3)
-    print(f"search_users: total_count={users.get('total_count')}  incomplete_results={users.get('incomplete_results')}")
+        # --- secret scanning (read-only: scans the supplied text, writes nothing)
+        # run_secret_scanning -> SecretScanResult
+        scan = await github_wrappers.run_secret_scanning(
+            caller,
+            owner="microsoft",
+            repo="vscode",
+            files=(
+                "AKIAIOSFODNN7EXAMPLE\n"
+                "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+            ),
+        )
+        print(
+            f"run_secret_scanning: blobsScanned={scan.get('blobsScanned')!r}  "
+            f"secrets={len(scan.get('secrets') or [])}"
+        )
 
 
 if __name__ == "__main__":

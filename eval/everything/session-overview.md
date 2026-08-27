@@ -1,48 +1,54 @@
-# everything — Session Overview
+# everything — session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T15:42:09Z
-- **Duration:** 1m 1s
+- **Executed:** 2026-08-27T05:57:28Z
+- **Duration:** 3m 35s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## What happened
+## Coverage
 
-The `everything` reference server exposes 13 tools. `mcpgen list --schema` classified
-3 as mutating by `annotations.readOnlyHint: false` (`gzip-file-as-resource`,
-`toggle-simulated-logging`, `toggle-subscriber-updates`) and 10 as read-only. No
-discriminator-candidate advisory was raised across the tool set — none of the shared
-params (`resourceType`, `outputType`, etc.) recur across enough tools to qualify.
+The server exposes **13 tools**. All 13 carry full `annotations`, so tool selection took
+the primary path and never reached the keyword heuristic. Nine tools declared
+`readOnlyHint: true` with agreeing `destructiveHint`/`idempotentHint` and no name
+contradiction, and all nine were probed. Four declared `readOnlyHint: false` and were
+skipped without a call.
 
-This run reused a previously probed, already-scrubbed `everything.shapes.json` sidecar
-(all 13 entries carry `"source": "live"` and clean `probed_args`, with no PII present)
-rather than re-issuing live probe calls, then regenerated the module from it and
-re-verified end to end.
+## mutating-skipped
 
-Only one tool produced a genuinely typeable shape: **`get-structured-content`**, which
-returns a flat dict (`temperature: int`, `conditions: str`, `humidity: int`) for a
-`location` enum probe of `"New York"`. It was shaped as `WeatherConditions` with
-`unwrap: []` (no envelope) and `return_container` omitted (single record, not a list).
+- `gzip-file-as-resource` — `readOnlyHint: false`; writes a compressed artifact.
+- `toggle-simulated-logging` — `readOnlyHint: false`, `idempotentHint: false`; flips server state.
+- `toggle-subscriber-updates` — `readOnlyHint: false`, `idempotentHint: false`; flips server state.
+- `simulate-research-query` — `readOnlyHint: false`; starts a long task and can request input.
 
-The remaining 12 tools stayed `-> Any`, each for a distinct, well-documented reason
-captured in the shape-spec's `_note` fields:
-- `get-env` — returns a live-machine env-var dict whose keys aren't stable across
-  environments; typing it would overfit to one probe.
-- `get-resource-links`, `get-resource-reference`, `get-tiny-image`,
-  `gzip-file-as-resource` — return MCP resource-link / embedded-resource / image
-  content blocks; `McpCaller` only surfaces the accompanying text summary, so the
-  structured payload (uri, mimeType, blob/text, base64 image data) is invisible to a
-  text-only probe.
-- `echo`, `get-annotated-message`, `get-sum`, `simulate-research-query`,
-  `trigger-long-running-operation` — return plain prose/scalar text with no stable
-  structured shape to model.
-- `toggle-simulated-logging`, `toggle-subscriber-updates` — mutating toggles with
-  trivial ack responses; not worth a `TypedDict`.
+**discriminators: N/A.** No parameter name is shared by two or more tools, so no candidate
+could clear step 2.e's precondition, and `list --schema` emitted no advisory. Enum params
+exist (`messageType`, `location`, `resourceType`) but each sits on a single tool; all three
+were multi-probed across their full enum anyway, and the shapes deep-merged without conflict.
 
-The regenerated `everything.py` (10,071 bytes) parses cleanly under `ast.parse`. All
-five `eval-kit verify` checks passed: `ast`, `signatures` (the shaped tool's signature
-reads `-> WeatherConditions`, not `Any`), `idempotency` (deterministic `render_module()`
-against stub schemas), `pii` (no PII detected in `probed_args`), and `roundtrip` (a
-live call to `get-structured-content` returned a typed, well-formed result).
+## Surprises
 
-No inconclusive/quota-error entries were needed — every probed tool returned a normal
-success payload.
+`_observed_shape` under-describes heterogeneous lists. `get-resource-links` recorded
+`["str", "...x4"]`, but the raw capture is a prose string followed by three
+`resource_link` dicts — the renderer shows element 0 only. `get-resource-reference` is
+the same pattern: prose, a resource metadata dict, prose. Both were recorded with a
+`_note` rather than a fabricated model.
+
+`get-annotated-message` at `messageType: "error"` returns the literal text
+`Error: Operation failed`. That is the demo's payload, not a probe failure — `"success"`
+and `"debug"` returned prose too, so nothing was marked inconclusive.
+
+## Shape decisions
+
+- **`get-structured-content` → `WeatherReading`** (the only shaped tool). Record arrives
+  top-level, so `unwrap` stays `[]`; `{temperature: int, conditions: str, humidity: int}`
+  was identical across all three cities. Input renders as `Literal[...]` from the enum.
+- **`get-env` → `Any`.** Returns a `dict[str, str]` of 33 environment variables belonging
+  to this machine's `npx` launch. The key set is machine-specific, so a `TypedDict` would
+  be an authoritative lie; `fields` was cleared.
+- **`echo`, `get-sum`, `trigger-long-running-operation`, `get-annotated-message` → `Any`.**
+  Prose payloads; the JSON-in-string test returned `NOT_JSON` for each.
+- **`get-tiny-image` → `Any`** per the media rule — image blocks surface as envelopes.
+- **`get-resource-links`, `get-resource-reference` → `Any`** — no uniform element type.
+
+The regenerated module parses cleanly (`ast.parse`, 10062 bytes) and
+`get_structured_content` reads `-> WeatherReading`.

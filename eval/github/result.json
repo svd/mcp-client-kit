@@ -11,7 +11,7 @@
   },
   "check_details": {
     "ast": "",
-    "signatures": "probe_inconclusive: 3 tool(s) returned quota/auth errors \u2014 shapes unknown: get_team_members, list_issue_types, list_repository_collaborators",
+    "signatures": "probe_inconclusive: 2 tool(s) had no observable success payload \u2014 shapes unknown: get_team_members, list_repository_collaborators",
     "idempotency": "offline determinism check (real tool schemas from github.mcpgen.json)",
     "pii": "",
     "roundtrip": "live call to 'get_commit' returned typed result"
@@ -23,8 +23,8 @@
   ],
   "verdict": "partial",
   "versions": {
-    "engine": "0.8.0.dev1",
-    "skill_ref": "v0.0.4-63-gec447d2-dirty",
+    "engine": "0.9.0.dev1",
+    "skill_ref": "v0.0.4-156-gfd9eda8",
     "skill_path": "~/src/mcp-client-kit"
   }
 }

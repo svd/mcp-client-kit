@@ -1,80 +1,68 @@
-# Session Overview: sqlite MCP Server
+# sqlite — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T15:42:10Z
-- **Duration:** 2m 59s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T05:57:28Z
+- **Duration:** 2m 26s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Environment Issue Found and Fixed
+## Setup
 
-The server would not launch with the manifest's original command
-(`uvx mcp-server-sqlite --db-path /tmp/eval.db`): `mcp-server-sqlite` 2025.4.25 declares
-`mcp[cli]>=1.6.0` with no upper bound, so an unpinned `uvx` resolves `mcp` 2.1.0 — whose
-`Server` API dropped `list_resources()` as a decorator. The server crashed on startup with
-`AttributeError: 'Server' object has no attribute 'list_resources'` on every invocation
-(`list`, `probe`, and `eval-kit verify`'s roundtrip check all failed identically).
-Confirmed the fix by hand: `uvx --with mcp<2 mcp-server-sqlite --db-path /tmp/eval.db`
-starts and completes the MCP handshake cleanly. Updated `servers/servers.toml`'s `sqlite`
-launch command to add the `--with mcp<2` pin and regenerated `.mcp.eval.json` via
-`eval-kit gen-config` before proceeding — otherwise no artifact in this run would have
-been possible.
+Resolved CLI: `uv run mcpgen` (0.9.0.dev1) — clears both the 0.3.0 floor and the 0.7.0
+runner floor. Transport: stdio via `MCPGEN_SERVERS=.mcp.eval.json`. No seed commands were
+configured; the `/tmp/eval.db` store already held two tables (`users`, `products`, one row
+each) left by an earlier run, so probing found real data without any mutating call.
+A stale `sqlite.shapes.json` from that earlier run was deleted before step 1 so the stubs
+were generated blind, as a fresh run requires.
 
-## Server Overview
+## Tool selection
 
-The `sqlite` MCP server exposes 6 tools for interacting with a local SQLite database file
-(`/tmp/eval.db`), no authentication required. The database was empty at the start of this
-run (a prior eval's persisted file was not reused), so two tables (`users`, `products`)
-with one row each were seeded via `mcpgen call` on `create_table`/`write_query` — a
-one-time bootstrap, not part of the probed/shaped tool set.
+The server exposes **6 tools**, none carrying `annotations` — so the keyword + semantic
+fallback decided every verdict.
 
-## Tools Enumerated
+- Probed (3): `read_query`, `list_tables`, `describe_table`
+- Skipped (3): see `## mutating-skipped`
 
-| Tool | Description | Action |
-|---|---|---|
-| `read_query` | Execute a SELECT query | Probed |
-| `list_tables` | List all tables | Probed |
-| `describe_table` | Get schema info for a table | Probed |
-| `write_query` | Execute INSERT/UPDATE/DELETE | Skipped (mutating) |
-| `create_table` | Create a new table | Skipped (mutating) — used only for bootstrap seeding |
-| `append_insight` | Add a business insight to memo | Skipped (mutating) |
+`discriminators: N/A`. The only cross-tool shared parameter is `query`
+(`read_query`/`write_query`/`create_table`), which is on the engine's own denylist, so no
+candidate could clear the precondition and no advisory fired. Step 2.e Pass 2 was skipped.
 
-3 tools were probed; 3 were skipped as mutating (no `readOnlyHint` annotations were
-present, so the keyword + semantic heuristic applied). `write_query`/`create_table` match
-the literal mutating-keyword heuristic; `append_insight` was skipped on semantic grounds
-(it writes to a server-side memo even though "add" isn't in the literal keyword list). No
-discriminator candidates were flagged by `mcpgen list --schema`.
+## mutating-skipped
 
-## Probe Results and Shape Decisions
+- `write_query` — name contains `write`; no readOnlyHint
+- `create_table` — name contains `create`; no readOnlyHint
+- `append_insight` — name contains `append`; no readOnlyHint
 
-**`list_tables`** — called with no args, returned exactly 2 `{"name": str}` records.
-Modeled as `TableName` TypedDict, `return_container: "list"`, no unwrap needed.
+## Observations
 
-**`describe_table`** — probed against both `users` and `products`; both returned SQLite's
-standard `PRAGMA table_info(...)` shape: `cid`/`notnull`/`pk` (int), `name`/`type` (str),
-`dflt_value` (`Any | None`, genuinely nullable — columns without defaults return `None`).
-Modeled as `ColumnInfo` TypedDict, `return_container: "list"`. Table names are functional
-values, not PII.
+Every response is a bare JSON array at the top level — no vendor envelope anywhere on this
+server, so `unwrap` is empty for all three tools and no `_dig_list` helper is emitted. That
+is the honest result, not a missed unwrap.
 
-**`read_query`** — probed with two different SELECTs against `users` and `products`. The
-merged observed shape unioned unrelated column sets (`id`/`name`/`email`/`active`/`score`
-vs. `id`/`name`/`title`/`price`/`stock`/`discontinued`), because this tool executes
-arbitrary caller-supplied SQL — its output shape is a function of the query, not a fixed
-contract. A `TypedDict` from two sample queries would misrepresent all other queries.
-Decision: `return_model: null`, `return_container: "list"`, return type stays `-> Any`.
+`describe_table` was multi-probed against both tables. Its rows are `PRAGMA table_info`
+output: `cid`, `name`, `type`, `notnull`, `dflt_value`, `pk`. `dflt_value` came back null in
+all ten observed columns, so it merged to `Any | None` — the type is genuinely unobserved,
+and widening it to `str | None` from zero non-null samples would have been a guess.
+`notnull` and `pk` are SQLite integers, not booleans, and are typed as such.
 
-## Interesting Observations
+## Shape decisions
 
-- No envelope wrapping was observed anywhere; all three probed tools return bare lists,
-  so `unwrap: []` is correct throughout, and codegen uses direct list typing rather than
-  `_dig_list`.
-- `probed_args` contains only table names and literal SQL query strings — no real ids,
-  emails, or names — so no scrubbing was required beyond leaving it as-is.
+- **`list_tables`** → `list[TableName]`, unwrap `[]`, fields `{name: str}`. Trivial and
+  stable; the array is the record.
+- **`describe_table`** → `list[ColumnInfo]`, unwrap `[]`, six fields as above. Distinct
+  name from `TableName` despite both carrying `name`, since the field sets differ.
+- **`read_query`** → deliberately left `-> Any`. Its row keys are the caller's own `SELECT`
+  projection, not a server-fixed record: the probe observed
+  `{id, name, email, active, score}` only because the query was `SELECT * FROM users`. Any
+  `TypedDict` minted from that would misdescribe every other query. The observed shape is
+  kept in the spec under `_observed_shape` with a `_shape_note` recording why it was not
+  promoted to a model.
 
-## Final Verification
+`probed_args` hold table names and a standard SQL statement — functional values, no PII, so
+nothing was scrubbed.
 
-The regenerated module (`sqlite.py`, 3194 bytes) parsed cleanly. Signatures:
-`describe_table -> list[ColumnInfo]`, `list_tables -> list[TableName]`, `read_query ->
-Any` (intentional), and the three mutating tools stay `-> Any`. `eval-kit verify sqlite`
-reported verdict **pass**: `ast`, `signatures`, `idempotency`, `pii`, and `roundtrip` all
-passed — the roundtrip check made a live call to `describe_table` and got back a typed
-result, confirmed only once the `mcp<2` launch pin was in place.
+## Verification
+
+Regeneration succeeded; `ast.parse` clean. `describe_table` reads
+`-> list[ColumnInfo]` and `list_tables` reads `-> list[TableName]`; the three mutating
+tools remain untouched `-> Any` stubs. `sqlite.verify.json` carries args for
+`describe_table` and `read_query` (`list_tables` takes none, so merge omits it).

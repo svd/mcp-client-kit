@@ -1,13 +1,20 @@
 {
   "directory_tree": {
     "unwrap": [],
-    "return_model": null,
+    "return_model": "DirectoryNode",
     "input_overrides": {},
-    "fields": {},
+    "fields": {
+      "name": "str",
+      "type": "str",
+      "children": "list"
+    },
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp/claude-501"
-    }
+      "path": "/private/tmp/_base"
+    },
+    "_observed_bytes": 618,
+    "return_container": "list",
+    "_json_unwrap": true
   },
   "get_file_info": {
     "unwrap": [],
@@ -16,8 +23,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp/rem.py"
-    }
+      "path": "/private/tmp/m.txt"
+    },
+    "_observed_bytes": 266
   },
   "list_allowed_directories": {
     "unwrap": [],
@@ -25,7 +33,8 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": {}
+    "probed_args": {},
+    "_observed_bytes": 36
   },
   "list_directory": {
     "unwrap": [],
@@ -35,7 +44,8 @@
     "source": "live",
     "probed_args": {
       "path": "/private/tmp"
-    }
+    },
+    "_observed_bytes": 13742
   },
   "list_directory_with_sizes": {
     "unwrap": [],
@@ -44,8 +54,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp"
-    }
+      "path": "/private/tmp",
+      "sortBy": "name"
+    },
+    "_observed_bytes": 22585
   },
   "read_file": {
     "unwrap": [],
@@ -54,23 +66,9 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "path": "/private/tmp/rem.py"
-    }
-  },
-  "read_media_file": {
-    "unwrap": [],
-    "return_model": "MediaFile",
-    "input_overrides": {},
-    "fields": {
-      "type": "str",
-      "mimeType": "str",
-      "has_data": "bool"
+      "path": "/private/tmp/m.txt"
     },
-    "source": "live",
-    "probed_args": {
-      "path": "<example-dir>/img.png"
-    },
-    "probe_args_scrubbed": true
+    "_observed_bytes": 331
   },
   "read_multiple_files": {
     "unwrap": [],
@@ -80,10 +78,11 @@
     "source": "live",
     "probed_args": {
       "paths": [
-        "/private/tmp/rem.py",
-        "/private/tmp/serve.out"
+        "/private/tmp/m.txt",
+        "/private/tmp/e.txt"
       ]
-    }
+    },
+    "_observed_bytes": 713
   },
   "read_text_file": {
     "unwrap": [],
@@ -91,19 +90,10 @@
     "input_overrides": {},
     "fields": {},
     "source": "live",
-    "probed_args": [
-      {
-        "path": "/private/tmp/rem.py"
-      },
-      {
-        "path": "/private/tmp/rem.py",
-        "head": 3
-      },
-      {
-        "path": "/private/tmp/rem.py",
-        "tail": 3
-      }
-    ]
+    "probed_args": {
+      "path": "/private/tmp/m.txt"
+    },
+    "_observed_bytes": 331
   },
   "search_files": {
     "unwrap": [],
@@ -113,7 +103,8 @@
     "source": "live",
     "probed_args": {
       "path": "/private/tmp",
-      "pattern": "*.py"
-    }
+      "pattern": "m.txt"
+    },
+    "_observed_bytes": 20
   }
 }

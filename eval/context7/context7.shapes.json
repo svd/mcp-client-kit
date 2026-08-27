@@ -6,9 +6,11 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "libraryId": "/reactjs/react.dev",
-      "query": "React useEffect cleanup function examples"
-    }
+      "libraryId": "/vercel/next.js",
+      "query": "How to configure middleware in Next.js"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 5396
   },
   "resolve-library-id": {
     "unwrap": [],
@@ -17,8 +19,10 @@
     "fields": {},
     "source": "live",
     "probed_args": {
-      "query": "how to use hooks",
-      "libraryName": "React"
-    }
+      "libraryName": "Next.js",
+      "query": "How to configure middleware"
+    },
+    "_observed_shape": "str",
+    "_observed_bytes": 2097
   }
 }

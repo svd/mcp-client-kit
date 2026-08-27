@@ -1,29 +1,67 @@
-# Session Overview — time
+# time — generate-mcp-wrappers session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T15:42:16Z
-- **Duration:** 1m 16s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T05:57:29Z
+- **Duration:** 2m 56s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Server surface
+## Setup
 
-The `time` MCP server (`uvx mcp-server-time`, stdio, no auth) exposes exactly **2 tools**, both flagged `readOnlyHint: true` in their annotations — `get_current_time` and `convert_time`. No mutating tools were present, so no tools were skipped for safety reasons. `mcpgen list --schema` reported no discriminator candidates: neither tool shares a parameter whose value would plausibly switch response shape, so no polymorphic-suspect resolution was needed.
+Resolved CLI: `uv run mcpgen` (0.9.0.dev1) — a bare `mcpgen` is absent in this
+uv-managed project. Every command carried `MCPGEN_SERVERS=.mcp.eval.json`. The folder already held
+artifacts from an earlier run, and `codegen` auto-detects a sidecar beside its `--out`;
+leaving them would have pre-shaped the module before the first probe. It was cleared and
+stubs regenerated from a live `tools/list`, `return_model: null` throughout.
 
-Since this repo runs as a non-interactive workflow subagent, the `AskUserQuestion` gate was skipped per the skill's subagent fallback: both read-only tools were selected automatically ("probe all non-mutating tools").
+## Tools
 
-## Probing and observed shapes
+The server exposes **2 tools**, and **both were probed** — nothing skipped, no seeds.
 
-`get_current_time` was probed twice — `America/New_York` and `Asia/Tokyo` — to confirm the shape is stable across timezones rather than typed from a single sample. Both calls returned a flat 4-key record: `timezone`, `datetime`, `day_of_week` (all `str`), and `is_dst` (`bool`). Nothing surprising — no vendor envelope, no nulls, no empty containers.
+```
+Tools on time:
+  get_current_time — Get current time in a specific timezone
+  convert_time     — Convert time between timezones
+```
 
-`convert_time` was probed once with `source_timezone=America/New_York`, `time=14:30`, `target_timezone=Asia/Tokyo`. The response nests two sub-records, `source` and `target`, each mirroring `get_current_time`'s own shape, plus a top-level `time_difference: str`. Per the skill's depth-limiting guidance ("don't model depth from one probe"), only the top-level scalar (`time_difference`) was promoted into the `TypedDict`; the `source`/`target` sub-objects are left untyped rather than minting a second nested model from a single sample — they're still present at runtime, just not statically typed.
+Both carry `annotations.readOnlyHint: true` alongside `destructiveHint: false` and
+`idempotentHint: true`, so the annotations do not contradict themselves. Neither name
+matches the mutating keyword test (`convert` is not a mutating verb), so the hint is
+undisputed on both and the keyword fallback never ran.
+
+**Discriminators: N/A.** The `list --schema` advisory on stderr was empty, and the
+precondition confirms why: the two tools share no parameter name at all
+(`timezone` vs. `source_timezone` / `time` / `target_timezone`), so no candidate can
+exist. Pass 2 was skipped outright.
+
+## Probing
+
+`get_current_time` was multi-probed with `UTC` and `America/New_York` — one non-DST and
+one DST zone — to test whether `is_dst` widens or fields drop out. It did not: both
+returned the identical four-key shape, which is the useful negative result. `convert_time`
+took a single probe (`UTC` → `Asia/Tokyo` at `14:30`).
+
+No surprises: no vendor envelope, no double-encoded JSON string, no empty lists, no
+errors. Responses were 116 and 267 bytes — this server returns records, not prose. All
+`probed_args` are IANA timezone names and a wall-clock string; none matches a PII
+pattern, so the scrub pass changed nothing.
 
 ## Shape decisions
 
-- **`get_current_time`** → `unwrap: []` (no envelope to strip), `return_model: "CurrentTime"`, no `return_container` (single record).
-- **`convert_time`** → `unwrap: []`, `return_model: "TimeConversion"`, fields limited to `time_difference: str`.
-
-No `input_overrides` were needed — the schema's declared types (`string` for all params) matched what the server actually validated. No PII was present in `probed_args` (timezone names and a wall-clock time string are functional values per the skill's scrub guidance, not identifiers), so no scrubbing was required beyond dropping the `_observed_shape`/`_observed_bytes` scratch keys after extracting the real shape.
+- **`get_current_time` → `CurrentTime`, `unwrap: []`.** The record is the top-level
+  object; there is nothing to strip. Fields are four observed top-level scalars —
+  `timezone`, `datetime`, `day_of_week` (`str`), `is_dst` (`bool`). Nothing observed as
+  `None` across the two probes, so no field is nullable.
+- **`convert_time` → `TimeConversion`, `unwrap: []`.** Tempting to unwrap to `source` or
+  `target`, but both are half the answer and `time_difference` sits beside them — digging
+  either would discard data the caller asked for. `unwrap` stays empty. `time_difference`
+  is the one top-level scalar; `source` and `target` are typed `dict` rather than modelled,
+  per the guard that deeper nests stay `dict`. Their inner shape matches
+  `CurrentTime`, but the shape-spec cannot name an inner model.
+- Names are distinct and the `fields` dicts differ, so no `return_model` collision.
+- Neither tool is a mutating suspect, so no `_mutating_suspect` markers were added.
 
 ## Verification
 
-`eval-kit verify time` ran all five checks clean: `ast` (parses), `signatures` (both wrappers return their named `TypedDict`, not `Any`), `idempotency` (deterministic `render_module()`), `pii` (no leaked identifiers in the committed shapes file), and `roundtrip` (a live call to `convert_time` returned a typed result matching the shape spec). Final verdict: **pass**.
+Regenerated with the sidecar in place; `ast.parse` succeeded. `convert_time` now reads
+`-> TimeConversion` and `get_current_time` `-> CurrentTime`, both `TypedDict` bodies
+emitted with `total=False`. No `Any` returns remain.

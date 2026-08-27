@@ -23,6 +23,10 @@ async def main() -> None:
     # subprocess, instead of reconnecting for every tool call.
     async with caller.connected():
         # Skipped mutating tools: create_directory, edit_file, move_file, write_file
+        # Skipped read-only tool without probed args: read_media_file (needs a real
+        # image/audio file inside the allowed root; none was probed).
+        # All args below come from filesystem.verify.json (real, pre-scrub probe args).
+        # No tool in this server has a discriminated return shape, so one call each.
 
         # list_allowed_directories -> Any
         allowed = await filesystem.list_allowed_directories(caller)
@@ -33,50 +37,45 @@ async def main() -> None:
         print(f"list_directory: {type(listing).__name__}")
 
         # list_directory_with_sizes -> Any
-        listing_sized = await filesystem.list_directory_with_sizes(caller, path="/private/tmp")
-        print(f"list_directory_with_sizes: {type(listing_sized).__name__}")
+        sized = await filesystem.list_directory_with_sizes(
+            caller, path="/private/tmp", sortBy="name"
+        )
+        print(f"list_directory_with_sizes: {type(sized).__name__}")
 
-        # directory_tree -> Any
-        tree = await filesystem.directory_tree(caller, path="/private/tmp/claude-501")
-        print(f"directory_tree: {type(tree).__name__}")
+        # directory_tree -> list[DirectoryNode]
+        tree = await filesystem.directory_tree(caller, path="/private/tmp/_base")
+        print(f"directory_tree: {len(tree)} node(s)")
+        if tree:
+            root = tree[0]
+            children = root.get("children") or []
+            print(
+                f"directory_tree[0]: name={root.get('name')!r} "
+                f"type={root.get('type')!r} children={len(children)}"
+            )
 
         # search_files -> Any
-        found = await filesystem.search_files(caller, path="/private/tmp", pattern="*.py")
-        print(f"search_files: {type(found).__name__}")
+        matches = await filesystem.search_files(
+            caller, path="/private/tmp", pattern="m.txt"
+        )
+        print(f"search_files: {type(matches).__name__}")
 
         # get_file_info -> Any
-        info = await filesystem.get_file_info(caller, path="/private/tmp/rem.py")
+        info = await filesystem.get_file_info(caller, path="/private/tmp/m.txt")
         print(f"get_file_info: {type(info).__name__}")
 
-        # read_text_file -> Any  (probed variants: plain, head, tail)
-        text_full = await filesystem.read_text_file(caller, path="/private/tmp/rem.py")
-        print(f"read_text_file(full): {type(text_full).__name__}")
+        # read_text_file -> Any
+        text = await filesystem.read_text_file(caller, path="/private/tmp/m.txt")
+        print(f"read_text_file: {type(text).__name__}")
 
-        text_head = await filesystem.read_text_file(caller, path="/private/tmp/rem.py", head=3)
-        print(f"read_text_file(head=3): {type(text_head).__name__}")
-
-        text_tail = await filesystem.read_text_file(caller, path="/private/tmp/rem.py", tail=3)
-        print(f"read_text_file(tail=3): {type(text_tail).__name__}")
-
-        # read_file -> Any  (deprecated by the server in favor of read_text_file)
-        legacy_text = await filesystem.read_file(caller, path="/private/tmp/rem.py")
-        print(f"read_file: {type(legacy_text).__name__}")
+        # read_file -> Any
+        raw = await filesystem.read_file(caller, path="/private/tmp/m.txt")
+        print(f"read_file: {type(raw).__name__}")
 
         # read_multiple_files -> Any
         multi = await filesystem.read_multiple_files(
-            caller, paths=["/private/tmp/rem.py", "/private/tmp/serve.out"]
+            caller, paths=["/private/tmp/m.txt", "/private/tmp/e.txt"]
         )
         print(f"read_multiple_files: {type(multi).__name__}")
-
-        # read_media_file -> MediaFile
-        # NOTE: probed_args for this tool were PII-scrubbed in shapes.json
-        # (probe_args_scrubbed=true); verify.json supplies the real path used
-        # during probing, so it is used here instead of the scrubbed placeholder.
-        media = await filesystem.read_media_file(
-            caller,
-            path="/private/tmp/claude-501/-Users-Sviataslau-Svirydau-Library-CloudStorage-OneDrive-EPAM-Projects-PPG-KB/d7e60a78-fbb4-480d-8a80-89042e713385/scratchpad/img004.png",
-        )
-        print(f"read_media_file: type={media.get('type')!r} mimeType={media.get('mimeType')!r} has_data={media.get('has_data')!r}")
 
 
 if __name__ == "__main__":

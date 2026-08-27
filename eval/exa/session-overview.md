@@ -1,59 +1,61 @@
-# exa — generate-mcp-wrappers session overview
+# exa — session overview
 
 ## Run Metadata
 
-- **Executed:** 2026-08-25T19:32:27Z
-- **Duration:** 1m 29s (wall-clock around the generate-mcp-wrappers skill run, including subagent steps)
+- **Executed:** 2026-08-27T06:02:10Z
+- **Duration:** 2m 48s (`T1 - T0`: agent wall time up to this write — the single authoritative duration)
 
-## Surface
+## Tool inventory
 
-`mcpgen list exa --schema` reported exactly **2 tools**: `web_search_exa` and
-`web_fetch_exa`. Both carry explicit `annotations.readOnlyHint: true`
-(`destructiveHint: false`, `idempotentHint: true`), so the step-2 mutation triage was
-decided by the primary signal alone — no keyword heuristic needed, nothing flagged
-`[MUTATING]`. With only two read-only tools and no `AskUserQuestion` available, the
-subagent fallback applied: probe all. **2 probed, 0 skipped.**
+`mcpgen list exa --schema` returned **2 tools**, both probed, none skipped:
 
-No discriminator advisory was emitted. The two tools share no parameters at all
-(`query`/`numResults` vs. `urls`/`maxCharacters`), so there were no
-polymorphic-suspect siblings to resolve.
+```
+Tools on exa:
+  web_search_exa  — Search the web for any topic and get clean, ready-to-use content
+  web_fetch_exa   — Read a webpage's full content as clean markdown
+```
 
-## Surprises
+Both carry `annotations.readOnlyHint: true` alongside `destructiveHint: false` and
+`idempotentHint: true` — the hint contradicts neither itself nor the name, since neither
+name passes the keyword test (`web`, `search`, `fetch`, `exa` are all reads). The hints stand
+untouched, so there is no `## mutating-skipped` section: nothing was skipped.
 
-The interesting finding is that Exa's public MCP endpoint is **not** the deeply nested,
-schema-lied JSON the manifest note anticipated. Both tools returned a **plain markdown
-document** as the sole text content part — `_observed_shape: "str"` for both
-(14,662 bytes for the search, 374 bytes for the fetch).
+**discriminators: N/A.** No parameter name is shared by both tools — `query`/`numResults`
+belong to search, `urls`/`maxCharacters` to fetch — so the step-2.e precondition (two or
+more tools declaring the same scalar param) is never met and the advisory could not fire.
 
-I ran the JSON-in-string check the skill mandates for `str` shapes: captured the raw
-payloads with `mcpgen call … --out *.probe-raw.json` and attempted `json.loads()`.
-Both failed at char 0 — the search payload starts `Title: … / URL: … / Published: … /
-Highlights:` and the fetch payload starts `# Example Domain`. This is human-prose
-markdown, not a serialized envelope, so `_json_unwrap` does **not** apply and
-`_observed_shape: "str"` stands as the honest answer.
+## Probe results and the surprise
 
-Neither payload was a quota or auth error — both are genuine success responses with
-real content — so no `_probe_status: "inconclusive"` marker was added. The raw dumps
-were deleted after inspection.
+Both probes were paced ≥2 s apart against the hosted endpoint. Both succeeded, and both
+observed `_observed_shape: "str"` — 25,084 bytes for `web_search_exa` (3 results), 1,601
+bytes for `web_fetch_exa`.
+
+Per the JSON-in-string rule I captured both raw payloads with `mcpgen call --out` and ran
+the guarded `json.loads` test. Both returned **`NOT_JSON`**: the payloads are genuine
+prose. `web_search_exa` emits a human-readable digest — `Title:` / `URL:` / `Published:` /
+`Author:` / `Highlights:` blocks separated by `...`, with markdown bodies inline.
+`web_fetch_exa` emits the page as plain markdown under an `# <slug>` heading. Reading the
+content confirmed these are successful results, not error text — so neither entry gets
+`_probe_status: "inconclusive"`, which would have misreported a working server as
+unobservable.
 
 ## Shape decisions
 
-| Tool | unwrap | return_model | Why |
-|---|---|---|---|
-| `web_search_exa` | `[]` | `null` | Response is a flat markdown string; there is no record to dig for and no scalar fields to promote. A `TypedDict` here would be a fabricated shape. |
-| `web_fetch_exa` | `[]` | `null` | Same — clean-markdown page text, no envelope. |
+Neither tool is shapeable, and that is the honest answer rather than a coverage gap:
 
-The only shape-spec edit that earned its place was `input_overrides`: JSON Schema
-declares `numResults` and `maxCharacters` as `number` (→ `float`), but both are
-counts. Overriding each to `int` makes the regenerated signatures read
-`numResults: int | None = None` and `maxCharacters: int | None = None` instead of
-`float`.
+- **`web_search_exa`** — `unwrap: []`, `return_model: null`. There is no vendor envelope
+  and no record; the wrapper's `-> Any` correctly describes a returned `str`. Setting a
+  `TypedDict` here would claim a dict the tool never returns.
+- **`web_fetch_exa`** — identical reasoning, identical outcome.
 
-`probed_args` needed no scrubbing — a generic search phrase and `https://example.com`,
-neither PII nor identifying.
+The one judgment applied is `input_overrides`. JSON Schema types `numResults` and
+`maxCharacters` as `number`, which codegen renders `float`, but both are counts
+(`maxCharacters` even declares `minimum: 1`) and both were accepted as ints live. Both are
+overridden to `int`, so the regenerated signatures read `numResults: int | None` and
+`maxCharacters: int | None`.
 
-## Verification
+Nothing in `probed_args` matched a PII pattern — a public docs URL, a generic query, two
+integers — so the scrub pass changed nothing.
 
-The regenerated module parses cleanly (`ast.parse` OK, 3,306 bytes). Both wrappers
-correctly return `-> Any`, which is the accurate type for a text-only server: shaping
-them would be an authoritative lie about a payload that has no structure.
+The regenerated module **parsed cleanly** (`ast.parse` OK). Runner generation was left to
+the harness verify stage, per the eval contract.
