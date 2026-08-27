@@ -9,9 +9,8 @@ description: Use when generating typed Python wrappers for an MCP server. Drives
 per tool against the `McpCaller` seam. It returns `Any` and is blind to vendor
 response envelopes. **This skill is the 20% judgment that an LLM must do:** probe a
 real call, read the actual response, and record what the input schema couldn't tell
-you — into a **shape-spec sidecar** (`<server>.shapes.json`, data not code). Codegen
-re-consumes that file to emit unwrap helpers + `TypedDict` return models. The split
-keeps generation pure and re-runnable (and sets up `--check` drift later).
+you — into a **shape-spec sidecar** (`<server>.shapes.json`, data not code) that
+codegen re-consumes to emit unwrap helpers + `TypedDict` return models.
 
 ## Execution model (when to dispatch subagents)
 
@@ -1017,8 +1016,8 @@ For dispatch mechanics see `superpowers:dispatching-parallel-agents`.
   cost + zero dependency is the point; generated wrappers stay importable anywhere
   (the seam principle).
 - **Don't model depth from one probe.** Promote only the top 1–2 levels of stable
-  scalars. Deep/variadic nests (`proposals.candidate.seniority.level`) stay `dict` /
-  `Any`. Over-modelling = authoritative lies about a shape you saw once.
+  scalars; deeper/variadic nests stay `dict` / `Any`. Over-modelling states
+  authoritative lies about a shape you saw once.
 - **Scrub `probed_args` before committing.** The post-merge scrub at step 4 is the single
   scrub point — placeholder any real ids/names/PII directly in `<shapes-path>`. Parts
   (`.parts/` dirs) and `<shapes-stem>.verify.json` are gitignored raw counterparts; the only
