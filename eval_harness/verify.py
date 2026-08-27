@@ -57,6 +57,7 @@ _RE_UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
 )
 _RE_HOME_PATH = re.compile(r"/(?:Users|home)/[^/\s]+")
+_RE_PUBLIC_ID = re.compile(r"\b(?:pmid|pmc|doi|arxiv|isbn|orcid):\S+", re.IGNORECASE)
 
 # Mutating verbs — tool names containing any of these are considered mutating
 _MUTATING_VERBS = {
@@ -280,11 +281,16 @@ def _is_placeholder_uuid(value: str) -> bool:
 def _find_pii(value: str) -> str | None:
     """Return the first PII-like substring in value, or None if it holds none.
 
-    Placeholder UUIDs are blanked out before the scan: their digit runs would
-    otherwise trip the long-number pattern even though the UUID pattern excuses them.
+    Two kinds of value are blanked out before the scan, because the remaining
+    patterns would trip over digit runs that carry no personal data. Placeholder
+    UUIDs are scrub output, excused by the UUID pattern itself. Prefixed public
+    ids (`pmid:34515826`, `doi:10.1038/...`) are functional bibliographic
+    identifiers; only the explicit prefix earns the exemption, so a bare numeric
+    id still fails the long-number pattern.
     """
+    scrubbed = _RE_PUBLIC_ID.sub(" ", value)
     scrubbed = _RE_UUID.sub(
-        lambda m: " " if _is_placeholder_uuid(m.group()) else m.group(), value
+        lambda m: " " if _is_placeholder_uuid(m.group()) else m.group(), scrubbed
     )
     for pattern in (_RE_EMAIL, _RE_LONG_NUM, _RE_UUID, _RE_HOME_PATH):
         m = pattern.search(scrubbed)

@@ -208,6 +208,41 @@ def test_check_pii_fail_long_id(tmp_path: Path) -> None:
     assert result.status == "fail", f"Expected fail, got {result.status!r}: {result.detail}"
 
 
+def test_check_pii_pass_prefixed_public_id(tmp_path: Path) -> None:
+    """Prefixed public bibliographic ids are functional values, so status='pass'."""
+    shapes = {
+        "research_read_paper": {
+            "return_model": "Paper",
+            "probed_args": {
+                "paperId": "pmid:34515826",
+                "doi": "doi:10.1038/s41586-021-03819-2",
+                "preprint": "arXiv:2103.00020",
+            },
+        },
+    }
+    shapes_path = tmp_path / "server.shapes.json"
+    shapes_path.write_text(json.dumps(shapes), encoding="utf-8")
+
+    result = check_pii(shapes_path)
+    assert result.status == "pass", f"Expected pass, got {result.status!r}: {result.detail}"
+
+
+def test_check_pii_fail_unprefixed_public_id(tmp_path: Path) -> None:
+    """The same id without its public-id prefix is indistinguishable from an account
+    id, so status='fail'."""
+    shapes = {
+        "research_read_paper": {
+            "return_model": "Paper",
+            "probed_args": {"paperId": "34515826"},
+        },
+    }
+    shapes_path = tmp_path / "server.shapes.json"
+    shapes_path.write_text(json.dumps(shapes), encoding="utf-8")
+
+    result = check_pii(shapes_path)
+    assert result.status == "fail", f"Expected fail, got {result.status!r}: {result.detail}"
+
+
 def test_check_pii_pass_placeholder_uuid(tmp_path: Path) -> None:
     """Synthetic repeated-digit UUIDs are scrub output, not PII, so status='pass'."""
     shapes = {
