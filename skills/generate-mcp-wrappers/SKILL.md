@@ -59,9 +59,9 @@ barrier stays on main.
 
 ## Procedure
 
-0. **Resolve the CLI.** Requires `mcpgen >= 0.9.0` — one floor for the whole procedure,
-   step 7's runner included, so no later step re-checks the engine. Do not proceed on an
-   older one.
+0. **Resolve the CLI.** Requires `mcpgen >= 0.9.0` — one floor for the whole procedure and
+   for the plugin, step 7's runner included, so no later step gates on a different number.
+   Do not proceed on an older one.
 
    The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
    Probe the three forms and keep the first that both answers **and** meets the floor — an
@@ -72,14 +72,27 @@ barrier stays on main.
    for c in "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
      out=$(eval "$c --version" 2>/dev/null) || continue
      ver=$(printf '%s\n' "$out" | awk '{print $2}')
-     printf '%s' "$ver" | grep -Eq '^[0-9]+(\.[0-9]+)+' || continue
-     [ "$(printf '%s\n%s\n' "$min" "$ver" | sort -V | head -n 1)" = "$min" ] || \
+     base=${ver%%[!0-9.]*}; base=${base%.}
+     printf '%s' "$base" | grep -Eq '^[0-9]+(\.[0-9]+)+$' || continue
+     if [ "$base" = "$min" ] && [ "$base" != "$ver" ]; then
+       echo "skipping $c ($ver is a pre-release of $min)"; continue
+     fi
+     [ "$(printf '%s\n%s\n' "$min" "$base" | sort -V | head -n 1)" = "$min" ] || \
        { echo "skipping $c ($ver < $min)"; continue; }
      MCPGEN="$c"; break
    done
    [ -n "$MCPGEN" ] || { echo "no mcpgen >= $min found on any invocation"; exit 1; }
    echo "resolved: $MCPGEN ($ver)"
    ```
+
+   The comparison runs on `$base`, the release part alone: `${ver%%[!0-9.]*}` trims from the
+   first character that is neither digit nor dot and `${base%.}` drops the dot a `.devN`
+   suffix leaves behind, so `0.9.0rc1` and `0.9.0.dev1` both reduce to `0.9.0`. That split is
+   what lets the guard accept a newer pre-release (`0.10.0.dev1` clears a `0.9.0` floor —
+   this repo's own `dev` branch is one) while rejecting a pre-release *of the floor itself*,
+   which `sort -V` alone orders above `0.9.0` even though it may predate the feature the
+   floor exists for. The `$`-anchored `grep` is what makes the trim load-bearing: without it
+   a version that is not a dotted number at all would slip through as its own prefix.
 
 1. **Mechanical stubs.**
 
@@ -601,8 +614,8 @@ barrier stays on main.
      `annotations` nor the description semantically — so a tool only step 2 catches would
      otherwise be called for real.
    - **Resolved `mcpgen` invocation** — the literal string step 0 settled on. Pass it
-     explicitly: the runner skill gates on a bare `mcpgen`, absent in a uv-managed project, so
-     without this it reports the engine missing on a machine where step 0 just used it.
+     explicitly: the runner tries it as its first candidate, so one `--version` call settles
+     its check instead of a fresh probe down the same three forms.
    - **Server name** — `<server>`.
    - **Output folder** — the dir from `--out` (e.g. `<server>/`), holding `<server>.py`,
      `<shapes-path>`, and `<shapes-stem>.verify.json`.
