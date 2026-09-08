@@ -28,6 +28,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
+if sys.version_info < (3, 11):  # pragma: no cover - version-gated
+    # ExceptionGroup became a builtin in 3.11; below that the anyio-supplied
+    # backport is what the code under test sees.
+    from exceptiongroup import BaseExceptionGroup, ExceptionGroup
+
 import httpx
 import pytest
 from mcp.client.auth import OAuthRegistrationError

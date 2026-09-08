@@ -9,7 +9,7 @@ identical once `mcpgen` is on PATH.
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/) installed
-- Python ≥ 3.11
+- Python ≥ 3.10
 
 ---
 
@@ -18,7 +18,7 @@ identical once `mcpgen` is on PATH.
 Once, from the repo root:
 
 ```bash
-uv venv                  # creates .venv (Python ≥3.11 auto-selected)
+uv venv                  # creates .venv (Python ≥3.10 auto-selected)
 uv pip install -e .      # editable install → .venv/bin/mcpgen
 ```
 
