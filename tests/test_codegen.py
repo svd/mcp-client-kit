@@ -1462,3 +1462,117 @@ def test_render_tool_embed_schema_no_args_no_args_section():
     assert "Args:" not in src
     # __schema__ attr should still be present (empty dict).
     assert ".__schema__ = " in src
+
+
+# ---------------------------------------------------------------------------
+# probed_args scrubbing
+# ---------------------------------------------------------------------------
+
+
+def test_scrub_probed_args_redacts_email():
+    out, changed = codegen.scrub_probed_args({"owner": "ada@example.com"})
+    assert out == {"owner": "<email>"}
+    assert changed is True
+
+
+def test_scrub_probed_args_redacts_uuid():
+    out, changed = codegen.scrub_probed_args({"session": "3f2504e0-4f89-11d3-9a0c-0305e82c3301"})
+    assert out == {"session": "<uuid>"}
+    assert changed is True
+
+
+def test_scrub_probed_args_redacts_home_dir_username_keeps_path():
+    out, changed = codegen.scrub_probed_args({"path": "/Users/ada/src/repo/img.png"})
+    assert out == {"path": "<home>/src/repo/img.png"}
+    assert changed is True
+
+
+def test_scrub_probed_args_keeps_home_segment_inside_a_url():
+    """The home-dir rule is anchored — an interior /home/ segment is functional."""
+    functional = {
+        "url": "https://example.com/home/page/x",
+        "docs": "https://example.com/Users/guide",
+        "rel": "src/home/ada/x",
+    }
+    out, changed = codegen.scrub_probed_args(functional)
+    assert out == functional
+    assert changed is False
+
+
+def test_scrub_probed_args_redacts_linux_and_windows_home():
+    out, _ = codegen.scrub_probed_args({"a": "/home/ada/x", "b": r"C:\Users\ada\x"})
+    assert out == {"a": "<home>/x", "b": r"<home>\x"}
+
+
+def test_scrub_probed_args_redacts_long_numeric_id():
+    out, changed = codegen.scrub_probed_args({"account": "123456789"})
+    assert out == {"account": "<id>"}
+    assert changed is True
+
+
+def test_scrub_probed_args_keeps_functional_values():
+    functional = {
+        "tz": "America/New_York",
+        "table": "users",
+        "repo": "anthropics/claude-code",
+        "since": "2026-08-25T10:00:00Z",
+        "limit": 50,
+        "page": 3,
+        "enabled": True,
+        "cursor": None,
+    }
+    out, changed = codegen.scrub_probed_args(functional)
+    assert out == functional
+    assert changed is False
+
+
+def test_scrub_probed_args_does_not_touch_dict_keys():
+    out, changed = codegen.scrub_probed_args({"ada@example.com": "x"})
+    assert out == {"ada@example.com": "x"}
+    assert changed is False
+
+
+def test_scrub_probed_args_recurses_into_lists_and_nested_dicts():
+    out, changed = codegen.scrub_probed_args({"users": [{"email": "ada@example.com"}, {"email": "bob@example.com"}]})
+    assert out == {"users": [{"email": "<email>"}, {"email": "<email>"}]}
+    assert changed is True
+
+
+def test_scrub_probed_args_handles_multi_probe_list_form():
+    out, changed = codegen.scrub_probed_args([{"id": "ada@example.com"}, {"id": "ok"}])
+    assert out == [{"id": "<email>"}, {"id": "ok"}]
+    assert changed is True
+
+
+def test_scrub_probed_args_is_idempotent():
+    once, _ = codegen.scrub_probed_args({"path": "/Users/ada/x", "who": "ada@example.com"})
+    twice, changed = codegen.scrub_probed_args(once)
+    assert twice == once
+    assert changed is False, "placeholders must not re-trigger the scrub"
+
+
+def test_scrub_probed_args_does_not_mutate_input():
+    original = {"who": "ada@example.com"}
+    codegen.scrub_probed_args(original)
+    assert original == {"who": "ada@example.com"}
+
+
+def test_scrub_skeletons_sets_flag_and_reports_tools():
+    spec = {
+        "leaky": {"source": "live", "probed_args": {"who": "ada@example.com"}},
+        "clean": {"source": "live", "probed_args": {"limit": 10}},
+        "no_args": {"source": "live"},
+    }
+    out, touched = codegen.scrub_skeletons(spec)
+    assert touched == ["leaky"]
+    assert out["leaky"]["probed_args"] == {"who": "<email>"}
+    assert out["leaky"]["probe_args_scrubbed"] is True
+    assert "probe_args_scrubbed" not in out["clean"]
+    assert out["no_args"] == {"source": "live"}
+
+
+def test_scrub_skeletons_tolerates_non_dict_entries():
+    spec = {"weird": "not-a-dict"}
+    out, touched = codegen.scrub_skeletons(spec)
+    assert out == spec
+    assert touched == []

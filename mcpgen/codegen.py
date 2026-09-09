@@ -922,3 +922,85 @@ def probe_skeleton(
     if observed_bytes:
         entry["_observed_bytes"] = max(observed_bytes)
     return {tool: entry}
+
+
+# --- probed_args scrubbing -------------------------------------------------
+#
+# `probed_args` is captured verbatim from live calls, and <server>.shapes.json
+# is committed.  Real ids in a version-controlled file survive deletion (git
+# history) and travel to everyone the repo reaches, so the CLI scrubs before
+# writing that file; the raw values stay in the gitignored .parts/ and
+# <stem>.verify.json, which the roundtrip verifier reads first.
+#
+# Strings only.  Non-string scalars are left alone deliberately: replacing an
+# int account id with a placeholder string would change the JSON type and
+# mislead both `input_overrides` and the verifier.  The placeholders below
+# match none of the patterns, so scrubbing is idempotent.
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+# Anchored at string start: an unanchored /home/ or /Users/ segment also occurs
+# inside URLs and remote paths ("https://example.com/home/page"), and rewriting
+# those would corrupt functional values on their way into a committed file.
+_POSIX_HOME_RE = re.compile(r"^(?:/Users|/home)/[^/\\]+")
+_WINDOWS_HOME_RE = re.compile(r"^[A-Za-z]:\\Users\\[^\\/]+")
+_LONG_ID_RE = re.compile(r"\b\d{8,}\b")
+
+
+def _scrub_str(value: str) -> str:
+    """Replace PII-shaped substrings in one string value."""
+    out = _EMAIL_RE.sub("<email>", value)
+    out = _UUID_RE.sub("<uuid>", out)
+    out = _POSIX_HOME_RE.sub("<home>", out, count=1)
+    out = _WINDOWS_HOME_RE.sub("<home>", out, count=1)
+    out = _LONG_ID_RE.sub("<id>", out)
+    return out
+
+
+def scrub_probed_args(value: Any) -> tuple[Any, bool]:
+    """Return `(scrubbed_copy, changed)` for a probed_args value.
+
+    Recurses through dicts and lists; scrubs string *values* only — never dict
+    keys, never non-string scalars.  Pure: the input is not mutated.
+    """
+    if isinstance(value, str):
+        out = _scrub_str(value)
+        return out, out != value
+    if isinstance(value, dict):
+        changed = False
+        result: dict = {}
+        for k, v in value.items():
+            result[k], sub_changed = scrub_probed_args(v)
+            changed = changed or sub_changed
+        return result, changed
+    if isinstance(value, list):
+        changed = False
+        items = []
+        for v in value:
+            scrubbed, sub_changed = scrub_probed_args(v)
+            items.append(scrubbed)
+            changed = changed or sub_changed
+        return items, changed
+    return value, False
+
+
+def scrub_skeletons(spec: dict) -> tuple[dict, list[str]]:
+    """Scrub `probed_args` across a whole shapes mapping.
+
+    Returns `(scrubbed_copy, tools_changed)`.  Entries whose args were altered
+    get `probe_args_scrubbed: True` — the flag the shape-spec already defines
+    and the runner skill already reads.  Pure: `spec` is not mutated.
+    """
+    out: dict = {}
+    touched: list[str] = []
+    for tool, entry in spec.items():
+        if not isinstance(entry, dict) or "probed_args" not in entry:
+            out[tool] = entry
+            continue
+        new_entry = dict(entry)
+        new_entry["probed_args"], changed = scrub_probed_args(entry["probed_args"])
+        if changed:
+            new_entry["probe_args_scrubbed"] = True
+            touched.append(tool)
+        out[tool] = new_entry
+    return out, sorted(touched)

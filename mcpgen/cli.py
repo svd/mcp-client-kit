@@ -529,12 +529,11 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
 
     part_skeletons = [json.loads(p.read_text()) for p in parts]
     merged = codegen.merge_skeletons([base] + part_skeletons)
-    _atomic_write_text(target, json.dumps(merged, indent=2) + "\n")
-    print(f"[merge] wrote {target} ({len(merged)} tool(s))", file=sys.stderr)
 
-    # Emit verify sidecar: raw probed_args from parts only (pre-scrub),
-    # keyed by tool name.  Omit no-arg tools (probed_args == {}).
-    # Overlay existing sidecar so partial re-probes preserve prior entries.
+    # Verify sidecar FIRST, from the raw parts — it is the gold source for the
+    # roundtrip verifier and is gitignored, so it keeps pre-scrub values.
+    # Omit no-arg tools (probed_args == {}).  Overlay an existing sidecar so
+    # partial re-probes preserve prior entries.
     stem = target.name[: -len(".shapes.json")] if target.name.endswith(".shapes.json") else target.stem
     verify_target = target.with_name(stem + ".verify.json")
     verify_map: dict = {}
@@ -552,6 +551,30 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
     # Prune entries for tools no longer part of the merged shapes (e.g. the
     # server dropped the tool) — otherwise dead entries persist forever.
     verify_map = {k: v for k, v in verify_map.items() if k in merged}
+
+    # Scrub only what gets committed.  shapes.json is version-controlled; the
+    # parts dir and the verify sidecar are not.
+    if getattr(ns, "no_scrub", False):
+        print(
+            "[merge] ⚠  --no-scrub: probed_args written verbatim to a committed file — "
+            "check it for real ids/PII before committing.",
+            file=sys.stderr,
+        )
+    else:
+        merged, scrubbed_tools = codegen.scrub_skeletons(merged)
+        if scrubbed_tools:
+            print(
+                f"[merge] scrubbed probed_args for {len(scrubbed_tools)} tool(s): {', '.join(scrubbed_tools)}",
+                file=sys.stderr,
+            )
+            print(
+                f"[merge]    raw values kept in {verify_target.name} (git-ignored).",
+                file=sys.stderr,
+            )
+
+    _atomic_write_text(target, json.dumps(merged, indent=2) + "\n")
+    print(f"[merge] wrote {target} ({len(merged)} tool(s))", file=sys.stderr)
+
     if verify_map:
         _atomic_write_text(verify_target, json.dumps(verify_map, indent=2) + "\n")
         print(
@@ -1051,6 +1074,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     mg.add_argument(
         "--keep-parts", action="store_true", help="keep the .parts/ directory after merging (default: remove)"
+    )
+    mg.add_argument(
+        "--no-scrub",
+        action="store_true",
+        dest="no_scrub",
+        help="write probed_args to shapes.json verbatim (default: scrub emails, UUIDs, "
+        "home-dir usernames and long numeric ids — shapes.json is a committed file)",
     )
     mg.add_argument(
         "--config",

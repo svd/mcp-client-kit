@@ -216,8 +216,20 @@ def _seed_parts(target: Path, tool_skeletons: dict[str, dict]) -> None:
         _atomic_write_text(part, json.dumps({tool: sk}))
 
 
-def _merge_ns(server: str, target: Path, keep_parts: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(server=server, out=str(target), keep_parts=keep_parts)
+def _merge_ns(
+    server: str,
+    target: Path,
+    keep_parts: bool = False,
+    no_scrub: bool = False,
+    manifest: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        server=server,
+        out=str(target),
+        keep_parts=keep_parts,
+        no_scrub=no_scrub,
+        manifest=manifest,
+    )
 
 
 def test_merge_union_of_parts_and_base(tmp_path):
@@ -577,3 +589,95 @@ def test_merge_accepts_config_flag(tmp_path):
     assert rc == 0
     result = json.loads(target.read_text())
     assert "tool_a" in result
+
+
+# ── probed_args scrubbing on merge ───────────────────────────────────────────
+
+
+def test_merge_scrubs_probed_args_in_shapes_json(tmp_path):
+    """shapes.json — the committed file — must never carry raw PII."""
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(
+        target,
+        {"read_file": {"source": "live", "probed_args": {"path": "/Users/ada/src/repo/img.png"}}},
+    )
+
+    rc = _cmd_merge(_merge_ns("acme", target))
+
+    assert rc == 0
+    entry = json.loads(target.read_text())["read_file"]
+    assert entry["probed_args"] == {"path": "<home>/src/repo/img.png"}
+    assert entry["probe_args_scrubbed"] is True
+
+
+def test_merge_verify_sidecar_keeps_raw_args(tmp_path):
+    """The gitignored verify sidecar is the gold source — it stays pre-scrub."""
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(
+        target,
+        {"read_file": {"source": "live", "probed_args": {"path": "/Users/ada/src/repo/img.png"}}},
+    )
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    verify = json.loads((tmp_path / "acme.verify.json").read_text())
+    assert verify["read_file"] == {"path": "/Users/ada/src/repo/img.png"}
+
+
+def test_merge_keep_parts_leaves_raw_args_in_parts(tmp_path):
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(target, {"leaky_tool": {"source": "live", "probed_args": {"who": "ada@example.com"}}})
+
+    _cmd_merge(_merge_ns("acme", target, keep_parts=True))
+
+    part = next(_parts_dir(target).glob("*.json"))
+    assert json.loads(part.read_text())["leaky_tool"]["probed_args"] == {"who": "ada@example.com"}
+
+
+def test_merge_scrubs_preserved_base_entries_too(tmp_path):
+    """A leak already committed in shapes.json is cleaned on the next merge."""
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"old": {"source": "live", "probed_args": {"who": "ada@example.com"}}}))
+    _seed_parts(target, {"new": {"source": "live", "probed_args": {"limit": 5}}})
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    result = json.loads(target.read_text())
+    assert result["old"]["probed_args"] == {"who": "<email>"}
+    assert result["old"]["probe_args_scrubbed"] is True
+
+
+def test_merge_scrub_is_idempotent(tmp_path):
+    """Re-merging an already-scrubbed file changes nothing."""
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(target, {"leaky_tool": {"source": "live", "probed_args": {"path": "/Users/ada/x"}}})
+    _cmd_merge(_merge_ns("acme", target, keep_parts=True))
+    first = target.read_text()
+
+    _cmd_merge(_merge_ns("acme", target, keep_parts=True))
+
+    assert target.read_text() == first
+
+
+def test_merge_no_scrub_flag_writes_raw_args(tmp_path, capsys):
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(target, {"leaky_tool": {"source": "live", "probed_args": {"who": "ada@example.com"}}})
+
+    _cmd_merge(_merge_ns("acme", target, no_scrub=True))
+
+    entry = json.loads(target.read_text())["leaky_tool"]
+    assert entry["probed_args"] == {"who": "ada@example.com"}
+    assert "probe_args_scrubbed" not in entry
+    assert "--no-scrub" in capsys.readouterr().err, "writing raw args to a committed file must warn"
+
+
+def test_merge_reports_scrubbed_tools_on_stderr(tmp_path, capsys):
+    """The tool name must be distinctive — a one-letter name matches any output."""
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(target, {"leaky_tool": {"source": "live", "probed_args": {"who": "ada@example.com"}}})
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    err = capsys.readouterr().err
+    assert "scrubbed" in err
+    assert "leaky_tool" in err
