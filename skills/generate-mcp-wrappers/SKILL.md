@@ -478,12 +478,10 @@ barrier stays on main.
    "audio", "base64", or "binary", leave the wrapper as `-> Any`, note it in
    `session-overview.md`, and do not model a payload the probe never saw.
 
-   **Empty-store probes produce under-typed list fields.** If a read tool returns an empty list
-   (`[]`), the inner element shape is unobservable. Do not fabricate a schema from zero samples.
-   The skeleton omits the field entirely; to keep it visible add `"<field>": "list"` by hand — the
-   one allowed non-scalar in `fields`. Note in `session-overview.md` that the inner model is
-   unobservable at probe time, and recommend re-running `mcpgen probe` after seeding the server
-   with representative data.
+   **Empty-store probes produce under-typed list fields.** A read tool returning `[]` leaves the
+   element shape unobservable and the skeleton omits the field; add `"<field>": "list"` by hand to
+   keep it visible, never a guessed element type. Note in `session-overview.md` that it is
+   unobservable at probe time, and recommend re-probing once the server holds representative data.
 
    **Bootstrapping sample args.** Some tools need a real id first (e.g. before probing
    `get_entity`). Find a no-arg / discovery tool on *this* server that returns user or entity ids
@@ -679,9 +677,11 @@ barrier stays on main.
   valid variant responses with false authority. Zero runtime cost and zero dependency is the
   point; generated wrappers stay importable anywhere (the seam principle).
 
-- **Don't model depth from one probe.** Promote only the top 1–2 levels of stable scalars;
-  deeper/variadic nests stay `dict` / `Any`. Over-modelling states authoritative lies about a
-  shape you saw once.
+- **Don't model depth from one probe.** A container is promoted no further than its own
+  annotation: `list[str]` / `dict[str, str]` where every element or value the probe evidenced
+  is that same scalar, bare `list` / `dict` otherwise — a list needs `--save-raw` or a second
+  probe, since the skeleton samples one element. `dict[str, Any]` claims nothing `dict` does
+  not. There is no nested `TypedDict`; see `references/shape-spec.md`.
 
 - **Never emit a variant-specific `return_model` from a single-variant probe.** If a tool takes a
   discriminator arg (flagged in step 2.e), every sibling sharing that arg is polymorphic-suspect
