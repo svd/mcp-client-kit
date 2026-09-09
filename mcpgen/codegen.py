@@ -938,12 +938,22 @@ def probe_skeleton(
 # match none of the patterns, so scrubbing is idempotent.
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+# No \b: a UUID glued to a word character ("id_3f25…") is still a UUID, but \b
+# fails against `_` and letters.  Hex look-around instead, so only a longer hex
+# run is excluded.
+_UUID_RE = re.compile(
+    r"(?<![0-9a-fA-F])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9a-fA-F])"
+)
 # Anchored at string start: an unanchored /home/ or /Users/ segment also occurs
 # inside URLs and remote paths ("https://example.com/home/page"), and rewriting
 # those would corrupt functional values on their way into a committed file.
-_POSIX_HOME_RE = re.compile(r"^(?:/Users|/home)/[^/\\]+")
-_WINDOWS_HOME_RE = re.compile(r"^[A-Za-z]:\\Users\\[^\\/]+")
+# The optional file:// prefix matters: file:///Users/<name>/x is a standard arg
+# form for filesystem-shaped servers, the very class this rule was written for.
+# The Windows branch is separator- and case-tolerant because C:/Users/<name> and
+# c:\\users\\<name> are both accepted spellings.
+_POSIX_HOME_RE = re.compile(r"^(?:file://)?(?:/Users|/home)/[^/\\]+")
+_WINDOWS_HOME_RE = re.compile(r"^(?:file:///)?[A-Za-z]:[\\/][Uu]sers[\\/][^\\/]+")
 _LONG_ID_RE = re.compile(r"\b\d{8,}\b")
 
 

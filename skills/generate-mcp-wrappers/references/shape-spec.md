@@ -84,8 +84,12 @@ it missed and leave `probe_args_scrubbed: true` in place.
 
 **Do NOT replace functional values** — timezone names (`"UTC"`, `"America/New_York"`), generic
 table names (`"users"`, `"products"`), public repo owners/names, ISO timestamps, or standard SQL
-queries. If the automatic pass rewrote a value you need verbatim, re-run the merge with
-`--no-scrub` and scrub that entry by hand.
+queries. ISO timestamps survive, but an **epoch** timestamp does not: a run of 8+ digits is
+indistinguishable from a numeric id, so `1756108800` becomes `<id>`. If the automatic pass
+rewrote a value you need verbatim, restore it by hand from the gitignored
+`<shapes-stem>.verify.json`, which holds the pre-scrub args. `--no-scrub` only helps on a merge
+that still has its `.parts/` — a default merge deletes them and re-merging without parts is a
+no-op, so reach for it via `mcpgen merge --keep-parts` at probe time, not afterwards.
 
 Keep raw responses, if you want them, in `<server>.<tool>.probe-raw.json` (git-ignored) — write
 one with `mcpgen probe --save-raw`, never in the shape-spec.

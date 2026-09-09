@@ -490,10 +490,12 @@ barrier stays on main.
    — there is no universal tool for this, infer from `mcpgen list` output. Capture its raw
    payload in the same invocation that probes it:
 
-   `<mcpgen> probe <server> <discovery-tool> --args '<args>' --emit-shape <shapes-path> --save-raw <server>.<discovery-tool>.probe-raw.json`
+   `<mcpgen> probe <server> <discovery-tool> --args '<args>' --save-raw <server>.<discovery-tool>.probe-raw.json`
 
    then read the ids from that file. `--save-raw` requires a `*.probe-raw.json` name (git-ignored)
-   and saves the duplicate live round-trip that a separate `mcpgen call --out` costs. Use
+   and saves the duplicate live round-trip that a separate `mcpgen call --out` costs. **No
+   `--emit-shape` here** — the discovery tool is scaffolding, and emitting a part would merge it
+   into the committed shape spec permanently. The skeleton goes to stdout instead. Use
    `mcpgen call --out` only when you do not want a shape at all.
 
    **`probed_args` carries live PII.** Batch agents write parts with raw args; `mcpgen merge`

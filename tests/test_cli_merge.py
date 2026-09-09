@@ -729,7 +729,11 @@ def test_merge_no_warning_when_manifest_covers_every_entry(tmp_path, capsys):
 
     _cmd_merge(_merge_ns("acme", target))
 
-    assert "stale" not in capsys.readouterr().err
+    # Assert on text this feature emits — "stale" appears only in the unrelated
+    # verify-sidecar prune line, so matching it proves nothing either way.
+    err = capsys.readouterr().err
+    assert "absent from" not in err
+    assert "carried forward unprobed" not in err
 
 
 def test_merge_without_manifest_reports_count_not_names(tmp_path, capsys):

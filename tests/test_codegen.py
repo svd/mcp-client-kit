@@ -1576,3 +1576,21 @@ def test_scrub_skeletons_tolerates_non_dict_entries():
     out, touched = codegen.scrub_skeletons(spec)
     assert out == spec
     assert touched == []
+
+
+def test_scrub_probed_args_redacts_home_in_file_uri():
+    """file:// URIs are a standard arg form for filesystem-shaped servers."""
+    out, changed = codegen.scrub_probed_args({"uri": "file:///Users/ada/src/x.png"})
+    assert out == {"uri": "<home>/src/x.png"}
+    assert changed is True
+
+
+def test_scrub_probed_args_redacts_windows_home_slash_and_case_variants():
+    out, _ = codegen.scrub_probed_args({"a": "C:/Users/ada/x", "b": r"c:\users\ada\x", "c": "file:///C:/Users/ada/x"})
+    assert out == {"a": "<home>/x", "b": r"<home>\x", "c": "<home>/x"}
+
+
+def test_scrub_probed_args_redacts_word_adjacent_uuid():
+    out, changed = codegen.scrub_probed_args({"a": "id_3f2504e0-4f89-11d3-9a0c-0305e82c3301"})
+    assert out == {"a": "id_<uuid>"}
+    assert changed is True
