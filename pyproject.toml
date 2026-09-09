@@ -3,11 +3,12 @@ name = "mcp-client-kit-eval"
 version = "0.1.0"
 description = "Eval framework for the mcp-client-kit generate-mcp-wrappers skill"
 authors = [{name = "Sviatoslav Sviridov", email = "sviridov@gmail.com"}]
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     # The version under test. Currently the local dev checkout (see [tool.uv.sources]);
     # switch back to an exact release pin via /rerun-eval-at-version.
     "mcp-client-kit",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [tool.uv.sources]

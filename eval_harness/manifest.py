@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-import tomllib
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - exercised only on Python 3.10
+    import tomli as tomllib
 
 _TRANSPORTS = {"stdio", "http", "sse"}
 _AUTH_PREFIX_BEARER = "bearer:"

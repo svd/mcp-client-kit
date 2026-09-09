@@ -944,5 +944,6 @@ def test_sync_path_call_is_time_bounded(monkeypatch) -> None:
         await asyncio.sleep(10)
         return {"never": True}
 
-    with pytest.raises(TimeoutError):
+    # On 3.11+ asyncio.TimeoutError is the builtin; on 3.10 it is a distinct class.
+    with pytest.raises((TimeoutError, asyncio.TimeoutError)):
         v._call_once(hangs, object(), {})
