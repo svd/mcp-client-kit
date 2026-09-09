@@ -88,7 +88,7 @@ invocation). The invocation comes first because the check below runs on it.
 once in your report, then substitute that literal string wherever a block below writes
 `<mcpgen>`.
 
-Requires `mcpgen >= 0.9.0` (install: see README) — one floor across the plugin, the same
+Requires `mcpgen >= 0.10.0` (install: see README) — one floor across the plugin, the same
 number `generate-mcp-wrappers` step 0 states, so a chained run and a standalone one gate
 identically. The floor guarantees the symbols `runner_templates/` import: `http_oauth.py`
 needs `LoginWontHelp`, and an engine without it produces a `run.py` that dies with
@@ -99,7 +99,7 @@ Try each candidate in turn and keep the first that both answers **and** meets th
 an outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
 
 ```bash
-min=0.9.0; MCPGEN=
+min=0.10.0; MCPGEN=
 # First candidate is the caller's invocation — drop it when none was handed over.
 for c in "<handed-over>" "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
   [ -n "$c" ] || continue
@@ -130,10 +130,10 @@ Three things the loop depends on:
   `uv run mcpgen` form never matches without it.
 - **The comparison runs on `$base`, the release part alone.** `${ver%%[!0-9.]*}` trims from
   the first character that is neither digit nor dot and `${base%.}` drops the dot a `.devN`
-  suffix leaves behind, so `0.9.0rc1` and `0.9.0.dev1` both reduce to `0.9.0`. That split
-  lets a newer pre-release through (`0.10.0.dev1` clears the floor) while rejecting a
-  pre-release *of the floor itself* — `sort -V` alone orders `0.9.0.dev1` above `0.9.0`,
-  and a clone parked there can predate the commit that made `0.9.0` worth gating on. The
+  suffix leaves behind, so `0.10.0rc1` and `0.10.0.dev1` both reduce to `0.10.0`. That split
+  lets a newer pre-release through (`0.11.0.dev1` clears the floor) while rejecting a
+  pre-release *of the floor itself* — `sort -V` alone orders `0.10.0.dev1` above `0.10.0`,
+  and a clone parked there can predate the commit that made `0.10.0` worth gating on. The
   `$`-anchored `grep` is what makes the trim load-bearing.
 
 ### 1. Locate artifacts

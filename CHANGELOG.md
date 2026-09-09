@@ -1,6 +1,79 @@
 # Changelog
 
-## [Unreleased] — 0.10.0
+## [Unreleased] — 0.11.0
+
+## [0.10.0] — 2026-09-09
+
+### Added
+
+- **`mcpgen probe --save-raw FILE`** writes the untruncated payload beside the shape
+  skeleton. `--emit-shape` records only what `summarize_shape` keeps — the first element of a
+  list plus an `...xN` sentinel — so a list's element type could not be confirmed from a
+  single probe, and the shape spec had to fall back to a bare `list`. The raw file settles it.
+  The name must end in `.probe-raw.json`, which `.gitignore` already covers: the payload is
+  unredacted by construction and the suffix is what keeps it out of a commit. A multi-probe run
+  writes a JSON array of `{args, raw}` so each response stays paired with the arguments that
+  produced it.
+
+- **`mcpgen merge --keep-parts`** retains the `.parts/` directory instead of removing it after
+  consolidation. A default merge deletes the intermediates, which makes re-merging a no-op —
+  so any flag that changes how merge writes `probed_args` has to be decided at probe time, not
+  after the fact.
+
+- **`mcpgen merge` cross-checks carried-forward entries against a tool manifest** and warns
+  about shape-spec entries the server no longer advertises. Entries survive a merge by design,
+  so a tool renamed or withdrawn upstream left a stale entry that codegen kept emitting against
+  a tool that no longer exists. `--manifest PATH` overrides the default
+  `<shapes-stem>.mcpgen.json`; with no manifest available the advisory reports a count rather
+  than naming entries it cannot verify.
+
+### Changed
+
+- **`mcpgen merge` scrubs `probed_args` before writing `<server>.shapes.json`.** The shapes
+  file is committed, and `probed_args` holds whatever the probe was called with — real
+  addresses, account ids, and home-directory paths. Merge now replaces email addresses, UUIDs,
+  a leading home-directory user segment (`/Users/<name>`, `/home/<name>`, `C:\Users\<name>`,
+  including their `file://` forms) and runs of 8+ digits with `<email>`, `<uuid>`, `<home>` and
+  `<id>`, and sets `"probe_args_scrubbed": true` on every entry it changed. Raw values survive
+  in the gitignored `.parts/` intermediates and in the new gitignored
+  `<shapes-stem>.verify.json` sidecar, which the roundtrip verifier reads first — so scrubbing
+  does not cost verification. Two limits are deliberate and documented in
+  `references/shape-spec.md`: only strings are touched, since retyping a numeric id as a
+  placeholder string would mislead both `input_overrides` and the verifier; and an **epoch**
+  timestamp is indistinguishable from a numeric id, so it is rewritten to `<id>` and must be
+  restored by hand from `verify.json`. `--no-scrub` opts out, and only helps on a merge that
+  still has its `.parts/` — reach for it via `--keep-parts` at probe time.
+
+- **The supported Python floor is now 3.10.** Two 3.11-only constructs stood between the code
+  and 3.10, both on error paths — so imports and the CLI worked on 3.10 while any failure
+  raised the wrong exception. `_carries_interrupt` and `_describe` tested against the builtin
+  `BaseExceptionGroup`; below 3.11 they now use the `exceptiongroup` backport, the same class
+  anyio raises. The OAuth callback wait caught the builtin `TimeoutError`, an alias of
+  `asyncio.TimeoutError` only from 3.11, so on 3.10 a timeout escaped unconverted instead of
+  reaching the "browser never came back" message. CI runs 3.10 alongside 3.11-3.13; ruff and
+  mypy target 3.10.
+
+- **The plugin's engine floor rises to `mcpgen >= 0.10.0`**, stated once for the whole plugin
+  in both skills' step 0. `generate-mcp-wrappers` now instructs `probe --save-raw`, which
+  0.9.0 does not have.
+
+- **`generate-mcp-runner` resolves the CLI instead of shelling out bare.** It gated on a bare
+  `mcpgen --version` and ran a bare `mcpgen list`, neither of which is on PATH in a uv-managed
+  project. Step 0 now reads the hand-off from `generate-mcp-wrappers` step 7 and treats the
+  caller's invocation as the resolver loop's first candidate — a valid one settles the check in
+  one `--version` call, an invalid one falls through rather than aborting, which is what covers
+  a caller that gated nothing. Both resolvers now compare the release part of the reported
+  version and reject a pre-release whose release part equals the floor exactly: `sort -V` alone
+  orders `0.9.0.dev1` above `0.9.0`, and a clone parked at a pre-release can predate the commit
+  the floor exists for. A newer pre-release still passes.
+
+- **The shape-spec `fields` rules now say when a container carries its element or value type.**
+  `list[str]` and `dict[str, str]` are legal where the evidence covers every member — dict
+  evidence is complete from one probe, list evidence is not — and bare `list` / `dict`
+  otherwise. The ceiling is stated outright: codegen emits a `TypedDict` only for a name in
+  `return_model` or a `variants` entry, so a nested model name renders an annotation with no
+  class behind it and mypy fails on a module that still imports. `dict[str, Any]` and
+  `list[Any]` say nothing `dict` and `list` do not, and are prohibited.
 
 ## [0.9.0] — 2026-08-27
 

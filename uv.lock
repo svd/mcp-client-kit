@@ -575,7 +575,7 @@ cli = [
 
 [[package]]
 name = "mcp-client-kit"
-version = "0.10.0.dev1"
+version = "0.10.0"
 source = { editable = "." }
 dependencies = [
     { name = "exceptiongroup", marker = "python_full_version < '3.11'" },

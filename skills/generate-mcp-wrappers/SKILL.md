@@ -59,7 +59,7 @@ barrier stays on main.
 
 ## Procedure
 
-0. **Resolve the CLI.** Requires `mcpgen >= 0.9.0` — one floor for the whole procedure and
+0. **Resolve the CLI.** Requires `mcpgen >= 0.10.0` — one floor for the whole procedure and
    for the plugin, step 7's runner included, so no later step gates on a different number.
    Do not proceed on an older one.
 
@@ -68,7 +68,7 @@ barrier stays on main.
    outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
 
    ```bash
-   min=0.9.0; MCPGEN=
+   min=0.10.0; MCPGEN=
    for c in "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
      out=$(eval "$c --version" 2>/dev/null) || continue
      ver=$(printf '%s\n' "$out" | awk '{print $2}')
@@ -87,10 +87,10 @@ barrier stays on main.
 
    The comparison runs on `$base`, the release part alone: `${ver%%[!0-9.]*}` trims from the
    first character that is neither digit nor dot and `${base%.}` drops the dot a `.devN`
-   suffix leaves behind, so `0.9.0rc1` and `0.9.0.dev1` both reduce to `0.9.0`. That split is
-   what lets the guard accept a newer pre-release (`0.10.0.dev1` clears a `0.9.0` floor —
+   suffix leaves behind, so `0.10.0rc1` and `0.10.0.dev1` both reduce to `0.10.0`. That split
+   is what lets the guard accept a newer pre-release (`0.11.0.dev1` clears a `0.10.0` floor —
    this repo's own `dev` branch is one) while rejecting a pre-release *of the floor itself*,
-   which `sort -V` alone orders above `0.9.0` even though it may predate the feature the
+   which `sort -V` alone orders above `0.10.0` even though it may predate the feature the
    floor exists for. The `$`-anchored `grep` is what makes the trim load-bearing: without it
    a version that is not a dotted number at all would slip through as its own prefix.
 
