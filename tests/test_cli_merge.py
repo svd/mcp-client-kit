@@ -681,3 +681,96 @@ def test_merge_reports_scrubbed_tools_on_stderr(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "scrubbed" in err
     assert "leaky_tool" in err
+
+
+# ── stale-entry advisory ─────────────────────────────────────────────────────
+
+
+def _write_manifest(target: Path, tool_names: list[str]) -> Path:
+    stem = target.name[: -len(".shapes.json")]
+    manifest = target.with_name(stem + ".mcpgen.json")
+    manifest.write_text(json.dumps({"server": "acme", "tools": {n: {} for n in tool_names}}))
+    return manifest
+
+
+def test_merge_warns_about_entries_absent_from_manifest(tmp_path, capsys):
+    """A tool the server no longer exposes must be named on stderr, not dropped."""
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"retired_tool": {"source": "live"}, "live_tool": {"source": "live"}}))
+    _seed_parts(target, {"live_tool": {"source": "live"}})
+    _write_manifest(target, ["live_tool"])
+
+    rc = _cmd_merge(_merge_ns("acme", target))
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "retired_tool" in err
+    assert "live_tool" not in err.split("retired_tool")[1], "live tools must not be listed as stale"
+    assert "retired_tool" in json.loads(target.read_text()), "warn, never drop"
+
+
+def test_merge_manifest_flag_overrides_default_location(tmp_path, capsys):
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"retired_tool": {"source": "live"}}))
+    _seed_parts(target, {"live_tool": {"source": "live"}})
+    other = tmp_path / "elsewhere.mcpgen.json"
+    other.write_text(json.dumps({"server": "acme", "tools": {"live_tool": {}}}))
+
+    _cmd_merge(_merge_ns("acme", target, manifest=str(other)))
+
+    assert "retired_tool" in capsys.readouterr().err
+
+
+def test_merge_no_warning_when_manifest_covers_every_entry(tmp_path, capsys):
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"t1": {"source": "live"}}))
+    _seed_parts(target, {"t2": {"source": "live"}})
+    _write_manifest(target, ["t1", "t2"])
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    assert "stale" not in capsys.readouterr().err
+
+
+def test_merge_without_manifest_reports_count_not_names(tmp_path, capsys):
+    """No manifest on disk: count plus a pointer, but no per-tool enumeration.
+
+    Carrying entries forward is the normal partial-re-probe case — listing every
+    name would make routine merges noisy, which is how advisories get ignored.
+    """
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"carried_a": {"source": "live"}, "carried_b": {"source": "live"}}))
+    _seed_parts(target, {"probed": {"source": "live"}})
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    err = capsys.readouterr().err
+    assert "2 entry(ies) carried forward unprobed" in err
+    assert "carried_a" not in err, "no per-tool enumeration without a manifest"
+    assert "mcpgen codegen" in err, "the advisory must say how to get a manifest"
+
+
+def test_merge_ignores_sole_manifest_of_a_different_server(tmp_path, capsys):
+    """A stray manifest from another server must not drive stale warnings."""
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"carried": {"source": "live"}}))
+    _seed_parts(target, {"probed": {"source": "live"}})
+    (tmp_path / "other.mcpgen.json").write_text(json.dumps({"server": "other", "tools": {"x": {}}}))
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    err = capsys.readouterr().err
+    assert "carried forward unprobed" in err, "falls back to the count-only advisory"
+    assert "absent from" not in err, "no stale claim from a foreign manifest"
+
+
+def test_merge_unreadable_manifest_does_not_fail_merge(tmp_path, capsys):
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"carried": {"source": "live"}}))
+    _seed_parts(target, {"probed": {"source": "live"}})
+    (tmp_path / "acme.mcpgen.json").write_text("{not json")
+
+    rc = _cmd_merge(_merge_ns("acme", target))
+
+    assert rc == 0, "a broken manifest must not break consolidation"
+    assert "carried forward unprobed" in capsys.readouterr().err

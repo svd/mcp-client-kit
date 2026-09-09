@@ -196,6 +196,33 @@ def _parts_dir(target: Path) -> Path:
     return target.with_name(target.name + ".parts")
 
 
+def _merge_manifest_path(ns: argparse.Namespace, target: Path) -> Path | None:
+    """Locate the tool-inventory manifest for `merge`'s stale-entry advisory.
+
+    --manifest wins; otherwise <stem>.mcpgen.json beside the shapes file;
+    otherwise the sole *.mcpgen.json in that directory, when there is exactly
+    one and its `server` field matches — a foreign manifest would drive
+    confident, wrong "retired tool" warnings.  Returns None when nothing
+    resolves; the advisory then degrades to a count-only line rather than
+    failing.
+    """
+    override = getattr(ns, "manifest", None)
+    if override:
+        return Path(override)
+    stem = target.name[: -len(".shapes.json")] if target.name.endswith(".shapes.json") else target.stem
+    beside = target.with_name(stem + ".mcpgen.json")
+    if beside.is_file():
+        return beside
+    candidates = sorted(target.parent.glob("*.mcpgen.json"))
+    if len(candidates) != 1:
+        return None
+    try:
+        doc = json.loads(candidates[0].read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return candidates[0] if doc.get("server") == ns.server else None
+
+
 def _normalize_shapes(shapes: dict) -> list[str]:
     """Normalize type-annotation strings in *shapes* in-place.
 
@@ -586,6 +613,51 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
         # Every entry was pruned as stale — don't leave dead content on disk.
         verify_target.unlink()
         print(f"[merge] removed {verify_target} (all entries stale)", file=sys.stderr)
+
+    # Stale-entry advisory.  Merge is offline by contract — it makes no
+    # tools/list call — so it cannot know the server's current tool set.  It
+    # cross-checks entries that were carried forward unprobed against the last
+    # recorded manifest instead, and only warns: dropping on this evidence
+    # would silently delete hand-edited shape specs.
+    probed_now = {name for sk in part_skeletons for name in sk}
+    carried = sorted(set(merged) - probed_now)
+    if carried:
+        manifest_p = _merge_manifest_path(ns, target)
+        manifest_tools: set[str] | None = None
+        manifest_name = ""
+        if manifest_p is not None and manifest_p.is_file():
+            manifest_name = manifest_p.name
+            try:
+                doc = json.loads(manifest_p.read_text())
+                tools_obj = doc.get("tools")
+                if isinstance(tools_obj, dict):
+                    manifest_tools = set(tools_obj)
+            except (OSError, json.JSONDecodeError):
+                manifest_tools = None
+        if manifest_tools is not None:
+            stale = [t for t in carried if t not in manifest_tools]
+            if stale:
+                print(
+                    f"[merge] ⚠  {len(stale)} shapes entry(ies) name tools absent from "
+                    f"{manifest_name}: {', '.join(stale)}",
+                    file=sys.stderr,
+                )
+                print(
+                    "[merge]    They were carried forward unprobed and may be retired. "
+                    "Remove them by hand if the server no longer exposes them.",
+                    file=sys.stderr,
+                )
+        else:
+            # No manifest: retired tools are undetectable here.  Carrying entries
+            # forward unprobed is the normal partial-re-probe case (re-probing one
+            # tool on a 40-tool server carries 39), so report the count only —
+            # enumerating names would make every partial merge noisy.
+            print(
+                f"[merge] {len(carried)} entry(ies) carried forward unprobed; no tool manifest "
+                "beside the shapes file, so retired tools cannot be detected. "
+                "Run `mcpgen codegen` to write one.",
+                file=sys.stderr,
+            )
 
     if not ns.keep_parts:
         shutil.rmtree(parts_d)
@@ -1081,6 +1153,12 @@ def main(argv: list[str] | None = None) -> int:
         dest="no_scrub",
         help="write probed_args to shapes.json verbatim (default: scrub emails, UUIDs, "
         "home-dir usernames and long numeric ids — shapes.json is a committed file)",
+    )
+    mg.add_argument(
+        "--manifest",
+        metavar="PATH",
+        help="tool-inventory manifest to cross-check carried-forward entries against "
+        "(default: <shapes-stem>.mcpgen.json beside the shapes file)",
     )
     mg.add_argument(
         "--config",
