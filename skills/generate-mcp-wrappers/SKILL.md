@@ -487,14 +487,18 @@ barrier stays on main.
 
    **Bootstrapping sample args.** Some tools need a real id first (e.g. before probing
    `get_entity`). Find a no-arg / discovery tool on *this* server that returns user or entity ids
-   — there is no universal tool for this, infer from `mcpgen list` output. Call it via
-   `<mcpgen> call <server> <discovery-tool> --out <server>.<discovery-tool>.probe-raw.json` to
-   capture the **raw** payload, then read the ids from that file. `mcpgen probe` emits only the
-   response *shape* (no values) and cannot supply ids.
+   — there is no universal tool for this, infer from `mcpgen list` output. Capture its raw
+   payload in the same invocation that probes it:
 
-   **`probed_args` carries live PII.** Batch agents write parts with raw args; the preflight above
-   is what keeps them out of git. The single scrub pass runs post-merge on the main thread at
-   step 4 — see `references/shape-spec.md`.
+   `<mcpgen> probe <server> <discovery-tool> --args '<args>' --emit-shape <shapes-path> --save-raw <server>.<discovery-tool>.probe-raw.json`
+
+   then read the ids from that file. `--save-raw` requires a `*.probe-raw.json` name (git-ignored)
+   and saves the duplicate live round-trip that a separate `mcpgen call --out` costs. Use
+   `mcpgen call --out` only when you do not want a shape at all.
+
+   **`probed_args` carries live PII.** Batch agents write parts with raw args; `mcpgen merge`
+   scrubs them on the way into `<shapes-path>`, and the step-3 ignore preflight covers the parts
+   themselves.
 
 3b. **Consolidate parts → shapes.json.**
 
@@ -526,9 +530,11 @@ barrier stays on main.
 
 4. **Edit the shape-spec — THIS is the judgment.**
 
-   **First: scrub `probed_args`.** This is the single scrub point — batch agents do NOT scrub
-   their parts. Follow the PII-vs-functional rules in `references/shape-spec.md`, which also
-   documents every field below.
+   **First: review the scrubbed `probed_args`.** `mcpgen merge` has already replaced emails,
+   UUIDs, home-directory usernames and long numeric ids, and flagged each changed entry with
+   `probe_args_scrubbed: true`. Read what remains and redact anything the patterns cannot
+   recognise — personal names, hostnames, bespoke internal ids. See the PII-vs-functional rules
+   in `references/shape-spec.md`, which also documents every field below.
 
    Then, for each tool entry, set `unwrap`, `return_model`, `return_container`,
    `input_overrides`, `fields`, and `source`; delete `_observed_shape`; and add
@@ -685,6 +691,7 @@ barrier stays on main.
   and object members fall back to `float` / `dict`. Widen to `str` only if the server actually
   accepts values outside the declared enum.
 
-- **Scrub `probed_args` before committing.** The post-merge scrub at step 4 is the single scrub
-  point. Parts (`.parts/`) and `<shapes-stem>.verify.json` are gitignored raw counterparts; the
-  only committable artifact is a fully-scrubbed `<shapes-path>`.
+- **Review `probed_args` before committing.** `mcpgen merge` scrubs the committed
+  `<shapes-path>` automatically; step 4 is where you catch what its patterns cannot recognise.
+  Parts (`.parts/`) and `<shapes-stem>.verify.json` are gitignored raw counterparts; the only
+  committable artifact is a fully-scrubbed `<shapes-path>`.

@@ -67,7 +67,7 @@ Each batch agent:
 3. drafts the step-4 shape entry — `unwrap` / `return_model` / `return_container` / `fields` /
    `input_overrides`, plus `discriminator` + `variants` for its sibling group;
 4. writes the part with **raw** `probed_args` (the step-3 ignore preflight keeps parts out of
-   git; the scrub runs once at step 4);
+   git; `mcpgen merge` scrubs them on the way into the committed shapes file);
 5. returns a compact per-tool summary — decision plus unwrap path — **never the payload**.
 
 ## Recon subagent

@@ -61,32 +61,31 @@ call. Never let a fixture fallback read as a live probe.
   would have replaced the entry) and they are never deleted afterwards.
 - Record `"_json_unwrap": true` as a note for the next reader when a payload was
   double-encoded. Codegen does not read that key.
-- `"probe_args_scrubbed": true` when a value had to be redacted. The roundtrip verifier
-  checks the `.verify.json` sidecar first; this flag matters only when the sidecar is absent
-  or does not cover that tool.
+- `"probe_args_scrubbed": true` is set by `mcpgen merge` when it redacted a value; add it by
+  hand when you redact one it missed. The roundtrip verifier checks the `.verify.json` sidecar
+  first, so this flag matters only when the sidecar is absent or does not cover that tool.
 
 ## Scrubbing `probed_args`
 
-The skeleton records live `probed_args` verbatim — real ids, names, possibly PII. With
-multi-probe it is a *list* of arg-dicts. Batch agents write parts with **raw** args; the
-step-3 ignore preflight is what keeps them out of git.
+`mcpgen merge` scrubs `probed_args` automatically before writing `<shapes-path>`. It replaces
+email addresses, UUIDs, a leading home-directory user segment (`/Users/<name>`, `/home/<name>`,
+`C:\Users\<name>`) and runs of 8+ digits with `<email>`, `<uuid>`, `<home>` and `<id>`, and sets
+`"probe_args_scrubbed": true` on every entry it changed. Raw values survive in the gitignored
+`.parts/` intermediates and in the gitignored `<shapes-stem>.verify.json` sidecar, which the
+roundtrip verifier reads first — so scrubbing does not break verification.
 
-There is exactly one scrub point: **post-merge, on the main thread, at step 4.** Open
-`<shapes-path>` and replace PII after `mcpgen merge` has written both the shapes file and its
-gitignored `<shapes-stem>.verify.json` sidecar. A real identifier in a version-controlled file
-is a leak that survives deletion (git history) and travels to anyone the repo reaches.
+**Strings only.** Non-string scalars are left alone deliberately: replacing an int account id
+with a placeholder string would change the JSON type and mislead both `input_overrides` and the
+verifier. A numeric id passed as an int is the known gap — check for one by hand.
 
-**Replace only values matching a PII pattern** — email addresses, UUIDs, long numeric IDs
-(8+ digits), auth tokens, personal names, or hostnames that could identify a user or system.
+**Read the merged file before committing.** The automatic pass is a floor, not a ceiling. It
+cannot recognise personal names, hostnames, or bespoke internal identifiers. Replace anything
+it missed and leave `probe_args_scrubbed: true` in place.
 
 **Do NOT replace functional values** — timezone names (`"UTC"`, `"America/New_York"`), generic
-table names (`"users"`, `"products"`), public repo owners/names, ISO timestamps, standard SQL
-queries, or anything not personally identifiable. The roundtrip verifier — the `run.py` smoke
-test that replays `probed_args` live — passes these to the real server, and the gitignored
-`.verify.json` sidecar holds the pre-scrub args for it. Scrubbing `<shapes-path>` therefore
-does not break verification.
+table names (`"users"`, `"products"`), public repo owners/names, ISO timestamps, or standard SQL
+queries. If the automatic pass rewrote a value you need verbatim, re-run the merge with
+`--no-scrub` and scrub that entry by hand.
 
-The shape-spec records *that* `entityType` was probed as `int` and the response *shape* —
-never values lifted out of the response payload. This does not empty `probed_args`: its
-functional values stay. Keep raw responses, if you want them, in
-`<server>.<tool>.probe-raw.json` (git-ignored), never in the shape-spec.
+Keep raw responses, if you want them, in `<server>.<tool>.probe-raw.json` (git-ignored) — write
+one with `mcpgen probe --save-raw`, never in the shape-spec.
