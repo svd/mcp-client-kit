@@ -37,5 +37,11 @@ line-length = 100
 select = ["E", "W", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.10"
 strict = true
+
+# mcpgen (mcp-client-kit) ships no py.typed marker; it is the dependency under
+# test, not code this repo type-checks.
+[[tool.mypy.overrides]]
+module = ["mcpgen.*"]
+ignore_missing_imports = true

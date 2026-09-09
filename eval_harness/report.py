@@ -404,9 +404,7 @@ def generate_report(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Generate eval report from result.json files."
-    )
+    parser = argparse.ArgumentParser(description="Generate eval report from result.json files.")
     parser.add_argument(
         "--base-dir",
         type=Path,

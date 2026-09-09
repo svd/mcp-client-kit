@@ -112,9 +112,7 @@ def check_signatures(server_py: Path, shapes_json: Path) -> CheckResult:
     except (OSError, json.JSONDecodeError) as e:
         return skip_("signatures", f"Could not load shapes.json: {e}")
 
-    inconclusive = [
-        t for t, s in shapes.items() if s.get("_probe_status") == "inconclusive"
-    ]
+    inconclusive = [t for t, s in shapes.items() if s.get("_probe_status") == "inconclusive"]
     if inconclusive:
         names = ", ".join(inconclusive)
         n = len(inconclusive)
@@ -138,17 +136,13 @@ def check_signatures(server_py: Path, shapes_json: Path) -> CheckResult:
             else:
                 expected_sig = f"-> {return_model}:"
             if expected_sig not in source:
-                failures.append(
-                    f"{tool_name}: expected '{expected_sig}' not found in source"
-                )
+                failures.append(f"{tool_name}: expected '{expected_sig}' not found in source")
         else:
             # null return_model — we expect -> Any: somewhere (at least one)
             pass
 
     # If any tool has return_model null, check that "-> Any:" appears at least once
-    has_null_return = any(
-        shape.get("return_model") is None for shape in shapes.values()
-    )
+    has_null_return = any(shape.get("return_model") is None for shape in shapes.values())
     if has_null_return and "-> Any:" not in source:
         failures.append("(unshaped tools): expected '-> Any:' in source but not found")
 
@@ -194,9 +188,7 @@ def _idempotency_tools(
             # "name" is set last so a payload that carries its own conflicting
             # "name" key cannot rename the tool out from under the shapes.
             tools = [
-                {**spec, "name": name}
-                for name, spec in raw_tools.items()
-                if isinstance(spec, dict)
+                {**spec, "name": name} for name, spec in raw_tools.items() if isinstance(spec, dict)
             ]
             if tools:
                 label = f"real tool schemas from {mcpgen_json.name}"
@@ -213,8 +205,7 @@ def _idempotency_tools(
                 degraded = f"{mcpgen_json.name} present but unusable ({what})"
 
     stub_tools = [
-        {"name": k, "inputSchema": {"type": "object", "properties": {}}}
-        for k in shapes_data.keys()
+        {"name": k, "inputSchema": {"type": "object", "properties": {}}} for k in shapes_data.keys()
     ]
     return stub_tools, f"stub schemas only — {degraded}"
 
@@ -226,11 +217,9 @@ def check_idempotency(server: str, shapes_json: Path) -> CheckResult:
     back to property-less stubs otherwise; the pass detail names which was used.
     """
     try:
-        import mcpgen.codegen as codegen  # type: ignore[import-not-found]  # noqa: PLC0415
+        import mcpgen.codegen as codegen  # noqa: PLC0415
     except ImportError:
-        return skip_(
-            "idempotency", "mcpgen not installed — check DISABLED (install to enable)"
-        )
+        return skip_("idempotency", "mcpgen not installed — check DISABLED (install to enable)")
 
     try:
         shapes_data: dict[str, Any] = json.loads(shapes_json.read_text(encoding="utf-8"))
@@ -357,9 +346,7 @@ def check_pii(shapes_json: Path) -> CheckResult:
         _scan_for_pii(tool_name, probed_args, "", findings)
 
     if findings:
-        detail_lines = [
-            f"{tool} @ {fpath!r}: {preview!r}" for tool, fpath, preview in findings
-        ]
+        detail_lines = [f"{tool} @ {fpath!r}: {preview!r}" for tool, fpath, preview in findings]
         return fail_(
             "pii",
             f"{len(findings)} PII-like value(s) found in probed_args",
@@ -422,9 +409,7 @@ def _call_once(fn: Any, caller: Any, probed_args: dict[str, Any]) -> Any:
     return asyncio.run(asyncio.wait_for(fn(caller, **probed_args), _CALL_TIMEOUT))
 
 
-def _call_with_retry(
-    fn: Any, caller: Any, probed_args: dict[str, Any]
-) -> tuple[Any, int]:
+def _call_with_retry(fn: Any, caller: Any, probed_args: dict[str, Any]) -> tuple[Any, int]:
     """Return (result, attempt_number). Raises the last exception if all fail.
 
     Only exceptions are retried, so a well-formed result — including an
@@ -442,15 +427,13 @@ def _call_with_retry(
                 # deriving it from the final exception alone would undercount
                 # a run whose first attempt was transient and whose second
                 # was not.
-                e._eval_attempts = attempt  # noqa: SLF001
+                e._eval_attempts = attempt  # type: ignore[attr-defined]  # noqa: SLF001
                 raise
             time.sleep(_RETRY_BACKOFF[attempt - 1])
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def check_roundtrip(
-    spec: ServerSpec, server_dir: Path, shapes_json: Path
-) -> CheckResult:
+def check_roundtrip(spec: ServerSpec, server_dir: Path, shapes_json: Path) -> CheckResult:
     """Live call: find a shaped non-mutating tool, call it, verify typed return."""
     try:
         shapes: dict[str, Any] = json.loads(shapes_json.read_text(encoding="utf-8"))
@@ -484,9 +467,7 @@ def check_roundtrip(
         # auth establishes it.
         if not shapes:
             return skip_("roundtrip", "shapes_json_empty")
-        inconclusive = [
-            t for t, sh in shapes.items() if sh.get("_probe_status") == "inconclusive"
-        ]
+        inconclusive = [t for t, sh in shapes.items() if sh.get("_probe_status") == "inconclusive"]
         if inconclusive:
             n = len(inconclusive)
             names = ", ".join(inconclusive)
@@ -517,13 +498,11 @@ def check_roundtrip(
         return fail_("roundtrip", f"Could not read generated module: {e}")
 
     try:
-        from mcpgen._bridge import (  # type: ignore[import-not-found]  # noqa: PLC0415
+        from mcpgen._bridge import (  # noqa: PLC0415
             McpBridgeCaller,
         )
     except ImportError:
-        return skip_(
-            "roundtrip", "mcpgen not installed — check DISABLED (install to enable)"
-        )
+        return skip_("roundtrip", "mcpgen not installed — check DISABLED (install to enable)")
 
     # Build the caller
     bearer_token: str | None = None
@@ -543,13 +522,9 @@ def check_roundtrip(
 
     try:
         if spec.transport == "stdio":
-            caller = McpBridgeCaller(
-                cmd=spec.launch, bearer=bearer_token, env=resolved_env
-            )
+            caller = McpBridgeCaller(cmd=spec.launch, bearer=bearer_token, env=resolved_env)
         else:
-            caller = McpBridgeCaller(
-                url=spec.launch, bearer=bearer_token, env=resolved_env
-            )
+            caller = McpBridgeCaller(url=spec.launch, bearer=bearer_token, env=resolved_env)
     except Exception as e:
         return fail_("roundtrip", f"Failed to construct caller: {e}")
 
@@ -599,9 +574,7 @@ def check_roundtrip(
     if verify_args_path.exists():
         try:
             overrides = json.loads(verify_args_path.read_text(encoding="utf-8"))
-            override_val = (
-                overrides.get(candidate_name) if isinstance(overrides, dict) else None
-            )
+            override_val = overrides.get(candidate_name) if isinstance(overrides, dict) else None
             if isinstance(override_val, list):
                 override_val = override_val[0] if override_val else None
             if isinstance(override_val, dict):

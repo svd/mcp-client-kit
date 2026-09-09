@@ -194,9 +194,7 @@ def test_runtime_versions_has_no_timestamp(tmp_path: Path, monkeypatch: pytest.M
     assert set(result) == {"engine", "skill_ref", "skill_path"}
 
 
-def test_runtime_versions_contracts_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_runtime_versions_contracts_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """skill_path collapses the home prefix — result.json must not carry a username."""
     monkeypatch.delenv("EVAL_SKILL_REF", raising=False)
     monkeypatch.setattr(versions.metadata, "version", lambda name: "0.7.0")

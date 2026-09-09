@@ -1,5 +1,5 @@
 """Tests for eval_harness.verify — the 5-check contract."""
-import ast
+
 import json
 import sys
 from pathlib import Path
@@ -7,17 +7,15 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from eval_harness.manifest import ServerSpec
 from eval_harness.verify import (
     check_ast,
-    check_signatures,
+    check_idempotency,
     check_pii,
     check_roundtrip,
-    check_idempotency,
+    check_signatures,
     verify_server,
-    CheckResult,
 )
-from eval_harness.manifest import ServerSpec
-
 
 # ---------------------------------------------------------------------------
 # Check 1: AST
@@ -461,9 +459,7 @@ def test_check_idempotency_uses_real_schemas_when_mcpgen_json_present(
     """With <server>.mcpgen.json on disk, the check renders from real tool schemas."""
     shapes = tmp_path / "testserver.shapes.json"
     shapes.write_text(json.dumps(_SHAPES_FOR_IDEM), encoding="utf-8")
-    (tmp_path / "testserver.mcpgen.json").write_text(
-        json.dumps(_MCPGEN_JSON), encoding="utf-8"
-    )
+    (tmp_path / "testserver.mcpgen.json").write_text(json.dumps(_MCPGEN_JSON), encoding="utf-8")
 
     result = check_idempotency("testserver", shapes)
     assert result.status == "pass", f"Expected pass, got {result.status!r}: {result.detail}"

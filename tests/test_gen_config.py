@@ -1,8 +1,7 @@
 """Tests for eval_harness.gen_config — mcpServers entry generation."""
+
 import sys
 from pathlib import Path
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from eval_harness.gen_config import _spec_to_entry, build_mcp_config
@@ -31,6 +30,7 @@ def _stdio_spec() -> ServerSpec:
 # bearer HTTP → headers block
 # ---------------------------------------------------------------------------
 
+
 def test_bearer_http_emits_headers():
     entry = _spec_to_entry(_http_spec("bearer:GITHUB_PAT"))
     assert "headers" in entry
@@ -55,6 +55,7 @@ def test_bearer_http_type_url_present():
 # no-auth HTTP → no headers
 # ---------------------------------------------------------------------------
 
+
 def test_none_auth_http_no_headers():
     entry = _spec_to_entry(_http_spec("none"))
     assert "headers" not in entry
@@ -63,6 +64,7 @@ def test_none_auth_http_no_headers():
 # ---------------------------------------------------------------------------
 # stdio → unchanged (command/args, no headers)
 # ---------------------------------------------------------------------------
+
 
 def test_stdio_spec_no_headers():
     entry = _spec_to_entry(_stdio_spec())
@@ -74,6 +76,7 @@ def test_stdio_spec_no_headers():
 # ---------------------------------------------------------------------------
 # build_mcp_config integration
 # ---------------------------------------------------------------------------
+
 
 def test_build_mcp_config_bearer():
     specs = [_http_spec("bearer:MY_TOKEN")]

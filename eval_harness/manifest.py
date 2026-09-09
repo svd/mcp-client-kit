@@ -74,9 +74,7 @@ def load_manifest(path: Path | str = Path("servers/servers.toml")) -> list[Serve
     return specs
 
 
-def get_server(
-    name: str, path: Path | str = Path("servers/servers.toml")
-) -> ServerSpec:
+def get_server(name: str, path: Path | str = Path("servers/servers.toml")) -> ServerSpec:
     """Get a single server spec by name."""
     for spec in load_manifest(path):
         if spec.name == name:

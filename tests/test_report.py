@@ -1,24 +1,22 @@
 """Tests for eval_harness.report — aggregate report generation."""
-import json
-from pathlib import Path
-import pytest
 
+import json
 import sys
+from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from eval_harness.report import (
-    find_results,
-    render_matrix,
-    render_detail,
-    generate_report,
-    format_transport,
-    format_auth,
-    mode_cell,
-    verdict_cell,
     _check_cell,
     _humanize_skip,
+    format_auth,
+    format_transport,
+    generate_report,
+    mode_cell,
+    render_detail,
+    render_matrix,
     render_version_line,
+    verdict_cell,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -423,8 +421,6 @@ def test_matrix_renders_a_missing_engine_stamp_as_unknown() -> None:
 
 def test_mixed_version_banner_names_the_remedy() -> None:
     """The banner must say how to re-level the corpus, not just that it is split."""
-    line = render_version_line(
-        [_row_for("alpha", "0.8.0"), _row_for("beta", "0.9.0.dev1")]
-    )
+    line = render_version_line([_row_for("alpha", "0.8.0"), _row_for("beta", "0.9.0.dev1")])
     assert "mixed engine versions" in line
     assert "/rerun-eval-at-version" in line

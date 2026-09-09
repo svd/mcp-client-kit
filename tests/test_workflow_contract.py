@@ -6,6 +6,7 @@ fails loudly when those two drift apart — the analyzer just silently picks a
 different transcript and attributes harness actions to the skill under test,
 which is the exact bug this contract exists to prevent.
 """
+
 import re
 from pathlib import Path
 

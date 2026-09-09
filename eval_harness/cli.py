@@ -72,9 +72,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if verdict == "pass":
         return 0
     if verdict == "error":
-        print(
-            f"Warning: verify returned verdict=error for {spec.name}", file=sys.stderr
-        )
+        print(f"Warning: verify returned verdict=error for {spec.name}", file=sys.stderr)
         return 0
     # "partial" or "fail"
     return 1
@@ -111,9 +109,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     result_paths = find_results(base_dir)
     n_servers = len(result_paths)
 
-    generate_report(
-        base_dir=base_dir, out_path=out_path, with_narrative=args.with_narrative
-    )
+    generate_report(base_dir=base_dir, out_path=out_path, with_narrative=args.with_narrative)
     print(f"Report written: {out_path} ({n_servers} servers)")
     return 0
 
@@ -164,9 +160,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # --- report ---
-    p_report = sub.add_parser(
-        "report", help="Generate EVAL_REPORT.md from result.json files."
-    )
+    p_report = sub.add_parser("report", help="Generate EVAL_REPORT.md from result.json files.")
     p_report.add_argument(
         "--base-dir",
         default="eval",

@@ -1,4 +1,5 @@
 """Tests for eval_harness.manifest — server spec loading."""
+
 import sys
 from pathlib import Path
 
@@ -26,12 +27,12 @@ def test_seed_is_loaded_when_present(tmp_path: Path) -> None:
     """Seed commands are carried through verbatim, in order."""
     path = _write(
         tmp_path,
-        '[[server]]\n'
+        "[[server]]\n"
         'name = "memory"\n'
         'transport = "stdio"\n'
         'launch = "npx -y @modelcontextprotocol/server-memory"\n'
-        'seed = ["mcpgen call memory create_entities --args \'{}\'", '
-        '"mcpgen call memory create_relations --args \'{}\'"]\n',
+        "seed = [\"mcpgen call memory create_entities --args '{}'\", "
+        "\"mcpgen call memory create_relations --args '{}'\"]\n",
     )
     (spec,) = load_manifest(path)
     assert spec.seed == [
