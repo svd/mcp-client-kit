@@ -44,9 +44,37 @@ for id/type fields → `{"entityType": "int"}`.
 
 ## `fields`
 
-Keep **only top-level stable scalars the probe actually saw**, plus one exception: a
-hand-added `"<field>": "list"` for a field seen only as an empty list. Mark observed-`None`
-fields nullable (`"benchDurationCurrent": "float | None"`).
+Top-level entries only, carrying the types the probe actually saw. Mark observed-`None` fields
+nullable (`"benchDurationCurrent": "float | None"`).
+
+A container field carries an element/value type only where the evidence covers every member:
+
+| Merged `_observed_shape` for the field | `fields` value |
+|---|---|
+| `{"a": "str", "b": "str"}` | `dict[str, str]` |
+| a mixed leaf, a nested dict/list leaf, `Any`, `str \| None`, or `...` | `dict` |
+| a list whose elements are all confirmed the same scalar | `list[str]` |
+| a list whose element type rests on the sampled element alone | `list` |
+| `["<empty>"]` | `list`, added by hand — see SKILL.md step 4 |
+
+Dict evidence is complete: the skeleton carries every key of that object, so one probe settles
+it. **List evidence is not** — `summarize_shape` records the first element and an `...xN`
+sentinel, so `list[str]` needs the raw payload
+(`mcpgen probe --save-raw <server>.<tool>.probe-raw.json`, git-ignored) or a second probe
+confirming the rest. Without that, `list`.
+
+`dict[str, Any]` and `list[Any]` state exactly what `dict` and `list` state — never write them.
+Neither is `dict[str, str | None]` on offer: the caller narrows a `.get()` either way.
+
+Inside a discriminated tool the rule applies per `variants` entry, on that variant's own
+probes. A generic base model (step 4 option 2) keeps a container bare unless every probed
+variant showed the same element or value type.
+
+**Nesting stops at the annotation.** Codegen emits a `TypedDict` only for a name in
+`return_model` or in a `variants` entry, so `"owner": "Owner"` renders an annotation with no
+class behind it — the module still imports and mypy fails instead. A nested object is `dict`,
+or `dict[str, str]` when it qualifies above; when its keys are worth a reader's time, record
+them in `session-overview.md`.
 
 ## `source`
 
