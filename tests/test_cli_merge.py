@@ -115,7 +115,8 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
         lambda *a, **kw: asyncio.coroutine(lambda: fake_shape)(),
     )
     # Also patch asyncio.run to call the coroutine synchronously.
-    monkeypatch.setattr("asyncio.run", lambda coro: fake_shape)
+    # _probe returns (shape, observed_byte_size, raw_payload)
+    monkeypatch.setattr("asyncio.run", lambda coro: (fake_shape, 42, fake_shape))
 
     from mcpgen.cli import _cmd_probe
 
@@ -131,7 +132,10 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
         config=None,
         cred_backend=None,
     )
-    with patch("mcpgen.cli._probe", return_value=fake_shape), patch("asyncio.run", return_value=fake_shape):
+    with (
+        patch("mcpgen.cli._probe", return_value=fake_shape),
+        patch("asyncio.run", return_value=(fake_shape, 42, fake_shape)),
+    ):
         _cmd_probe(ns)
 
     # Shared target must NOT exist (part was written instead).

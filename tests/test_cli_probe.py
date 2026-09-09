@@ -36,7 +36,9 @@ def _ns(server: str, tool: str, args: list[str] | None, emit_shape: str | None =
 
 
 _FAKE_SHAPE = {"names": "list"}
-_FAKE_PROBE_RESULT = (_FAKE_SHAPE, 42)  # (_probe now returns (shape, observed_byte_size))
+_FAKE_RAW = {"names": ["alice", "bob"]}
+# _probe returns (shape, observed_byte_size, raw_payload)
+_FAKE_PROBE_RESULT = (_FAKE_SHAPE, 42, _FAKE_RAW)
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +186,7 @@ def test_probe_records_observed_bytes_in_skeleton(tmp_path):
     with patch(
         "mcpgen.cli._probe",
         new_callable=AsyncMock,
-        side_effect=[(_FAKE_SHAPE, 1200), (_FAKE_SHAPE, 675000)],
+        side_effect=[(_FAKE_SHAPE, 1200, _FAKE_RAW), (_FAKE_SHAPE, 675000, _FAKE_RAW)],
     ):
         rc = _cmd_probe(ns)
 
@@ -211,6 +213,20 @@ def test_probe_size_measures_utf8_bytes_not_escaped_char_count():
         yield mock_session
 
     with patch("mcpgen._bridge.session", fake_session):
-        _shape, size = asyncio.run(_probe("acme", "get_text", {}))
+        _shape, size, _raw = asyncio.run(_probe("acme", "get_text", {}))
 
     assert size == expected_len
+
+
+def test_probe_helper_returns_raw_payload():
+    """_probe returns (shape, size, raw) — the raw payload is no longer discarded."""
+    payload = {"items": [{"id": "abc", "name": "widget"}]}
+    caller = MagicMock()
+    caller.call = AsyncMock(return_value=payload)
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", return_value=caller):
+        shape, size, raw = asyncio.run(_probe("acme", "search", {"q": "x"}))
+
+    assert raw == payload, "raw payload must be returned verbatim"
+    assert isinstance(size, int) and size > 0
+    assert isinstance(shape, dict)

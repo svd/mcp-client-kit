@@ -77,8 +77,12 @@ async def _probe(
     cred_backend: str | None = None,
     creds_path: Path | None = None,
     env: dict[str, str] | None = None,
-) -> tuple[Any, int]:
-    """Return `(observed_shape, observed_byte_size)` for one live probe call."""
+) -> tuple[Any, int, Any]:
+    """Return `(observed_shape, observed_byte_size, raw_payload)` for one live probe call.
+
+    The raw payload is kept so `probe --save-raw` can persist it without a
+    second live call against a rate-limited server (see cli `_cmd_probe`).
+    """
     caller = _bridge.McpBridgeCaller(
         cmd=cmd,
         url=url,
@@ -91,7 +95,7 @@ async def _probe(
     )
     raw = await caller.call(server, tool, args)
     size = len(json.dumps(raw, default=str, ensure_ascii=False).encode("utf-8"))
-    return codegen.summarize_shape(raw), size
+    return codegen.summarize_shape(raw), size, raw
 
 
 async def _call(
@@ -315,7 +319,7 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         args = json.loads(ns.probe_args) if ns.probe_args else {}
         print(f"[codegen] probing {ns.probe}({args}) …", file=sys.stderr)
         try:
-            shape, _size = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, **conn))
+            shape, _size, _raw = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[codegen] error: {exc}", file=sys.stderr)
             return 1
@@ -370,7 +374,7 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
         # one session per probe (prototype); pooling is out of scope
         try:
-            shape, size = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
+            shape, size, _raw = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[probe] error: {exc}", file=sys.stderr)
             return 1
