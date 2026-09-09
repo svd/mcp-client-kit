@@ -357,6 +357,19 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     raw_args_list: list[str] = ns.args or []
     args_list: list[dict] = [json.loads(a) for a in raw_args_list] if raw_args_list else [{}]
     n = len(args_list)
+
+    save_raw = getattr(ns, "save_raw", None)
+    if save_raw:
+        # .gitignore ignores *.probe-raw.json; requiring the suffix is what keeps
+        # a PII-bearing payload out of git.  Advice in --help is not enforcement.
+        if not Path(save_raw).name.endswith(".probe-raw.json"):
+            print(
+                f"[probe] error: refusing to write raw payload to {Path(save_raw).name} — "
+                "the name must end in .probe-raw.json (the git-ignored pattern)",
+                file=sys.stderr,
+            )
+            return 1
+
     print(f"[probe] {ns.server}.{ns.tool} ({n} probe(s)) …", file=sys.stderr)
 
     conn = dict(
@@ -370,16 +383,18 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     )
     shapes = []
     sizes = []
+    raws: list[Any] = []
     for i, args in enumerate(args_list):
         print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
         # one session per probe (prototype); pooling is out of scope
         try:
-            shape, size, _raw = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
+            shape, size, raw = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[probe] error: {exc}", file=sys.stderr)
             return 1
         shapes.append(shape)
         sizes.append(size)
+        raws.append(raw)
 
     skeleton = codegen.probe_skeleton(ns.tool, args_list, shapes, observed_bytes=sizes)
     out = json.dumps(skeleton, indent=2)
@@ -392,6 +407,25 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         print(f"[probe] run `mcpgen merge {ns.server}` to consolidate into {target}", file=sys.stderr)
     else:
         sys.stdout.write(out + "\n")
+
+    if save_raw:
+        if len(raws) == 1 and isinstance(raws[0], str):
+            text = raws[0]
+        elif len(raws) == 1:
+            text = json.dumps(raws[0], indent=2, default=str)
+        else:
+            text = json.dumps(
+                [{"args": a, "raw": r} for a, r in zip(args_list, raws, strict=True)], indent=2, default=str
+            )
+        raw_target = Path(save_raw)
+        _atomic_write_text(raw_target, text + "\n")
+        kb = len(text.encode()) / 1024
+        print(f"[probe] wrote raw payload ({kb:.1f} KB) to {raw_target}", file=sys.stderr)
+        print(
+            "[probe] ⚠  raw payload contains real ids/PII — git-ignored here, but do not paste it "
+            "into a committed file.",
+            file=sys.stderr,
+        )
 
     try:
         _DISCRIMINATOR_KEYS = {"entitytype", "type", "kind", "category", "entity_type", "objecttype", "resourcetype"}
@@ -983,6 +1017,13 @@ def main(argv: list[str] | None = None) -> int:
         help="JSON args for one probe call; repeat for multi-probe (default: {})",
     )
     pr.add_argument("--emit-shape", help="write skeleton to this path (default: stdout)")
+    pr.add_argument(
+        "--save-raw",
+        dest="save_raw",
+        metavar="FILE",
+        help="also write the untruncated raw payload here; the name MUST end in "
+        ".probe-raw.json (git-ignored). Multi-probe writes a JSON array of {args, raw}",
+    )
     pr.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(pr)
     pr.set_defaults(func=_cmd_probe)

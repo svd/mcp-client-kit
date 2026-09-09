@@ -20,12 +20,19 @@ from mcpgen.cli import _cmd_probe, _probe
 # ---------------------------------------------------------------------------
 
 
-def _ns(server: str, tool: str, args: list[str] | None, emit_shape: str | None = None) -> SimpleNamespace:
+def _ns(
+    server: str,
+    tool: str,
+    args: list[str] | None,
+    emit_shape: str | None = None,
+    save_raw: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         server=server,
         tool=tool,
         args=args,
         emit_shape=emit_shape,
+        save_raw=save_raw,
         stdio=None,
         url=None,
         bearer=None,
@@ -230,3 +237,96 @@ def test_probe_helper_returns_raw_payload():
     assert raw == payload, "raw payload must be returned verbatim"
     assert isinstance(size, int) and size > 0
     assert isinstance(shape, dict)
+
+
+# ---------------------------------------------------------------------------
+# --save-raw
+# ---------------------------------------------------------------------------
+
+
+def test_probe_save_raw_writes_single_payload(tmp_path):
+    """One probe + --save-raw writes the payload as pretty JSON, like `mcpgen call --out`."""
+    raw_file = tmp_path / "acme.search.probe-raw.json"
+    ns = _ns("acme", "search", ['{"q": "widgets"}'], save_raw=str(raw_file))
+
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
+        rc = _cmd_probe(ns)
+
+    assert rc == 0
+    assert json.loads(raw_file.read_text()) == _FAKE_RAW
+
+
+def test_probe_save_raw_multi_probe_writes_args_and_raw_pairs(tmp_path):
+    """Multi-probe --save-raw writes one {args, raw} object per call, in order."""
+    raw_file = tmp_path / "acme.search.probe-raw.json"
+    ns = _ns(
+        "acme",
+        "search",
+        ['{"entityType": 1}', '{"entityType": 2}'],
+        save_raw=str(raw_file),
+    )
+
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
+        rc = _cmd_probe(ns)
+
+    assert rc == 0
+    doc = json.loads(raw_file.read_text())
+    assert [e["args"] for e in doc] == [{"entityType": 1}, {"entityType": 2}]
+    assert [e["raw"] for e in doc] == [_FAKE_RAW, _FAKE_RAW]
+
+
+def test_probe_save_raw_string_payload_written_verbatim(tmp_path):
+    """A prose payload is written as text, not as a JSON-quoted string."""
+    raw_file = tmp_path / "docs.search.probe-raw.json"
+    ns = _ns("docs", "search", ['{"q": "x"}'], save_raw=str(raw_file))
+
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=({"_": "str"}, 5, "hello")):
+        rc = _cmd_probe(ns)
+
+    assert rc == 0
+    assert raw_file.read_text() == "hello\n"
+
+
+def test_probe_save_raw_refuses_shapes_path(tmp_path, capsys):
+    """--save-raw must not overwrite a committed sidecar."""
+    ns = _ns("acme", "search", ['{"q": "x"}'], save_raw=str(tmp_path / "acme.shapes.json"))
+
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
+        rc = _cmd_probe(ns)
+
+    assert rc == 1
+    assert "refusing" in capsys.readouterr().err.lower()
+    assert not (tmp_path / "acme.shapes.json").exists()
+
+
+def test_probe_save_raw_refuses_name_outside_the_gitignored_glob(tmp_path, capsys):
+    """acme.raw.json is not covered by .gitignore — refuse it rather than advise."""
+    ns = _ns("acme", "search", ['{"q": "x"}'], save_raw=str(tmp_path / "acme.raw.json"))
+
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT) as probe:
+        rc = _cmd_probe(ns)
+
+    assert rc == 1
+    assert ".probe-raw.json" in capsys.readouterr().err
+    assert not (tmp_path / "acme.raw.json").exists()
+    probe.assert_not_awaited()  # the guard must run before any live call
+
+
+def test_probe_save_raw_warns_about_pii(tmp_path, capsys):
+    ns = _ns("acme", "search", ['{"q": "x"}'], save_raw=str(tmp_path / "acme.probe-raw.json"))
+
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
+        _cmd_probe(ns)
+
+    assert "PII" in capsys.readouterr().err
+
+
+def test_probe_without_save_raw_writes_no_extra_file(tmp_path):
+    """Default behaviour is unchanged: no raw file appears."""
+    shapes_file = tmp_path / "acme.shapes.json"
+    ns = _ns("acme", "search", ['{"q": "x"}'], emit_shape=str(shapes_file))
+
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
+        _cmd_probe(ns)
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["acme.shapes.json.parts"]
