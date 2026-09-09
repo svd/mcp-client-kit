@@ -61,6 +61,12 @@ from mcp.shared.auth import (
     OAuthToken,
 )
 
+if sys.version_info < (3, 11):  # pragma: no cover - version-gated
+    # ExceptionGroup became a builtin in 3.11. anyio requires this backport below
+    # that, so it is present wherever the MCP SDK is; the isinstance checks in
+    # _carries_interrupt and _describe need the same class anyio raises.
+    from exceptiongroup import BaseExceptionGroup
+
 DEFAULT_CREDS_PATH = Path.home() / ".mcpgen" / "credentials.json"
 DEFAULT_CONFIG_PATH = Path.home() / ".mcpgen" / "config.json"
 
@@ -2551,7 +2557,8 @@ async def login(
                     # awaits the same future under suppress(), so the background
                     # task exits cleanly instead of dangling.
                     return await asyncio.wait_for(callback_future, timeout)
-                except TimeoutError:
+                except asyncio.TimeoutError:
+                    # Not the builtin: only 3.11+ aliases asyncio.TimeoutError to it.
                     raise TimeoutError(
                         f"No OAuth callback received within {timeout}s. The browser never "
                         "returned to mcpgen — some authorization servers just close the tab when you "

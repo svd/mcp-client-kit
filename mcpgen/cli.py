@@ -77,8 +77,12 @@ async def _probe(
     cred_backend: str | None = None,
     creds_path: Path | None = None,
     env: dict[str, str] | None = None,
-) -> tuple[Any, int]:
-    """Return `(observed_shape, observed_byte_size)` for one live probe call."""
+) -> tuple[Any, int, Any]:
+    """Return `(observed_shape, observed_byte_size, raw_payload)` for one live probe call.
+
+    The raw payload is kept so `probe --save-raw` can persist it without a
+    second live call against a rate-limited server (see cli `_cmd_probe`).
+    """
     caller = _bridge.McpBridgeCaller(
         cmd=cmd,
         url=url,
@@ -91,7 +95,7 @@ async def _probe(
     )
     raw = await caller.call(server, tool, args)
     size = len(json.dumps(raw, default=str, ensure_ascii=False).encode("utf-8"))
-    return codegen.summarize_shape(raw), size
+    return codegen.summarize_shape(raw), size, raw
 
 
 async def _call(
@@ -190,6 +194,33 @@ def _parts_dir(target: Path) -> Path:
     e.g. acme.shapes.json  →  acme.shapes.json.parts/
     """
     return target.with_name(target.name + ".parts")
+
+
+def _merge_manifest_path(ns: argparse.Namespace, target: Path) -> Path | None:
+    """Locate the tool-inventory manifest for `merge`'s stale-entry advisory.
+
+    --manifest wins; otherwise <stem>.mcpgen.json beside the shapes file;
+    otherwise the sole *.mcpgen.json in that directory, when there is exactly
+    one and its `server` field matches — a foreign manifest would drive
+    confident, wrong "retired tool" warnings.  Returns None when nothing
+    resolves; the advisory then degrades to a count-only line rather than
+    failing.
+    """
+    override = getattr(ns, "manifest", None)
+    if override:
+        return Path(override)
+    stem = target.name[: -len(".shapes.json")] if target.name.endswith(".shapes.json") else target.stem
+    beside = target.with_name(stem + ".mcpgen.json")
+    if beside.is_file():
+        return beside
+    candidates = sorted(target.parent.glob("*.mcpgen.json"))
+    if len(candidates) != 1:
+        return None
+    try:
+        doc = json.loads(candidates[0].read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return candidates[0] if doc.get("server") == ns.server else None
 
 
 def _normalize_shapes(shapes: dict) -> list[str]:
@@ -315,7 +346,7 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         args = json.loads(ns.probe_args) if ns.probe_args else {}
         print(f"[codegen] probing {ns.probe}({args}) …", file=sys.stderr)
         try:
-            shape, _size = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, **conn))
+            shape, _size, _raw = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[codegen] error: {exc}", file=sys.stderr)
             return 1
@@ -353,6 +384,19 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     raw_args_list: list[str] = ns.args or []
     args_list: list[dict] = [json.loads(a) for a in raw_args_list] if raw_args_list else [{}]
     n = len(args_list)
+
+    save_raw = getattr(ns, "save_raw", None)
+    if save_raw:
+        # .gitignore ignores *.probe-raw.json; requiring the suffix is what keeps
+        # a PII-bearing payload out of git.  Advice in --help is not enforcement.
+        if not Path(save_raw).name.endswith(".probe-raw.json"):
+            print(
+                f"[probe] error: refusing to write raw payload to {Path(save_raw).name} — "
+                "the name must end in .probe-raw.json (the git-ignored pattern)",
+                file=sys.stderr,
+            )
+            return 1
+
     print(f"[probe] {ns.server}.{ns.tool} ({n} probe(s)) …", file=sys.stderr)
 
     conn = dict(
@@ -366,16 +410,18 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     )
     shapes = []
     sizes = []
+    raws: list[Any] = []
     for i, args in enumerate(args_list):
         print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
         # one session per probe (prototype); pooling is out of scope
         try:
-            shape, size = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
+            shape, size, raw = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[probe] error: {exc}", file=sys.stderr)
             return 1
         shapes.append(shape)
         sizes.append(size)
+        raws.append(raw)
 
     skeleton = codegen.probe_skeleton(ns.tool, args_list, shapes, observed_bytes=sizes)
     out = json.dumps(skeleton, indent=2)
@@ -388,6 +434,25 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         print(f"[probe] run `mcpgen merge {ns.server}` to consolidate into {target}", file=sys.stderr)
     else:
         sys.stdout.write(out + "\n")
+
+    if save_raw:
+        if len(raws) == 1 and isinstance(raws[0], str):
+            text = raws[0]
+        elif len(raws) == 1:
+            text = json.dumps(raws[0], indent=2, default=str)
+        else:
+            text = json.dumps(
+                [{"args": a, "raw": r} for a, r in zip(args_list, raws, strict=True)], indent=2, default=str
+            )
+        raw_target = Path(save_raw)
+        _atomic_write_text(raw_target, text + "\n")
+        kb = len(text.encode()) / 1024
+        print(f"[probe] wrote raw payload ({kb:.1f} KB) to {raw_target}", file=sys.stderr)
+        print(
+            "[probe] ⚠  raw payload contains real ids/PII — git-ignored here, but do not paste it "
+            "into a committed file.",
+            file=sys.stderr,
+        )
 
     try:
         _DISCRIMINATOR_KEYS = {"entitytype", "type", "kind", "category", "entity_type", "objecttype", "resourcetype"}
@@ -491,12 +556,11 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
 
     part_skeletons = [json.loads(p.read_text()) for p in parts]
     merged = codegen.merge_skeletons([base] + part_skeletons)
-    _atomic_write_text(target, json.dumps(merged, indent=2) + "\n")
-    print(f"[merge] wrote {target} ({len(merged)} tool(s))", file=sys.stderr)
 
-    # Emit verify sidecar: raw probed_args from parts only (pre-scrub),
-    # keyed by tool name.  Omit no-arg tools (probed_args == {}).
-    # Overlay existing sidecar so partial re-probes preserve prior entries.
+    # Verify sidecar FIRST, from the raw parts — it is the gold source for the
+    # roundtrip verifier and is gitignored, so it keeps pre-scrub values.
+    # Omit no-arg tools (probed_args == {}).  Overlay an existing sidecar so
+    # partial re-probes preserve prior entries.
     stem = target.name[: -len(".shapes.json")] if target.name.endswith(".shapes.json") else target.stem
     verify_target = target.with_name(stem + ".verify.json")
     verify_map: dict = {}
@@ -514,6 +578,30 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
     # Prune entries for tools no longer part of the merged shapes (e.g. the
     # server dropped the tool) — otherwise dead entries persist forever.
     verify_map = {k: v for k, v in verify_map.items() if k in merged}
+
+    # Scrub only what gets committed.  shapes.json is version-controlled; the
+    # parts dir and the verify sidecar are not.
+    if getattr(ns, "no_scrub", False):
+        print(
+            "[merge] ⚠  --no-scrub: probed_args written verbatim to a committed file — "
+            "check it for real ids/PII before committing.",
+            file=sys.stderr,
+        )
+    else:
+        merged, scrubbed_tools = codegen.scrub_skeletons(merged)
+        if scrubbed_tools:
+            print(
+                f"[merge] scrubbed probed_args for {len(scrubbed_tools)} tool(s): {', '.join(scrubbed_tools)}",
+                file=sys.stderr,
+            )
+            print(
+                f"[merge]    raw values kept in {verify_target.name} (git-ignored).",
+                file=sys.stderr,
+            )
+
+    _atomic_write_text(target, json.dumps(merged, indent=2) + "\n")
+    print(f"[merge] wrote {target} ({len(merged)} tool(s))", file=sys.stderr)
+
     if verify_map:
         _atomic_write_text(verify_target, json.dumps(verify_map, indent=2) + "\n")
         print(
@@ -525,6 +613,51 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
         # Every entry was pruned as stale — don't leave dead content on disk.
         verify_target.unlink()
         print(f"[merge] removed {verify_target} (all entries stale)", file=sys.stderr)
+
+    # Stale-entry advisory.  Merge is offline by contract — it makes no
+    # tools/list call — so it cannot know the server's current tool set.  It
+    # cross-checks entries that were carried forward unprobed against the last
+    # recorded manifest instead, and only warns: dropping on this evidence
+    # would silently delete hand-edited shape specs.
+    probed_now = {name for sk in part_skeletons for name in sk}
+    carried = sorted(set(merged) - probed_now)
+    if carried:
+        manifest_p = _merge_manifest_path(ns, target)
+        manifest_tools: set[str] | None = None
+        manifest_name = ""
+        if manifest_p is not None and manifest_p.is_file():
+            manifest_name = manifest_p.name
+            try:
+                doc = json.loads(manifest_p.read_text())
+                tools_obj = doc.get("tools")
+                if isinstance(tools_obj, dict):
+                    manifest_tools = set(tools_obj)
+            except (OSError, json.JSONDecodeError):
+                manifest_tools = None
+        if manifest_tools is not None:
+            stale = [t for t in carried if t not in manifest_tools]
+            if stale:
+                print(
+                    f"[merge] ⚠  {len(stale)} shapes entry(ies) name tools absent from "
+                    f"{manifest_name}: {', '.join(stale)}",
+                    file=sys.stderr,
+                )
+                print(
+                    "[merge]    They were carried forward unprobed and may be retired. "
+                    "Remove them by hand if the server no longer exposes them.",
+                    file=sys.stderr,
+                )
+        else:
+            # No manifest: retired tools are undetectable here.  Carrying entries
+            # forward unprobed is the normal partial-re-probe case (re-probing one
+            # tool on a 40-tool server carries 39), so report the count only —
+            # enumerating names would make every partial merge noisy.
+            print(
+                f"[merge] {len(carried)} entry(ies) carried forward unprobed; no tool manifest "
+                "beside the shapes file, so retired tools cannot be detected. "
+                "Run `mcpgen codegen` to write one.",
+                file=sys.stderr,
+            )
 
     if not ns.keep_parts:
         shutil.rmtree(parts_d)
@@ -979,6 +1112,13 @@ def main(argv: list[str] | None = None) -> int:
         help="JSON args for one probe call; repeat for multi-probe (default: {})",
     )
     pr.add_argument("--emit-shape", help="write skeleton to this path (default: stdout)")
+    pr.add_argument(
+        "--save-raw",
+        dest="save_raw",
+        metavar="FILE",
+        help="also write the untruncated raw payload here; the name MUST end in "
+        ".probe-raw.json (git-ignored). Multi-probe writes a JSON array of {args, raw}",
+    )
     pr.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(pr)
     pr.set_defaults(func=_cmd_probe)
@@ -1006,6 +1146,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     mg.add_argument(
         "--keep-parts", action="store_true", help="keep the .parts/ directory after merging (default: remove)"
+    )
+    mg.add_argument(
+        "--no-scrub",
+        action="store_true",
+        dest="no_scrub",
+        help="write probed_args to shapes.json verbatim (default: scrub emails, UUIDs, "
+        "home-dir usernames and long numeric ids — shapes.json is a committed file)",
+    )
+    mg.add_argument(
+        "--manifest",
+        metavar="PATH",
+        help="tool-inventory manifest to cross-check carried-forward entries against "
+        "(default: <shapes-stem>.mcpgen.json beside the shapes file)",
     )
     mg.add_argument(
         "--config",

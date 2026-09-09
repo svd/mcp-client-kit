@@ -158,7 +158,7 @@ uvx --from mcp-client-kit mcpgen codegen <server> --out <server>.py
 uv add mcp-client-kit      # or: pip install mcp-client-kit
 ```
 
-Requires Python 3.11+.
+Requires Python 3.10+.
 
 ---
 

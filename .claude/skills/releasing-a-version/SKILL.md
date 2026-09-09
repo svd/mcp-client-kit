@@ -89,11 +89,14 @@ Files to update:
 - `.claude-plugin/marketplace.json` → `"plugins"[0]["version"]` field only  
   *(leave top-level `"version"` — that's the catalog version, bumped only when the catalog listing itself changes, not per plugin release)*
 
-Optionally raise the version floor — but only if the skill now requires a CLI feature from a newer engine. Each skill carries its own floor, and they move independently: `skills/generate-mcp-wrappers/SKILL.md` (step 0) and `skills/generate-mcp-runner/SKILL.md` (step 0). The runner's floor is the one that moves most often, because its templates `import` from `mcpgen` directly. Coupled spots per skill — grep the file for the old version, do not fix two of three:
+Optionally raise the version floor — but only if a skill now requires a CLI feature from a newer engine. **One floor covers the plugin**, stated in both `skills/generate-mcp-wrappers/SKILL.md` (step 0) and `skills/generate-mcp-runner/SKILL.md` (step 0), and each skill says so in its own words. Raise them together: a run that chains the two must not meet two different numbers, and the runner's step 0 asserts the floor is the same one the wrappers state. The runner is usually what forces a bump, because its templates `import` from `mcpgen` directly.
+
+Coupled spots *per skill* — `grep -n 'X\.Y\.Z' skills/*/SKILL.md` and fix every hit, not the first two:
 - Line with `mcpgen >= X.Y.Z` in the prose
-- `min=X.Y.Z` in the bash version check below it
-- Any sentence naming the version in the rationale (`generate-mcp-runner` has one: "does not
-  exist before X.Y.Z"). A floor bump that misses it leaves the guard contradicting its reason.
+- `min=X.Y.Z` in the bash resolver below it
+- The resolver's `$base` rationale, which works the guard through named examples
+  (`X.Y.Zrc1` and `X.Y.Z.dev1` reduce to `X.Y.Z`; `sort -V` orders `X.Y.Z.dev1` above it).
+  Miss these and the guard contradicts the worked example that explains it.
 
 **A plugin tag whose floor exceeds the latest published engine must not be cut.** The floor
 promises a version users can install; publish the engine tag (`vX.Y.Z`) first, then the

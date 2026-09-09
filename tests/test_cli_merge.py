@@ -115,7 +115,8 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
         lambda *a, **kw: asyncio.coroutine(lambda: fake_shape)(),
     )
     # Also patch asyncio.run to call the coroutine synchronously.
-    monkeypatch.setattr("asyncio.run", lambda coro: fake_shape)
+    # _probe returns (shape, observed_byte_size, raw_payload)
+    monkeypatch.setattr("asyncio.run", lambda coro: (fake_shape, 42, fake_shape))
 
     from mcpgen.cli import _cmd_probe
 
@@ -131,7 +132,10 @@ def test_probe_writes_part_not_shared_file(tmp_path, monkeypatch):
         config=None,
         cred_backend=None,
     )
-    with patch("mcpgen.cli._probe", return_value=fake_shape), patch("asyncio.run", return_value=fake_shape):
+    with (
+        patch("mcpgen.cli._probe", return_value=fake_shape),
+        patch("asyncio.run", return_value=(fake_shape, 42, fake_shape)),
+    ):
         _cmd_probe(ns)
 
     # Shared target must NOT exist (part was written instead).
@@ -212,8 +216,20 @@ def _seed_parts(target: Path, tool_skeletons: dict[str, dict]) -> None:
         _atomic_write_text(part, json.dumps({tool: sk}))
 
 
-def _merge_ns(server: str, target: Path, keep_parts: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(server=server, out=str(target), keep_parts=keep_parts)
+def _merge_ns(
+    server: str,
+    target: Path,
+    keep_parts: bool = False,
+    no_scrub: bool = False,
+    manifest: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        server=server,
+        out=str(target),
+        keep_parts=keep_parts,
+        no_scrub=no_scrub,
+        manifest=manifest,
+    )
 
 
 def test_merge_union_of_parts_and_base(tmp_path):
@@ -573,3 +589,192 @@ def test_merge_accepts_config_flag(tmp_path):
     assert rc == 0
     result = json.loads(target.read_text())
     assert "tool_a" in result
+
+
+# ── probed_args scrubbing on merge ───────────────────────────────────────────
+
+
+def test_merge_scrubs_probed_args_in_shapes_json(tmp_path):
+    """shapes.json — the committed file — must never carry raw PII."""
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(
+        target,
+        {"read_file": {"source": "live", "probed_args": {"path": "/Users/ada/src/repo/img.png"}}},
+    )
+
+    rc = _cmd_merge(_merge_ns("acme", target))
+
+    assert rc == 0
+    entry = json.loads(target.read_text())["read_file"]
+    assert entry["probed_args"] == {"path": "<home>/src/repo/img.png"}
+    assert entry["probe_args_scrubbed"] is True
+
+
+def test_merge_verify_sidecar_keeps_raw_args(tmp_path):
+    """The gitignored verify sidecar is the gold source — it stays pre-scrub."""
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(
+        target,
+        {"read_file": {"source": "live", "probed_args": {"path": "/Users/ada/src/repo/img.png"}}},
+    )
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    verify = json.loads((tmp_path / "acme.verify.json").read_text())
+    assert verify["read_file"] == {"path": "/Users/ada/src/repo/img.png"}
+
+
+def test_merge_keep_parts_leaves_raw_args_in_parts(tmp_path):
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(target, {"leaky_tool": {"source": "live", "probed_args": {"who": "ada@example.com"}}})
+
+    _cmd_merge(_merge_ns("acme", target, keep_parts=True))
+
+    part = next(_parts_dir(target).glob("*.json"))
+    assert json.loads(part.read_text())["leaky_tool"]["probed_args"] == {"who": "ada@example.com"}
+
+
+def test_merge_scrubs_preserved_base_entries_too(tmp_path):
+    """A leak already committed in shapes.json is cleaned on the next merge."""
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"old": {"source": "live", "probed_args": {"who": "ada@example.com"}}}))
+    _seed_parts(target, {"new": {"source": "live", "probed_args": {"limit": 5}}})
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    result = json.loads(target.read_text())
+    assert result["old"]["probed_args"] == {"who": "<email>"}
+    assert result["old"]["probe_args_scrubbed"] is True
+
+
+def test_merge_scrub_is_idempotent(tmp_path):
+    """Re-merging an already-scrubbed file changes nothing."""
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(target, {"leaky_tool": {"source": "live", "probed_args": {"path": "/Users/ada/x"}}})
+    _cmd_merge(_merge_ns("acme", target, keep_parts=True))
+    first = target.read_text()
+
+    _cmd_merge(_merge_ns("acme", target, keep_parts=True))
+
+    assert target.read_text() == first
+
+
+def test_merge_no_scrub_flag_writes_raw_args(tmp_path, capsys):
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(target, {"leaky_tool": {"source": "live", "probed_args": {"who": "ada@example.com"}}})
+
+    _cmd_merge(_merge_ns("acme", target, no_scrub=True))
+
+    entry = json.loads(target.read_text())["leaky_tool"]
+    assert entry["probed_args"] == {"who": "ada@example.com"}
+    assert "probe_args_scrubbed" not in entry
+    assert "--no-scrub" in capsys.readouterr().err, "writing raw args to a committed file must warn"
+
+
+def test_merge_reports_scrubbed_tools_on_stderr(tmp_path, capsys):
+    """The tool name must be distinctive — a one-letter name matches any output."""
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(target, {"leaky_tool": {"source": "live", "probed_args": {"who": "ada@example.com"}}})
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    err = capsys.readouterr().err
+    assert "scrubbed" in err
+    assert "leaky_tool" in err
+
+
+# ── stale-entry advisory ─────────────────────────────────────────────────────
+
+
+def _write_manifest(target: Path, tool_names: list[str]) -> Path:
+    stem = target.name[: -len(".shapes.json")]
+    manifest = target.with_name(stem + ".mcpgen.json")
+    manifest.write_text(json.dumps({"server": "acme", "tools": {n: {} for n in tool_names}}))
+    return manifest
+
+
+def test_merge_warns_about_entries_absent_from_manifest(tmp_path, capsys):
+    """A tool the server no longer exposes must be named on stderr, not dropped."""
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"retired_tool": {"source": "live"}, "live_tool": {"source": "live"}}))
+    _seed_parts(target, {"live_tool": {"source": "live"}})
+    _write_manifest(target, ["live_tool"])
+
+    rc = _cmd_merge(_merge_ns("acme", target))
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "retired_tool" in err
+    assert "live_tool" not in err.split("retired_tool")[1], "live tools must not be listed as stale"
+    assert "retired_tool" in json.loads(target.read_text()), "warn, never drop"
+
+
+def test_merge_manifest_flag_overrides_default_location(tmp_path, capsys):
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"retired_tool": {"source": "live"}}))
+    _seed_parts(target, {"live_tool": {"source": "live"}})
+    other = tmp_path / "elsewhere.mcpgen.json"
+    other.write_text(json.dumps({"server": "acme", "tools": {"live_tool": {}}}))
+
+    _cmd_merge(_merge_ns("acme", target, manifest=str(other)))
+
+    assert "retired_tool" in capsys.readouterr().err
+
+
+def test_merge_no_warning_when_manifest_covers_every_entry(tmp_path, capsys):
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"t1": {"source": "live"}}))
+    _seed_parts(target, {"t2": {"source": "live"}})
+    _write_manifest(target, ["t1", "t2"])
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    # Assert on text this feature emits — "stale" appears only in the unrelated
+    # verify-sidecar prune line, so matching it proves nothing either way.
+    err = capsys.readouterr().err
+    assert "absent from" not in err
+    assert "carried forward unprobed" not in err
+
+
+def test_merge_without_manifest_reports_count_not_names(tmp_path, capsys):
+    """No manifest on disk: count plus a pointer, but no per-tool enumeration.
+
+    Carrying entries forward is the normal partial-re-probe case — listing every
+    name would make routine merges noisy, which is how advisories get ignored.
+    """
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"carried_a": {"source": "live"}, "carried_b": {"source": "live"}}))
+    _seed_parts(target, {"probed": {"source": "live"}})
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    err = capsys.readouterr().err
+    assert "2 entry(ies) carried forward unprobed" in err
+    assert "carried_a" not in err, "no per-tool enumeration without a manifest"
+    assert "mcpgen codegen" in err, "the advisory must say how to get a manifest"
+
+
+def test_merge_ignores_sole_manifest_of_a_different_server(tmp_path, capsys):
+    """A stray manifest from another server must not drive stale warnings."""
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"carried": {"source": "live"}}))
+    _seed_parts(target, {"probed": {"source": "live"}})
+    (tmp_path / "other.mcpgen.json").write_text(json.dumps({"server": "other", "tools": {"x": {}}}))
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    err = capsys.readouterr().err
+    assert "carried forward unprobed" in err, "falls back to the count-only advisory"
+    assert "absent from" not in err, "no stale claim from a foreign manifest"
+
+
+def test_merge_unreadable_manifest_does_not_fail_merge(tmp_path, capsys):
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"carried": {"source": "live"}}))
+    _seed_parts(target, {"probed": {"source": "live"}})
+    (tmp_path / "acme.mcpgen.json").write_text("{not json")
+
+    rc = _cmd_merge(_merge_ns("acme", target))
+
+    assert rc == 0, "a broken manifest must not break consolidation"
+    assert "carried forward unprobed" in capsys.readouterr().err

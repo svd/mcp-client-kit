@@ -59,27 +59,40 @@ barrier stays on main.
 
 ## Procedure
 
-0. **Resolve the CLI.** Requires `mcpgen >= 0.9.0` — one floor for the whole procedure,
-   step 7's runner included, so no later step re-checks the engine. Do not proceed on an
-   older one.
+0. **Resolve the CLI.** Requires `mcpgen >= 0.10.0` — one floor for the whole procedure and
+   for the plugin, step 7's runner included, so no later step gates on a different number.
+   Do not proceed on an older one.
 
    The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
    Probe the three forms and keep the first that both answers **and** meets the floor — an
    outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
 
    ```bash
-   min=0.9.0; MCPGEN=
+   min=0.10.0; MCPGEN=
    for c in "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
      out=$(eval "$c --version" 2>/dev/null) || continue
      ver=$(printf '%s\n' "$out" | awk '{print $2}')
-     printf '%s' "$ver" | grep -Eq '^[0-9]+(\.[0-9]+)+' || continue
-     [ "$(printf '%s\n%s\n' "$min" "$ver" | sort -V | head -n 1)" = "$min" ] || \
+     base=${ver%%[!0-9.]*}; base=${base%.}
+     printf '%s' "$base" | grep -Eq '^[0-9]+(\.[0-9]+)+$' || continue
+     if [ "$base" = "$min" ] && [ "$base" != "$ver" ]; then
+       echo "skipping $c ($ver is a pre-release of $min)"; continue
+     fi
+     [ "$(printf '%s\n%s\n' "$min" "$base" | sort -V | head -n 1)" = "$min" ] || \
        { echo "skipping $c ($ver < $min)"; continue; }
      MCPGEN="$c"; break
    done
    [ -n "$MCPGEN" ] || { echo "no mcpgen >= $min found on any invocation"; exit 1; }
    echo "resolved: $MCPGEN ($ver)"
    ```
+
+   The comparison runs on `$base`, the release part alone: `${ver%%[!0-9.]*}` trims from the
+   first character that is neither digit nor dot and `${base%.}` drops the dot a `.devN`
+   suffix leaves behind, so `0.10.0rc1` and `0.10.0.dev1` both reduce to `0.10.0`. That split
+   is what lets the guard accept a newer pre-release (`0.11.0.dev1` clears a `0.10.0` floor —
+   this repo's own `dev` branch is one) while rejecting a pre-release *of the floor itself*,
+   which `sort -V` alone orders above `0.10.0` even though it may predate the feature the
+   floor exists for. The `$`-anchored `grep` is what makes the trim load-bearing: without it
+   a version that is not a dotted number at all would slip through as its own prefix.
 
 1. **Mechanical stubs.**
 
@@ -465,23 +478,27 @@ barrier stays on main.
    "audio", "base64", or "binary", leave the wrapper as `-> Any`, note it in
    `session-overview.md`, and do not model a payload the probe never saw.
 
-   **Empty-store probes produce under-typed list fields.** If a read tool returns an empty list
-   (`[]`), the inner element shape is unobservable. Do not fabricate a schema from zero samples.
-   The skeleton omits the field entirely; to keep it visible add `"<field>": "list"` by hand — the
-   one allowed non-scalar in `fields`. Note in `session-overview.md` that the inner model is
-   unobservable at probe time, and recommend re-running `mcpgen probe` after seeding the server
-   with representative data.
+   **Empty-store probes produce under-typed list fields.** A read tool returning `[]` leaves the
+   element shape unobservable and the skeleton omits the field; add `"<field>": "list"` by hand to
+   keep it visible, never a guessed element type. Note in `session-overview.md` that it is
+   unobservable at probe time, and recommend re-probing once the server holds representative data.
 
    **Bootstrapping sample args.** Some tools need a real id first (e.g. before probing
    `get_entity`). Find a no-arg / discovery tool on *this* server that returns user or entity ids
-   — there is no universal tool for this, infer from `mcpgen list` output. Call it via
-   `<mcpgen> call <server> <discovery-tool> --out <server>.<discovery-tool>.probe-raw.json` to
-   capture the **raw** payload, then read the ids from that file. `mcpgen probe` emits only the
-   response *shape* (no values) and cannot supply ids.
+   — there is no universal tool for this, infer from `mcpgen list` output. Capture its raw
+   payload in the same invocation that probes it:
 
-   **`probed_args` carries live PII.** Batch agents write parts with raw args; the preflight above
-   is what keeps them out of git. The single scrub pass runs post-merge on the main thread at
-   step 4 — see `references/shape-spec.md`.
+   `<mcpgen> probe <server> <discovery-tool> --args '<args>' --save-raw <server>.<discovery-tool>.probe-raw.json`
+
+   then read the ids from that file. `--save-raw` requires a `*.probe-raw.json` name (git-ignored)
+   and saves the duplicate live round-trip that a separate `mcpgen call --out` costs. **No
+   `--emit-shape` here** — the discovery tool is scaffolding, and emitting a part would merge it
+   into the committed shape spec permanently. The skeleton goes to stdout instead. Use
+   `mcpgen call --out` only when you do not want a shape at all.
+
+   **`probed_args` carries live PII.** Batch agents write parts with raw args; `mcpgen merge`
+   scrubs them on the way into `<shapes-path>`, and the step-3 ignore preflight covers the parts
+   themselves.
 
 3b. **Consolidate parts → shapes.json.**
 
@@ -513,9 +530,11 @@ barrier stays on main.
 
 4. **Edit the shape-spec — THIS is the judgment.**
 
-   **First: scrub `probed_args`.** This is the single scrub point — batch agents do NOT scrub
-   their parts. Follow the PII-vs-functional rules in `references/shape-spec.md`, which also
-   documents every field below.
+   **First: review the scrubbed `probed_args`.** `mcpgen merge` has already replaced emails,
+   UUIDs, home-directory usernames and long numeric ids, and flagged each changed entry with
+   `probe_args_scrubbed: true`. Read what remains and redact anything the patterns cannot
+   recognise — personal names, hostnames, bespoke internal ids. See the PII-vs-functional rules
+   in `references/shape-spec.md`, which also documents every field below.
 
    Then, for each tool entry, set `unwrap`, `return_model`, `return_container`,
    `input_overrides`, `fields`, and `source`; delete `_observed_shape`; and add
@@ -601,8 +620,8 @@ barrier stays on main.
      `annotations` nor the description semantically — so a tool only step 2 catches would
      otherwise be called for real.
    - **Resolved `mcpgen` invocation** — the literal string step 0 settled on. Pass it
-     explicitly: the runner skill gates on a bare `mcpgen`, absent in a uv-managed project, so
-     without this it reports the engine missing on a machine where step 0 just used it.
+     explicitly: the runner tries it as its first candidate, so one `--version` call settles
+     its check instead of a fresh probe down the same three forms.
    - **Server name** — `<server>`.
    - **Output folder** — the dir from `--out` (e.g. `<server>/`), holding `<server>.py`,
      `<shapes-path>`, and `<shapes-stem>.verify.json`.
@@ -658,9 +677,11 @@ barrier stays on main.
   valid variant responses with false authority. Zero runtime cost and zero dependency is the
   point; generated wrappers stay importable anywhere (the seam principle).
 
-- **Don't model depth from one probe.** Promote only the top 1–2 levels of stable scalars;
-  deeper/variadic nests stay `dict` / `Any`. Over-modelling states authoritative lies about a
-  shape you saw once.
+- **Don't model depth from one probe.** A container is promoted no further than its own
+  annotation: `list[str]` / `dict[str, str]` where every element or value the probe evidenced
+  is that same scalar, bare `list` / `dict` otherwise — a list needs `--save-raw` or a second
+  probe, since the skeleton samples one element. `dict[str, Any]` claims nothing `dict` does
+  not. There is no nested `TypedDict`; see `references/shape-spec.md`.
 
 - **Never emit a variant-specific `return_model` from a single-variant probe.** If a tool takes a
   discriminator arg (flagged in step 2.e), every sibling sharing that arg is polymorphic-suspect
@@ -672,6 +693,7 @@ barrier stays on main.
   and object members fall back to `float` / `dict`. Widen to `str` only if the server actually
   accepts values outside the declared enum.
 
-- **Scrub `probed_args` before committing.** The post-merge scrub at step 4 is the single scrub
-  point. Parts (`.parts/`) and `<shapes-stem>.verify.json` are gitignored raw counterparts; the
-  only committable artifact is a fully-scrubbed `<shapes-path>`.
+- **Review `probed_args` before committing.** `mcpgen merge` scrubs the committed
+  `<shapes-path>` automatically; step 4 is where you catch what its patterns cannot recognise.
+  Parts (`.parts/`) and `<shapes-stem>.verify.json` are gitignored raw counterparts; the only
+  committable artifact is a fully-scrubbed `<shapes-path>`.

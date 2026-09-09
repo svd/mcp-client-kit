@@ -26,7 +26,7 @@ Artifacts already produced by `generate-mcp-wrappers` for `<server>` output dir 
 | Wrapper module | `<server>/<server>.py` | function names, signatures (`async def <tool>(caller, *, <kwargs>) -> <Model\|Any>`), return annotations, module-level `SERVER` |
 | Shape-spec | `<server>/<server>.shapes.json` | `return_model`, `return_container`, `discriminator`+`variants`, `fields`, `probed_args` (scrubbed) |
 | Verify sidecar | `<server>/<server>.verify.json` | **gold source**: real pre-scrub `probed_args`, gitignored, present locally |
-| Server descriptions | `mcpgen list <server>` | tool purpose, workflow ordering |
+| Server descriptions | `<mcpgen> list <server>` | tool purpose, workflow ordering |
 
 ## Connection skeleton selection
 
@@ -75,17 +75,66 @@ block** — replace it with the actual tool call sequence you derive in steps 4�
 
 ## Procedure
 
-### 0. Check the CLI
+### 0. Read the hand-off, then resolve the CLI
 
-Requires `mcpgen >= 0.7.0` (install: see README). The `http_oauth.py` skeleton imports
-`LoginWontHelp`, which does not exist before 0.7.0, so an older engine produces a `run.py`
-that dies with `ImportError` on the first line that matters. Abort if missing or too old:
+Start from whatever the caller passed in — the **resolved `mcpgen` invocation**, server
+name, output dir, connection source (config path or direct transport params), and
+transport+auth kind. Any caller (the user, `generate-mcp-wrappers` step 7, or another
+skill/agent) may hand these off. For whatever was not passed, determine it from context
+(how the wrappers were generated, any `servers.json` entry, or the original `codegen`
+invocation). The invocation comes first because the check below runs on it.
+
+`$MCPGEN` does not survive between tool invocations. State the invocation you settle on
+once in your report, then substitute that literal string wherever a block below writes
+`<mcpgen>`.
+
+Requires `mcpgen >= 0.10.0` (install: see README) — one floor across the plugin, the same
+number `generate-mcp-wrappers` step 0 states, so a chained run and a standalone one gate
+identically. The floor guarantees the symbols `runner_templates/` import: `http_oauth.py`
+needs `LoginWontHelp`, and an engine without it produces a `run.py` that dies with
+`ImportError` on the first line that matters.
+
+The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
+Try each candidate in turn and keep the first that both answers **and** meets the floor —
+an outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
 
 ```bash
-mcpgen --version >/dev/null 2>&1 || { echo "mcpgen not found — install: uv add mcp-client-kit"; exit 1; }
-ver=$(mcpgen --version | awk '{print $2}'); min=0.7.0
-[ "$(printf '%s\n%s\n' "$min" "$ver" | sort -V | head -1)" = "$min" ] || { echo "mcpgen $ver too old — need >= $min"; exit 1; }
+min=0.10.0; MCPGEN=
+# First candidate is the caller's invocation — drop it when none was handed over.
+for c in "<handed-over>" "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
+  [ -n "$c" ] || continue
+  out=$(eval "$c --version" 2>/dev/null) || continue
+  ver=$(printf '%s\n' "$out" | awk '{print $2}')
+  base=${ver%%[!0-9.]*}; base=${base%.}
+  printf '%s' "$base" | grep -Eq '^[0-9]+(\.[0-9]+)+$' || continue
+  if [ "$base" = "$min" ] && [ "$base" != "$ver" ]; then
+    echo "skipping $c ($ver is a pre-release of $min)"; continue
+  fi
+  [ "$(printf '%s\n%s\n' "$min" "$base" | sort -V | head -n 1)" = "$min" ] || \
+    { echo "skipping $c ($ver < $min)"; continue; }
+  MCPGEN="$c"; break
+done
+[ -n "$MCPGEN" ] || { echo "no mcpgen >= $min found on any invocation"; exit 1; }
+echo "resolved: $MCPGEN ($ver)"
 ```
+
+Three things the loop depends on:
+
+- **The caller's invocation is a candidate, not an authority.** Trying it first means one
+  `--version` call settles the common case, since a caller that resolved an invocation
+  almost always resolved a good one. Checking it anyway is what covers the callers that
+  gated nothing — a user who names an invocation by hand, or a skill with no floor of its
+  own — for whom an unchecked string reintroduces the `ImportError` this floor exists to
+  prevent. A candidate that fails the floor falls through to the probe rather than aborting.
+- **`eval` for two-word invocations.** A bare `$c` does not word-split in `zsh`, so the
+  `uv run mcpgen` form never matches without it.
+- **The comparison runs on `$base`, the release part alone.** `${ver%%[!0-9.]*}` trims from
+  the first character that is neither digit nor dot and `${base%.}` drops the dot a `.devN`
+  suffix leaves behind, so `0.10.0rc1` and `0.10.0.dev1` both reduce to `0.10.0`. That split
+  lets a newer pre-release through (`0.11.0.dev1` clears the floor) while rejecting a
+  pre-release *of the floor itself* — `sort -V` alone orders `0.10.0.dev1` above `0.10.0`,
+  and a clone parked there can predate the commit that made `0.10.0` worth gating on. The
+  `$`-anchored `grep` is what makes the trim load-bearing.
 
 ### 1. Locate artifacts
 
@@ -97,11 +146,7 @@ Find for `<server>`:
   fall back to scrubbed `shapes.json.probed_args`, then to schema-minimal args derived
   from the wrapper signature. Note the degradation in a comment inside `run.py`.
 
-First resolve any parameters the caller passed in — server name, output dir, connection
-source (config path or direct transport params), and transport+auth kind. Any caller (the
-user, `generate-mcp-wrappers` step 7, or another skill/agent) may hand these off. For
-whatever was not passed, determine it from context (how the wrappers were generated, any
-`servers.json` entry, or the original `codegen` invocation).
+The output dir is whichever one step 0 settled on, passed or derived.
 
 ### 2. Enumerate tools
 
@@ -112,7 +157,7 @@ Read every `async def` signature from `<server>/<server>.py`. For each tool coll
 
 Cross-check tool descriptions by running:
 ```bash
-mcpgen list <server>
+<mcpgen> list <server>
 ```
 This gives the human-readable description for each tool — you need these to decide workflow
 ordering and to identify which calls make sense together.
@@ -159,7 +204,7 @@ were not probed.
 
 ### 5. Order calls into a workflow
 
-Use tool descriptions from `mcpgen list` to establish a sensible execution order. General
+Use tool descriptions from `<mcpgen> list` to establish a sensible execution order. General
 pattern:
 
 ```
