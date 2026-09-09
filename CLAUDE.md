@@ -31,6 +31,9 @@ uv run eval-kit report --with-narrative
 
 # Regenerate .mcp.eval.json from servers.toml
 uv run eval-kit gen-config
+
+# Check the committed eval artifacts against the invariants below
+uv run eval-kit check-artifacts
 ```
 
 ## Running evals
@@ -67,6 +70,7 @@ eval_harness/
   report.py                   # aggregate EVAL_REPORT.md generator
   versions.py                 # engine + skill version detection
   gen_config.py               # .mcp.eval.json generator
+  check_artifacts.py          # committed-artifact integrity gate (CI)
   cli.py                      # eval-kit CLI entry point
 .claude/workflows/run-eval.js # /run-eval workflow (per-server pipeline: generate → verify → analyze → synthesize)
 .claude/skills/               # /triaging-eval-outputs, /rerun-eval-at-version skills

@@ -114,6 +114,31 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check_artifacts(args: argparse.Namespace) -> int:
+    """eval-kit check-artifacts"""
+    try:
+        from eval_harness.check_artifacts import check_artifacts
+    except ImportError as exc:
+        print(f"ImportError: {exc}\nInstall the package first.", file=sys.stderr)
+        return 1
+
+    violations = check_artifacts(
+        repo_root=Path(args.repo_root),
+        base_dir=args.base_dir,
+        manifest=args.manifest,
+        report=args.report,
+    )
+
+    if not violations:
+        print("✅ committed eval artifacts are intact")
+        return 0
+
+    for violation in violations:
+        print(f"❌ {violation}", file=sys.stderr)
+    print(f"\n{len(violations)} violation(s)", file=sys.stderr)
+    return 1
+
+
 # ── Parser ────────────────────────────────────────────────────────────────────
 
 
@@ -180,6 +205,36 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Splice per-server narrative.md and _synthesis.md fragments into the report.",
     )
 
+    # --- check-artifacts ---
+    p_check = sub.add_parser(
+        "check-artifacts",
+        help="Check the committed eval artifacts against the repo's invariants.",
+    )
+    p_check.add_argument(
+        "--repo-root",
+        default=".",
+        metavar="DIR",
+        help="Repository root to inspect (default: the current directory).",
+    )
+    p_check.add_argument(
+        "--base-dir",
+        default="eval",
+        metavar="DIR",
+        help="Directory where <server>/ folders live, relative to the root (default: eval).",
+    )
+    p_check.add_argument(
+        "--manifest",
+        default="servers/servers.toml",
+        metavar="PATH",
+        help="Manifest path relative to the root (default: servers/servers.toml).",
+    )
+    p_check.add_argument(
+        "--report",
+        default="doc/EVAL_REPORT.md",
+        metavar="PATH",
+        help="Report path relative to the root (default: doc/EVAL_REPORT.md).",
+    )
+
     return parser
 
 
@@ -194,6 +249,7 @@ def main(argv: list[str] | None = None) -> None:
         "verify": cmd_verify,
         "report": cmd_report,
         "gen-config": cmd_gen_config,
+        "check-artifacts": cmd_check_artifacts,
     }
 
     handler = dispatch[args.command]
