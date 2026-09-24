@@ -2,6 +2,105 @@
 
 ## [Unreleased] — 0.11.0
 
+### Added
+
+- **Generated modules read MCP resources.** Servers put reference data their tools depend on
+  into resources — a dictionary a tool's description says to read first, a template such as
+  `dimension://by-unit-type/{unitType}` — and generated code could not reach any of it.
+  `codegen` now lists resources in the same session as tools and emits one `read_*` accessor
+  per static resource and resource template, after the tool wrappers. Names come from the
+  URI, not the server's non-unique `name`: `risk://dictionary` → `read_risk_dictionary`,
+  `dimension://by-unit-type/{unitType}` → `read_dimension_by_unit_type(caller, *, unitType:
+  str)`; a name taken by a tool gets a `_2` suffix. Templates expand at runtime (RFC 6570
+  levels 1–4, scalar values), and `?`/`&` variables are optional. Each docstring carries a
+  stable `Resource: <uri>` or `Resource template: <template>` line. Text contents decode as
+  tool text does (JSON, then a Python literal, then the string), a blob to `bytes`, several
+  contents to a list, and no contents raise `ValueError`. `--resources {all,templates,none}`
+  picks the scope; above 50 static resources `codegen` warns that the server may list its
+  data as resources.
+
+- **`McpResourceReader`**, a second Protocol in `mcpgen.seam` (exported from `mcpgen`):
+  `async def read_resource(server, uri) -> Any`. Accessors take it as their first argument.
+  `McpCaller` is untouched, so a custom caller keeps satisfying every module without
+  accessors. `McpBridgeCaller` implements both, one-shot or inside `connected()`, where a
+  resource read and a tool call share one session; a read error reaches the caller as a bare
+  `McpError`, not an exception group.
+
+- **`mcpgen list <server> --resources`** prints `{"resources": [...], "resourceTemplates":
+  [...]}`, trimmed to `uri`/`uriTemplate`, `name`, `title`, `description`, `mimeType`, and
+  `size`, so an icon's `data:` URI or vendor `_meta` cannot flood the output.
+
+- **`mcpgen read <server> <uri> --out FILE`**, the resource twin of `call`: one text content is
+  written verbatim, one blob as raw bytes, several contents as a JSON array. A template
+  target is expanded from `--args`. Errors exit `1` with a one-line message.
+
+- **`mcpgen probe <server> <target> --resource`** reads a resource through `read_resource`,
+  the path the accessors take, so the part records the shape they return. A template target
+  is keyed by the template string, with each `--args` supplying one read's variables; a
+  static URI is keyed by its normalized form and takes no `--args`. Entries carry `kind`, a
+  blob's shape is `"bytes"`, and `--save-raw` base64-encodes it. Resource shape entries
+  accept `unwrap`, `return_model`, `return_container`, `fields`, and `input_overrides`
+  (keyed by raw variable name), but no discriminators.
+
+- **`mcpgen check` detects resource drift.** Manifests gain optional `resources` and
+  `resource_templates` sections. An added or removed resource or template, or a `mimeType`
+  change, exits `1`; a `name` or `description` change is an advisory. `check --resources
+  {all,templates,none}` overrides the scope, which otherwise follows what the stored manifest
+  tracks. `--update` writes the sections it listed and keeps the ones it did not.
+
+- **Both skills handle resources.** `generate-mcp-wrappers` lists them in step 2a, selects
+  templates and API-like statics while logging data-like lists as skipped, probes with real
+  variable values, and hands the accessors to the runner. `generate-mcp-runner` finds
+  accessors by their `Resource:` docstring line, includes them by default with template
+  variables from `verify.json`, and places one before any tool whose description says to
+  read it first.
+
+### Changed
+
+- **Manifests gain resource sections on the next regenerate.** `codegen` defaults to
+  `--resources all`, so every manifest gains `resources` and `resource_templates` sections on
+  its next run. For a server with no resources, or without the resources capability, both are
+  written as `{}`: tracked and empty. Against a server with resources the module also gains
+  `read_*` accessors; for one without, the module is byte-identical. `format_version` stays
+  `1` and earlier mcpgen versions ignore the new keys, so a pinned CI job does not break.
+  `--resources none` keeps both the module and the manifest byte-identical.
+
+- **`check` against a manifest with no resource section** prints an advisory ("live resources
+  are not tracked by the stored manifest; re-run with `--update` to track them, or pass
+  `--resources none` to skip them") and exits `0`. It reads only the first page of each
+  resource list for this, with a 10 s timeout, and a failure there is an advisory too. Any
+  other resource listing — a tracked manifest, an explicit `--resources`, or `--update` — is
+  strict, and a failure exits `2`. A manifest from `codegen --resources none` cannot be told
+  from a pre-0.11.0 one: check it with `--resources none`, or `--update` starts tracking
+  resources.
+
+- **Plain `mcpgen list` also asks for resources.** When the server declares the resources
+  capability, `list` reads the first page of each resource list in the same session, bounded
+  by a 10 s timeout, and prints a stderr hint such as `2 resource(s) and 1+ resource
+  template(s) available`. Its stdout is unchanged, and a resource failure becomes a stderr
+  note, never a failed `list`. An `McpError` from `tools/list` that arrives wrapped in an
+  exception group now exits `1` with a one-line message instead of a traceback.
+
+- **`codegen` reports an `McpError` as a one-line error and exits `1`** instead of a
+  traceback. A failed resource listing adds a hint to retry with `--resources none`. A
+  shapes entry that matches no listed resource or template, or has an unknown `kind`, warns
+  instead of being dropped silently.
+
+- **`merge` counts entries, not tools**, since shapes files now hold resource entries too
+  (`wrote … (N entry(ies))`). Carried-forward resource entries are checked against the
+  manifest's resource sections rather than its tools; where the section is untracked, merge
+  prints a count of unchecked entries instead of flagging each one as a retired tool.
+
+- **`probe` refuses to overwrite a part file that holds another key.** On a
+  case-insensitive filesystem `Search` and `search` (or `demo://x/Users` and
+  `demo://x/users`) share one part file, and the second probe used to drop the first
+  silently. It now exits `1` before any live call and says to merge first. Keys too long for
+  a filename are cut short and end in a sha256 suffix; tool part names are unchanged.
+
+- **The plugin's engine floor rises to `mcpgen >= 0.11.0`** in both skills' step 0. The skills
+  now instruct `list --resources` and `probe --resource`, which 0.10.0 does not have, and
+  generated runners call `McpBridgeCaller.read_resource`.
+
 ## [0.10.0] — 2026-09-09
 
 ### Added

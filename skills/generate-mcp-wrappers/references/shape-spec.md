@@ -1,7 +1,8 @@
 # Shape-spec field reference
 
 Per-tool entry fields in `<shapes-path>`, and the rules for filling each. Step 4 of SKILL.md
-is the judgment pass; this is the field-by-field detail behind it.
+is the judgment pass; this is the field-by-field detail behind it. Resource entries use the
+same fields with the differences listed under [Resource entries](#resource-entries).
 
 ## `unwrap`
 
@@ -80,6 +81,54 @@ them in `session-overview.md`.
 
 `"live"`, or `"fixture"` plus a note if you authored from a recorded shape instead of a live
 call. Never let a fixture fallback read as a live probe.
+
+## Resource entries
+
+`probe --resource` writes an entry per resource beside the tool entries. Its key and `kind`
+tie it to the accessor it types:
+
+| Probed target | Entry key | `kind` |
+|---|---|---|
+| static URI | the normalized URI (`Dimension://ALL` → `dimension://ALL`) | `"resource"` |
+| URI template | the template string as given (`dimension://by-unit-type/{unitType}`) | `"resource_template"` |
+
+```json
+{
+  "dimension://by-unit-type/{unitType}": {
+    "kind": "resource_template",
+    "unwrap": ["items"],
+    "return_model": "Dimension",
+    "return_container": "list",
+    "input_overrides": {},
+    "fields": {"id": "str", "label": "str"},
+    "source": "live",
+    "probed_args": {"unitType": "PROJECT"}
+  }
+}
+```
+
+- **Keep the key and `kind` as written.** `codegen` applies an entry only to the listed
+  resource or template whose URI or template string equals its key, and only for its own
+  `kind`: a static URI and a template spelled the same never share an entry. An entry that
+  matches nothing, or whose `kind` is neither value, is not applied and `codegen` warns.
+- **Allowed fields:** `unwrap`, `return_model`, `return_container`, `fields`, and `source`
+  behave exactly as for a tool; delete `_observed_shape` as you would there. A `"bytes"`
+  shape (a blob) gets no `return_model`: the accessor stays `-> Any` and returns the decoded
+  `bytes`.
+- **`input_overrides` is keyed by the raw variable name** from the template, not the Python
+  parameter name — `{"unitType": "int"}` for `{unitType}`, and `{"unit.type": "int"}` for
+  `{unit.type}` even though the parameter is `unit_type`. Codegen renames a variable that is
+  not a usable identifier (`unit.type` → `unit_type`) or that would shadow a name the
+  accessor needs, with a trailing `_`: `caller`, `uri`, and `cast`, module names such as
+  `SERVER` and `_dig`, and Python keywords (`class` → `class_`). Variables are `str` without an
+  override; `?` and `&` variables are optional (`T | None = None`). A static URI has no
+  variables to override.
+- **No discriminators.** `discriminator` and `variants` are ignored with a warning: the
+  variables select which resource is read, not a response variant.
+- **URIs are not scrubbed.** `merge` scrubs `probed_args` (a template's variable values) as
+  it does a tool's, but the key is left alone, since changing it breaks the match. A static
+  URI that embeds a personal or internal id is committed verbatim. Do not probe one — see
+  SKILL.md step 3.
 
 ## Housekeeping
 

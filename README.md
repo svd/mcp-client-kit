@@ -72,6 +72,19 @@ async with caller.connected():
 
 Outside the block nothing changes, so existing code keeps working untouched. Details — per-server sessions, concurrency, cleanup — in [`doc/USAGE.md`](doc/USAGE.md#reusing-one-connection-for-a-series-of-calls).
 
+**Resources as well as tools.** When a server exposes MCP resources, `codegen` also emits one `read_*` accessor per resource and resource template, named from the URI. They take the same caller and share the same `connected()` block:
+
+```python
+import delivery_central as dc  # generated for a server that exposes resources
+
+async with caller.connected():
+    risks = await dc.read_risk_dictionary(caller)                            # risk://dictionary
+    dims = await dc.read_dimension_by_unit_type(caller, unitType="PROJECT")  # dimension://by-unit-type/{unitType}
+    await dc.upsert_unit_risk(caller, unitId="u-1", risk=risks["levels"][0])
+```
+
+A JSON text resource comes back parsed, a binary one as `bytes`. Probing a resource types its accessor the same way probing a tool types its wrapper. See [`doc/USAGE.md`](doc/USAGE.md#reading-resources).
+
 ---
 
 ## Real generated output
@@ -100,7 +113,7 @@ These live on a separate [`eval`](https://github.com/svd/mcp-client-kit/tree/eva
 
 **OAuth that survives restarts.** Pre-flight token refresh means a fresh process renews a near-expired token silently from the refresh token — no surprise browser pop-up at cold start. (The official SDK's canonical example is in-memory only; every restart re-authenticates.)
 
-**Swap auth without regenerating.** Every wrapper takes an `McpCaller` as its first argument. Change transports or auth backends — bearer, OAuth, stdio, a fake for tests — without touching the generated code.
+**Swap auth without regenerating.** Every wrapper takes a caller as its first argument — an `McpCaller` for tools, an `McpResourceReader` for resource accessors. Change transports or auth backends — bearer, OAuth, stdio, a fake for tests — without touching the generated code.
 
 **Built for production teams.** Works with MCP servers reachable over **stdio or Streamable HTTP** (OAuth, bearer/PAT, or no auth). Generated code lives in git like any other module, so it survives code review, audits, and pinning.
 
@@ -181,11 +194,12 @@ A companion skill, `generate-mcp-runner`, writes a standalone smoke-test `run.py
 
 | Command | What it does |
 |---------|--------------|
-| `codegen <server>` | Emit wrappers; `--shapes` applies the shape-spec, `--probe` records a response shape inline, `--embed-schema` embeds `fn.__schema__` + Args docstring per function. Also writes `<out-stem>.mcpgen.json` for `check`. |
-| `check <server>` | Compare the server's live tool inventory against the stored manifest. Exit `0` no drift, `1` drift, `2` operational error. |
-| `list <server>` | Print a server's tools as JSON; `--schema` adds raw `inputSchema` per tool. |
-| `probe <server> <tool>` | Live call(s) → response-shape skeleton. |
+| `codegen <server>` | Emit wrappers and resource accessors; `--shapes` applies the shape-spec, `--probe` records a response shape inline, `--embed-schema` embeds `fn.__schema__` + Args docstring per function, `--resources {all,templates,none}` picks which resources get accessors. Also writes `<out-stem>.mcpgen.json` for `check`. |
+| `check <server>` | Compare the server's live tool and resource inventory against the stored manifest. Exit `0` no drift, `1` drift, `2` operational error. |
+| `list <server>` | Print a server's tools as JSON; `--schema` adds raw `inputSchema` per tool; `--resources` prints its resources and resource templates instead. |
+| `probe <server> <tool>` | Live call(s) → response-shape skeleton; `--resource` reads a resource URI or template instead. |
 | `call <server> <tool> --out <p>` | One live call, raw payload to disk — bootstrap ids or inspect output. |
+| `read <server> <uri> --out <p>` | Read one resource, contents to disk; `--args` fills a URI template's variables. |
 | `merge <server>` | Consolidate probe parts into `<server>.shapes.json`. |
 | `login <server>` | Browser OAuth login; tokens stored at `~/.mcpgen/credentials.json`. |
 | `migrate-creds` | Move stored OAuth tokens between `file` / `keyring` backends. |
@@ -199,8 +213,8 @@ Full workflow and flags: [`doc/USAGE.md`](doc/USAGE.md).
 
 ## Drift detection
 
-`codegen` writes a deterministic, non-secret snapshot of the server's tool inventory
-beside the generated module:
+`codegen` writes a deterministic, non-secret snapshot of the server's tool and resource
+inventory beside the generated module:
 
 ```bash
 mcpgen codegen demo --stdio 'python server.py' --out gen/demo.py
@@ -215,13 +229,18 @@ mcpgen check demo --stdio 'python server.py' --manifest gen/demo.mcpgen.json
 
 | Exit | Meaning |
 |---|---|
-| 0 | No drift. Description-only changes print as advisories and do not fail. |
-| 1 | Drift: a tool was added, removed, or its input schema or annotations changed. |
-| 2 | Operational error: manifest missing or unreadable, transport failure, auth failure. |
+| 0 | No drift. Description-only changes, and name changes on resources, print as advisories and do not fail. |
+| 1 | Drift: a tool was added, removed, or its input schema or annotations changed; or a resource or resource template was added, removed, or changed its `mimeType`. |
+| 2 | Operational error: manifest missing or unreadable, transport failure, auth failure, or a failed resource listing. |
 
 Exit 2 is never drift, so a broken runner or an expired token cannot be misread as a
-changed tool contract. `--json` emits a structured report. `check` never calls a tool
-and never touches `<server>.shapes.json`.
+changed tool contract. `--json` emits a structured report. `check` never calls a tool,
+never reads a resource, and never touches `<server>.shapes.json`.
+
+A manifest written before 0.11.0 tracks no resources. Against a server that has some,
+`check` prints an advisory and exits 0; `--update` starts tracking them. A manifest from
+`codegen --resources none` looks the same, so check it with `--resources none` to keep it
+tools-only. Details in [`doc/USAGE.md`](doc/USAGE.md#drift-detection-mcpgen-check).
 
 To accept the new inventory, ask for it explicitly — `check` never writes on its own:
 
@@ -269,9 +288,9 @@ If you write your agent logic in Python and want generated tool wrappers you can
 
 ## Status
 
-Early access (`v0.x`). The codegen engine, OAuth persistence, live-probe shaping, tool-inventory drift detection (`mcpgen check`), and both Claude Code skills are working today. Transport support is stdio and Streamable HTTP; SSE is discovered but not implemented.
+Early access (`v0.x`). The codegen engine, OAuth persistence, live-probe shaping, resource accessors, tool- and resource-inventory drift detection (`mcpgen check`), and both Claude Code skills are working today. Transport support is stdio and Streamable HTTP; SSE is discovered but not implemented.
 
-**MCP SDK compatibility.** mcpgen currently pins the official Python SDK to `mcp>=1.27,<2`. The OAuth pre-flight refresh in `_bridge.py` depends on specific `FileTokenStorage` and auth-flow behavior in the 1.x line, and the SDK's 2.x rework for the 2026-07-28 spec changes that surface. The pin is deliberate, not neglect — lifting it means re-validating the token lifecycle against 2.x, which is tracked as the next significant piece of work. Generated wrappers themselves are unaffected: they import only `seam.McpCaller`, so a wrapper generated today keeps working against whatever bridge implementation you supply.
+**MCP SDK compatibility.** mcpgen currently pins the official Python SDK to `mcp>=1.27,<2`. The OAuth pre-flight refresh in `_bridge.py` depends on specific `FileTokenStorage` and auth-flow behavior in the 1.x line, and the SDK's 2.x rework for the 2026-07-28 spec changes that surface. The pin is deliberate, not neglect — lifting it means re-validating the token lifecycle against 2.x, which is tracked as the next significant piece of work. Generated wrappers themselves are unaffected: they import only the `mcpgen.seam` Protocols (`McpCaller`, plus `McpResourceReader` when the module has resource accessors), so a wrapper generated today keeps working against whatever bridge implementation you supply.
 
 ## License
 

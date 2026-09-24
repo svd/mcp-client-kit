@@ -42,14 +42,14 @@ CLI (cli.py)
   └── Codegen (codegen.py)    ← pure functions: JSON Schema → Python source
   └── Discovery (discovery.py)← pure enumeration of host-configured servers
 Generated wrappers (.py files)
-  └── Seam (seam.py)          ← McpCaller Protocol only; no concrete client
+  └── Seam (seam.py)          ← McpCaller + McpResourceReader Protocols only; no concrete client
 ```
 
-**`seam.py`** — the only thing generated wrappers import from this package. A single `McpCaller` Protocol (`async def call(server, tool, arguments) → Any`). Changing it breaks all generated files.
+**`seam.py`** — the only thing generated wrappers import from this package. Two Protocols: `McpCaller` (`async def call(server, tool, arguments) → Any`) for tool wrappers and `McpResourceReader` (`async def read_resource(server, uri) → Any`) for resource accessors. They stay separate so a caller implementing only `McpCaller` still satisfies modules without resources. Changing either breaks every generated file that uses it.
 
-**`codegen.py`** — pure functions (no I/O). `render_module()` takes tool dicts + optional shape-spec and emits Python source. `summarize_shape()` converts a live response to a shape skeleton. `merge_skeletons()` merges multiple probe skeletons into one.
+**`codegen.py`** — pure functions (no I/O). `render_module()` takes tool dicts, optional resource/template dicts, and an optional shape-spec, and emits Python source; RFC 6570 URI-template parsing and expansion live here too. `summarize_shape()` converts a live response to a shape skeleton. `merge_skeletons()` merges multiple probe skeletons into one.
 
-**`_bridge.py`** — all async/network code. `McpBridgeCaller` implements `McpCaller`. `session()` is the `asynccontextmanager` for raw MCP sessions. Contains OAuth pre-flight refresh logic (critical — see module docstring; bounded to `mcp<2` because SDK `_initialize` never calls `update_token_expiry`).
+**`_bridge.py`** — all async/network code. `McpBridgeCaller` implements both seam Protocols. `session()` is the `asynccontextmanager` for raw MCP sessions. Contains OAuth pre-flight refresh logic (critical — see module docstring; bounded to `mcp<2` because SDK `_initialize` never calls `update_token_expiry`).
 
 **`discovery.py`** — sync, no network. Reads Claude Code CLI / `~/.claude.json` to enumerate configured MCP servers.
 
@@ -57,7 +57,7 @@ Generated wrappers (.py files)
 
 ## Shape-spec sidecar
 
-`<server>.shapes.json` is the hand-editable file that drives typed codegen. Key fields per tool entry: `unwrap` (key path to unwrap), `return_model` (TypedDict name), `fields` (field → Python type), `input_overrides`, `overloads`. The `.parts/` directory holds per-probe intermediates until `mcpgen merge` consolidates them.
+`<server>.shapes.json` is the hand-editable file that drives typed codegen. Key fields per tool entry: `unwrap` (key path to unwrap), `return_model` (TypedDict name), `fields` (field → Python type), `input_overrides`, `overloads`. Resource entries are keyed by normalized URI or template string and carry `kind`. The `.parts/` directory holds per-probe intermediates until `mcpgen merge` consolidates them.
 
 ## Running the skill locally
 
