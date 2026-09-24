@@ -1,7 +1,8 @@
 """End-to-end: generated wrappers invoke a real MCP server.
 
 Covers the full documented lifecycle — codegen, probe, merge, hand-set shape,
-regenerate to a TypedDict — plus the reused-session execution block.
+regenerate to a TypedDict — plus the reused-session execution block, for tools
+and for resource accessors alike.
 """
 
 from __future__ import annotations
@@ -79,6 +80,7 @@ def test_probe_merge_shape_regenerate_yields_a_typed_dict(tmp_path, stdio_cmd):
     assert main(["merge", "demo", "--out", str(shapes)]) == 0
     skeleton = json.loads(shapes.read_text())
     assert "greet" in skeleton
+    assert "kind" not in skeleton["greet"]  # tool entries stay as they were before resources
 
     # 4. the judgment pass — hand-set the output model, as the skill would
     skeleton["greet"]["return_model"] = "Greeting"
@@ -186,3 +188,124 @@ def test_one_shot_calls_still_work_against_the_real_server(tmp_path, stdio_cmd):
     caller = McpBridgeCaller(cmd=stdio_cmd)
     assert asyncio.run(module.add(caller, a=1, b=1)) == 2
     assert asyncio.run(module.add(caller, a=2, b=2)) == 4
+
+
+# fixtures/stdio_server.py's LOGO, served as a base64 blob.
+LOGO = bytes([0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0xFE, 0x01])
+
+
+def test_generated_resource_accessors_read_the_real_server(tmp_path, stdio_cmd):
+    out = tmp_path / "demo_res.py"
+    assert main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(out)]) == 0
+    module = _load(out, "demo_res")
+
+    caller = McpBridgeCaller(cmd=stdio_cmd)
+    config = asyncio.run(module.read_demo_config(caller))
+    record = asyncio.run(module.read_demo_records(caller, record_id="7"))
+
+    assert config == {"name": "demo", "version": 2, "features": ["greet", "add"]}
+    assert record == {"id": "7", "name": "record-7"}
+
+
+def test_generated_blob_accessor_returns_bytes(tmp_path, stdio_cmd):
+    out = tmp_path / "demo_blob.py"
+    main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(out)])
+    module = _load(out, "demo_blob")
+
+    logo = asyncio.run(module.read_demo_logo(McpBridgeCaller(cmd=stdio_cmd)))
+    assert type(logo) is bytes
+    assert logo == LOGO
+
+
+def test_resource_reads_and_tool_calls_share_one_session(tmp_path, stdio_cmd):
+    """Accessors and tool wrappers inside one connected() block use one subprocess."""
+    import mcpgen._bridge as bridge
+
+    out = tmp_path / "demo_mixed.py"
+    main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(out)])
+    module = _load(out, "demo_mixed")
+
+    starts = {"n": 0}
+    real_stdio_session = bridge._stdio_session
+
+    def counting(*args, **kwargs):
+        starts["n"] += 1
+        return real_stdio_session(*args, **kwargs)
+
+    async def run():
+        caller = McpBridgeCaller(cmd=stdio_cmd)
+        async with caller.connected():
+            config = await module.read_demo_config(caller)
+            greeting = await module.greet(caller, name="Grace")
+            record = await module.read_demo_records(caller, record_id="3")
+            logo = await module.read_demo_logo(caller)
+        return config, greeting, record, logo
+
+    bridge._stdio_session = counting
+    try:
+        config, greeting, record, logo = asyncio.run(run())
+    finally:
+        bridge._stdio_session = real_stdio_session
+
+    assert starts["n"] == 1
+    assert config["name"] == "demo"
+    assert greeting == {"message": "Hello, Grace.", "length": 5}
+    assert record == {"id": "3", "name": "record-3"}
+    assert logo == LOGO
+
+
+def test_probe_merge_shape_regenerate_yields_a_typed_resource(tmp_path, stdio_cmd):
+    """The documented lifecycle for a resource template: Any by default, TypedDict after shaping."""
+    out = tmp_path / "demo_typed_res.py"
+    shapes = tmp_path / "demo.shapes.json"
+    template = "demo://records/{record_id}"
+
+    # 1. codegen — untyped accessor
+    main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(out)])
+    assert "async def read_demo_records(caller: McpResourceReader, *, record_id: str) -> Any:" in out.read_text()
+
+    # 2. probe — read the real resource through the template
+    assert (
+        main(
+            [
+                "probe",
+                "demo",
+                template,
+                "--resource",
+                "--stdio",
+                stdio_cmd,
+                "--args",
+                json.dumps({"record_id": "7"}),
+                "--emit-shape",
+                str(shapes),
+            ]
+        )
+        == 0
+    )
+
+    # 3. merge — the entry is keyed by the template and marked as one
+    assert main(["merge", "demo", "--out", str(shapes)]) == 0
+    skeleton = json.loads(shapes.read_text())
+    entry = skeleton[template]
+    assert entry["kind"] == "resource_template"
+    assert entry["probed_args"] == {"record_id": "7"}
+    assert entry["fields"] == {"id": "str", "name": "str"}
+
+    # 4. the judgment pass — name the model
+    entry["return_model"] = "Record"
+    shapes.write_text(json.dumps(skeleton, indent=2))
+
+    # 5. regenerate — the accessor is typed, the tools are not
+    assert main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(out), "--shapes", str(shapes)]) == 0
+    source = out.read_text()
+    assert "class Record(TypedDict" in source
+    assert "async def read_demo_records(caller: McpResourceReader, *, record_id: str) -> Record:" in source
+    greet_line = next(line for line in source.splitlines() if line.startswith("async def greet("))
+    assert greet_line.endswith("-> Any:")
+
+    # and it still reads the real server correctly
+    module = _load(out, "demo_typed_res")
+    assert asyncio.run(module.read_demo_records(McpBridgeCaller(cmd=stdio_cmd), record_id="7")) == {
+        "id": "7",
+        "name": "record-7",
+    }

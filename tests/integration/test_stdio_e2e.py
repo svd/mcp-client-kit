@@ -1,13 +1,19 @@
 """End-to-end over a real stdio MCP server: codegen → manifest → check.
 
 Unlike the unit suites, nothing is mocked here — a real subprocess, the real
-protocol, the real CLI entry points.
+protocol, the real CLI entry points. The fixture server serves resources as
+well as tools, so every generated manifest tracks both.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 
+import pytest
+from mcp.shared.exceptions import McpError
+
+from mcpgen import McpBridgeCaller
 from mcpgen.cli import main
 
 
@@ -26,13 +32,40 @@ def test_codegen_produces_importable_module_and_manifest(tmp_path, stdio_cmd):
     assert set(payload["tools"]) == {"greet", "add", "list_records", "json_payload", "styled"}
     assert "name" in payload["tools"]["greet"]["inputSchema"]["required"]
 
+    assert "async def read_demo_config" in source
+    assert "async def read_demo_logo" in source
+    assert "async def read_demo_records" in source
+    assert payload["resources"] == {
+        "demo://config": {"name": "config", "description": "Server configuration.", "mimeType": "application/json"},
+        "demo://logo": {
+            "name": "logo",
+            "description": "The demo logo, as raw bytes.",
+            "mimeType": "application/octet-stream",
+        },
+    }
+    assert payload["resource_templates"] == {
+        "demo://records/{record_id}": {
+            "name": "record",
+            "description": "One record by id.",
+            "mimeType": "application/json",
+        },
+    }
+
 
 def test_manifest_is_byte_stable_across_regeneration(tmp_path, stdio_cmd):
     out = tmp_path / "demo.py"
+    manifest_path = tmp_path / "demo.mcpgen.json"
     main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(out)])
-    first = (tmp_path / "demo.mcpgen.json").read_bytes()
+    first = manifest_path.read_bytes()
+    # The stability claim covers the resource sections, not just the tools.
+    assert {"resources", "resource_templates"} <= set(json.loads(first))
+
     main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(out)])
-    assert (tmp_path / "demo.mcpgen.json").read_bytes() == first
+    assert manifest_path.read_bytes() == first
+
+    # `check --update`, the other write path, writes the same bytes too.
+    assert main(["check", "demo", "--stdio", stdio_cmd, "--manifest", str(manifest_path), "--update"]) == 0
+    assert manifest_path.read_bytes() == first
 
 
 def test_check_against_the_same_server_reports_no_drift(tmp_path, stdio_cmd, capsys):
@@ -72,6 +105,10 @@ def test_check_json_report_against_a_changed_server(tmp_path, stdio_cmd, changed
     assert payload["drift"] is True
     assert payload["removed"] == ["json_payload"]
     assert {c["tool"] for c in payload["changed"]} == {"greet", "styled"}
+    assert payload["resources"]["compared"] is True
+    assert payload["resources"]["added"] == [{"kind": "resource", "key": "demo://status"}]
+    assert payload["resources"]["removed"] == [{"kind": "resource", "key": "demo://logo"}]
+    assert [(c["key"], c["category"]) for c in payload["resources"]["changed"]] == [("demo://config", "mimeType")]
 
 
 def test_check_does_not_write_the_manifest_on_live_drift(tmp_path, stdio_cmd, changed_stdio_cmd):
@@ -108,3 +145,123 @@ def test_check_operational_error_on_a_dead_server_exits_two(tmp_path, stdio_cmd)
         ]
     )
     assert rc == 2
+
+
+def test_list_resources_prints_the_real_inventory(stdio_cmd, capsys):
+    assert main(["list", "demo", "--stdio", stdio_cmd, "--resources"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    # Only the fields the fixture sets: an SDK may also fill title or size.
+    def picked(entry: dict, key: str) -> dict:
+        return {k: entry[k] for k in (key, "name", "description", "mimeType")}
+
+    assert [r["uri"] for r in payload["resources"]] == ["demo://config", "demo://logo"]
+    assert [t["uriTemplate"] for t in payload["resourceTemplates"]] == ["demo://records/{record_id}"]
+    assert [picked(r, "uri") for r in payload["resources"]] == [
+        {
+            "uri": "demo://config",
+            "name": "config",
+            "description": "Server configuration.",
+            "mimeType": "application/json",
+        },
+        {
+            "uri": "demo://logo",
+            "name": "logo",
+            "description": "The demo logo, as raw bytes.",
+            "mimeType": "application/octet-stream",
+        },
+    ]
+    assert [picked(t, "uriTemplate") for t in payload["resourceTemplates"]] == [
+        {
+            "uriTemplate": "demo://records/{record_id}",
+            "name": "record",
+            "description": "One record by id.",
+            "mimeType": "application/json",
+        },
+    ]
+
+
+def test_check_reports_resource_drift_against_a_changed_server(tmp_path, stdio_cmd, changed_stdio_cmd, capsys):
+    out = tmp_path / "demo.py"
+    manifest_path = tmp_path / "demo.mcpgen.json"
+    main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(out)])
+    capsys.readouterr()
+
+    rc = main(["check", "demo", "--stdio", changed_stdio_cmd, "--manifest", str(manifest_path)])
+    assert rc == 1
+    report = capsys.readouterr().out
+    assert "ADDED     demo resource demo://status" in report
+    assert "REMOVED   demo resource demo://logo" in report
+    changed = [line for line in report.splitlines() if line.startswith("CHANGED   demo resource demo://config")]
+    assert len(changed) == 1
+    assert "mimeType" in changed[0]
+    assert "text/plain" in changed[0]
+    assert "demo://records/{record_id}" not in report
+
+
+def test_resource_drift_alone_exits_one(tmp_path, stdio_cmd, changed_stdio_cmd, capsys):
+    """With the tool contract already accepted, the resource changes still fail `check`."""
+    manifest_path = tmp_path / "demo.mcpgen.json"
+    main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(tmp_path / "demo.py")])
+    main(["codegen", "demo", "--stdio", changed_stdio_cmd, "--out", str(tmp_path / "changed.py")])
+    stored = json.loads(manifest_path.read_text())
+    stored["tools"] = json.loads((tmp_path / "changed.mcpgen.json").read_text())["tools"]
+    manifest_path.write_text(json.dumps(stored))
+    capsys.readouterr()
+
+    rc = main(["check", "demo", "--stdio", changed_stdio_cmd, "--manifest", str(manifest_path), "--json"])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert (payload["added"], payload["removed"], payload["changed"]) == ([], [], [])
+    assert payload["drift"] is True
+    assert payload["resources"]["added"] == [{"kind": "resource", "key": "demo://status"}]
+    assert payload["resources"]["removed"] == [{"kind": "resource", "key": "demo://logo"}]
+
+
+def test_read_of_an_unknown_resource_exits_one_without_a_traceback(tmp_path, stdio_cmd, capsys):
+    target = tmp_path / "missing.probe-raw.json"
+    rc = main(["read", "demo", "demo://nope", "--stdio", stdio_cmd, "--out", str(target)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "[read] error: McpError:" in err
+    assert "demo://nope" in err
+    assert not target.exists()
+    # The CLI flattens an ExceptionGroup into the same message, so this test cannot
+    # tell a bare McpError from a wrapped one; the bridge test below guards that.
+
+
+def test_unknown_resource_error_escapes_a_one_shot_session_bare(stdio_cmd):
+    """anyio must not wrap the server's error in an ExceptionGroup on the read path.
+
+    `pytest.raises(McpError)` does not match a group, so a wrapped error fails here.
+    """
+    caller = McpBridgeCaller(cmd=stdio_cmd)
+    with pytest.raises(McpError, match="demo://nope"):
+        asyncio.run(caller.read_resource("demo", "demo://nope"))
+
+
+def test_old_manifest_without_resource_sections_is_advised_then_tracked(tmp_path, stdio_cmd, capsys):
+    """A manifest written before resources were tracked: advisory only, until --update tracks them."""
+    manifest_path = tmp_path / "demo.mcpgen.json"
+    main(["codegen", "demo", "--stdio", stdio_cmd, "--out", str(tmp_path / "demo.py")])
+    stored = json.loads(manifest_path.read_text())
+    del stored["resources"], stored["resource_templates"]
+    manifest_path.write_text(json.dumps(stored))
+    capsys.readouterr()
+
+    assert main(["check", "demo", "--stdio", stdio_cmd, "--manifest", str(manifest_path)]) == 0
+    report = capsys.readouterr().out
+    assert "are not tracked by the stored manifest" in report
+    assert "--update" in report
+    assert "No drift." in report
+
+    assert main(["check", "demo", "--stdio", stdio_cmd, "--manifest", str(manifest_path), "--update"]) == 0
+    updated = json.loads(manifest_path.read_text())
+    assert set(updated["resources"]) == {"demo://config", "demo://logo"}
+    assert set(updated["resource_templates"]) == {"demo://records/{record_id}"}
+    capsys.readouterr()
+
+    assert main(["check", "demo", "--stdio", stdio_cmd, "--manifest", str(manifest_path)]) == 0
+    report = capsys.readouterr().out
+    assert "not tracked" not in report
+    assert report.strip() == "No drift."
