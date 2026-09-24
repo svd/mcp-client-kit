@@ -1312,7 +1312,7 @@ def probe_skeleton(
     args_list      — the N arg-dicts passed to the tool (one per probe).
     shapes         — the N summarize_shape() results from those calls.
     observed_bytes — optional raw response sizes (one per probe); the largest
-                     is recorded as `_observed_shape` so the generated docstring
+                     is recorded as `_observed_bytes` so the generated docstring
                      can warn callers about outsized payloads. Omitted entirely
                      when not passed (byte-stable with existing shapes.json).
     kind           — `"resource"` / `"resource_template"` for a resource entry.

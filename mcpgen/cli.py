@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import shutil
@@ -278,6 +280,50 @@ async def _probe(
     return codegen.summarize_shape(raw), size, raw
 
 
+async def _probe_resource(
+    server: str,
+    uri: str,
+    *,
+    cmd: str | None = None,
+    url: str | None = None,
+    bearer: str | None = None,
+    client_name: str | None = None,
+    config_path: str | None = None,
+    cred_backend: str | None = None,
+    creds_path: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[Any, int, Any]:
+    """`_probe` for a resource: `(observed_shape, observed_byte_size, raw_payload)` of one read.
+
+    Reads through ``read_resource``, the path generated accessors take, so the
+    shape is of the parsed value they return. A blob arrives as ``bytes``, which
+    ``summarize_shape`` records as ``"bytes"`` and whose size is its length.
+    """
+    caller = _bridge.McpBridgeCaller(
+        cmd=cmd,
+        url=url,
+        bearer=bearer,
+        client_name=client_name,
+        config_path=config_path,
+        cred_backend=cred_backend,
+        creds_path=creds_path,
+        env=env,
+    )
+    raw = await caller.read_resource(server, uri)
+    if isinstance(raw, bytes):
+        size = len(raw)
+    else:
+        size = len(json.dumps(raw, default=_raw_default, ensure_ascii=False).encode("utf-8"))
+    return codegen.summarize_shape(raw), size, raw
+
+
+def _raw_default(obj: Any) -> Any:
+    """``json.dumps`` fallback for raw payloads: base64 for bytes, ``str`` for anything else."""
+    if isinstance(obj, bytes):
+        return base64.b64encode(obj).decode("ascii")
+    return str(obj)
+
+
 async def _call(
     server: str,
     tool: str,
@@ -467,6 +513,26 @@ def _parts_dir(target: Path) -> Path:
     return target.with_name(target.name + ".parts")
 
 
+_PART_NAME_MAX = 200
+"""Longest part file stem; leaves room for ``.json`` and ``_atomic_write``'s temp suffix under 255 bytes."""
+
+
+def _part_filename(key: str) -> str:
+    """The ``.parts/`` file name for the shapes entry *key*: a tool name, resource URI or template.
+
+    The key is URL-quoted, so the ``:`` and ``/`` of a URI stay inside the
+    directory. A quoted key longer than ``_PART_NAME_MAX`` (a long URI template)
+    is cut short and ends in the sha256 of the whole key, which keeps two long
+    keys with a common prefix apart. MCP tool names are far shorter, so a tool's
+    part name is its plain quoted name.
+    """
+    name = _url_quote(key, safe="")
+    if len(name) > _PART_NAME_MAX:
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        name = name[: _PART_NAME_MAX - len(digest) - 1] + "-" + digest
+    return name + ".json"
+
+
 def _merge_manifest_path(ns: argparse.Namespace, target: Path) -> Path | None:
     """Locate the tool-inventory manifest for `merge`'s stale-entry advisory.
 
@@ -640,6 +706,55 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _resource_probe_plan(target: str, raw_args: list[str]) -> tuple[str, str, list[dict], list[str]]:
+    """Resolve a `probe --resource` target into `(key, kind, args_list, uris)`.
+
+    A template (a target containing ``{``) is keyed by the template string as
+    given, and each --args value is one probe's variables, recorded as its
+    probed_args. A static URI is keyed by its normalized form and takes no
+    --args, so it is probed once with ``{}``. Every URI is resolved before the
+    first live read. Raises ``ValueError``.
+    """
+    if "{" in target:
+        args_list = [_json_object_arg(a) for a in raw_args] or [{}]
+        return target, "resource_template", args_list, [_resource_uri(target, v) for v in args_list]
+    if raw_args:
+        raise _static_args_error(target)
+    uri = _resource_uri(target, None)
+    return uri, "resource", [{}], [uri]
+
+
+def _refuse_part_collision(part: Path, key: str, server: str) -> bool:
+    """Print the refusal and return True when *part* holds another key (see ``_part_collision``)."""
+    other = _part_collision(part, key)
+    if other is None:
+        return False
+    print(
+        f"[probe] error: refusing to overwrite {part}: it holds {other!r}, whose part file name "
+        f"matches {key!r} on this case-insensitive filesystem. Run `mcpgen merge {server}` to "
+        f"consolidate it first, or delete the part if {other!r} is gone.",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _part_collision(part: Path, key: str) -> str | None:
+    """The key already stored in *part* when it is not *key*, else ``None``.
+
+    Part names are case-preserving, but a case-insensitive filesystem (macOS,
+    Windows defaults) maps ``demo://x/Users`` and ``demo://x/users`` to one
+    file, and writing the second would silently drop the first. A missing or
+    unreadable part holds nothing worth keeping.
+    """
+    try:
+        doc = json.loads(part.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or not doc or key in doc:
+        return None
+    return next(iter(doc))
+
+
 def _cmd_probe(ns: argparse.Namespace) -> int:
     """Run one or more live calls and emit a merged shape-spec SKELETON.
 
@@ -648,12 +763,26 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     sequence and the observed shapes are deep-merged so the skeleton reflects
     the union of all responses (nullable fields, key-presence variance, etc.).
 
+    With --resource the target is a resource URI or URI template, read through
+    ``read_resource`` instead of called; see ``_resource_probe_plan`` for the
+    entry key and what --args means there. Resource entries carry ``kind`` and
+    get no discriminator advisory.
+
     The deterministic part: top-level scalars → fields; unwrap, types, and
     deep-nest decisions are the skill's judgment (see SKILL.md step 4).
     """
     cmd = getattr(ns, "stdio", None)
     raw_args_list: list[str] = ns.args or []
-    args_list: list[dict] = [json.loads(a) for a in raw_args_list] if raw_args_list else [{}]
+    kind: str | None = None
+    if getattr(ns, "resource", False):
+        try:
+            key, kind, args_list, uris = _resource_probe_plan(ns.tool, raw_args_list)
+        except ValueError as exc:
+            print(f"[probe] error: {exc}", file=sys.stderr)
+            return 1
+    else:
+        key = ns.tool
+        args_list = [json.loads(a) for a in raw_args_list] if raw_args_list else [{}]
     n = len(args_list)
 
     save_raw = getattr(ns, "save_raw", None)
@@ -668,7 +797,16 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
             )
             return 1
 
-    print(f"[probe] {ns.server}.{ns.tool} ({n} probe(s)) …", file=sys.stderr)
+    part: Path | None = None
+    if ns.emit_shape:
+        part = _parts_dir(Path(ns.emit_shape)) / _part_filename(key)
+        # Checked before any live call, so a refused write costs no probe, and
+        # again before the write for a concurrent probe of a case-twin key.
+        if _refuse_part_collision(part, key, ns.server):
+            return 1
+
+    label = f"{ns.server}.{ns.tool}" if kind is None else f"{ns.server} {key}"
+    print(f"[probe] {label} ({n} probe(s)) …", file=sys.stderr)
 
     conn = dict(
         url=ns.url,
@@ -683,26 +821,38 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     sizes = []
     raws: list[Any] = []
     for i, args in enumerate(args_list):
-        print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
+        if kind is None:
+            print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
+        else:
+            print(f"[probe]   [{i + 1}/{n}] {uris[i]} args={args}", file=sys.stderr)
         # one session per probe (prototype); pooling is out of scope
         try:
-            shape, size, raw = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
+            if kind is None:
+                shape, size, raw = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
+            else:
+                shape, size, raw = asyncio.run(_probe_resource(ns.server, uris[i], cmd=cmd, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[probe] error: {exc}", file=sys.stderr)
+            return 1
+        except McpError as exc:
+            print(f"[probe] error: {_bridge._describe(exc)}", file=sys.stderr)
+            return 1
+        except BaseExceptionGroup as exc:
+            _check_reportable(exc)
+            print(f"[probe] error: {_bridge._describe(exc)}", file=sys.stderr)
             return 1
         shapes.append(shape)
         sizes.append(size)
         raws.append(raw)
 
-    skeleton = codegen.probe_skeleton(ns.tool, args_list, shapes, observed_bytes=sizes)
+    skeleton = codegen.probe_skeleton(key, args_list, shapes, observed_bytes=sizes, kind=kind)
     out = json.dumps(skeleton, indent=2)
-    if ns.emit_shape:
-        target = Path(ns.emit_shape)
-        parts_d = _parts_dir(target)
-        part = parts_d / (_url_quote(ns.tool, safe="") + ".json")
+    if part is not None:
+        if _refuse_part_collision(part, key, ns.server):
+            return 1
         _atomic_write_text(part, out + "\n")
         print(f"[probe] wrote part {part}", file=sys.stderr)
-        print(f"[probe] run `mcpgen merge {ns.server}` to consolidate into {target}", file=sys.stderr)
+        print(f"[probe] run `mcpgen merge {ns.server}` to consolidate into {ns.emit_shape}", file=sys.stderr)
     else:
         sys.stdout.write(out + "\n")
 
@@ -710,10 +860,10 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         if len(raws) == 1 and isinstance(raws[0], str):
             text = raws[0]
         elif len(raws) == 1:
-            text = json.dumps(raws[0], indent=2, default=str)
+            text = json.dumps(raws[0], indent=2, default=_raw_default)
         else:
             text = json.dumps(
-                [{"args": a, "raw": r} for a, r in zip(args_list, raws, strict=True)], indent=2, default=str
+                [{"args": a, "raw": r} for a, r in zip(args_list, raws, strict=True)], indent=2, default=_raw_default
             )
         raw_target = Path(save_raw)
         _atomic_write_text(raw_target, text + "\n")
@@ -724,6 +874,10 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
             "into a committed file.",
             file=sys.stderr,
         )
+
+    if kind is not None:
+        # A resource's variables pick which resource is read, not a response variant.
+        return 0
 
     try:
         _DISCRIMINATOR_KEYS = {"entitytype", "type", "kind", "category", "entity_type", "objecttype", "resourcetype"}
@@ -1481,14 +1635,24 @@ def main(argv: list[str] | None = None) -> int:
     _add_conn_args(cg)
     cg.set_defaults(func=_cmd_codegen)
 
-    pr = sub.add_parser("probe", help="live-call a tool and emit a shape-spec skeleton")
+    pr = sub.add_parser(
+        "probe", help="live-call a tool, or read a resource with --resource, and emit a shape-spec skeleton"
+    )
     pr.add_argument("server", help="server name (e.g. acme) or URL")
-    pr.add_argument("tool", help="tool to call live")
+    pr.add_argument("tool", metavar="target", help="tool to call live; with --resource, a resource URI or URI template")
+    pr.add_argument(
+        "--resource",
+        action="store_true",
+        help="read the target as a resource through read_resource, the generated accessors' path. "
+        "A target containing '{' is a URI template; the part is keyed by the template, "
+        "else by the normalized URI",
+    )
     pr.add_argument(
         "--args",
         action="append",
         metavar="JSON",
-        help="JSON args for one probe call; repeat for multi-probe (default: {})",
+        help="JSON args for one probe call; repeat for multi-probe (default: {}). "
+        "With --resource: one probe's URI template variables (template targets only)",
     )
     pr.add_argument("--emit-shape", help="write skeleton to this path (default: stdout)")
     pr.add_argument(
@@ -1496,7 +1660,8 @@ def main(argv: list[str] | None = None) -> int:
         dest="save_raw",
         metavar="FILE",
         help="also write the untruncated raw payload here; the name MUST end in "
-        ".probe-raw.json (git-ignored). Multi-probe writes a JSON array of {args, raw}",
+        ".probe-raw.json (git-ignored). Multi-probe writes a JSON array of {args, raw}; "
+        "bytes are base64-encoded",
     )
     pr.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(pr)
