@@ -721,6 +721,13 @@ barrier stays on main.
    the accessor the same way: `read_dimension_by_unit_type(caller, *, unitType: str) ->
    list[Dimension]`.
 
+   A text match on `-> Entity` passes even when the wrong model is named, so also check the
+   models against the annotations: every `class <Name>(TypedDict, …)` in the module must appear
+   in at least one function's return annotation. A class nothing returns means a wrapper is
+   annotated with the wrong model. If `codegen`'s stderr printed `shape collision for '<Name>'
+   (<owner>); emitted '<Name>_2'`, two entries share a name with different `fields`: rename one
+   in `<shapes-path>` (see `references/shape-spec.md`) and rerun `codegen`.
+
 7. **Generate a smoke-test runner.**
 
    Once the wrappers are shaped and verified, invoke `/mcp-client-kit:generate-mcp-runner`.

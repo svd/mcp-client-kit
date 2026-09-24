@@ -18,8 +18,11 @@ The `TypedDict` name (e.g. `"Entity"`). Absent → the return stays `Any`.
   plain scalars.
 - Must be a new, capitalized identifier (`CurrentTime`, `CommitSummary`) — never a Python
   keyword or builtin.
-- Two tools may not share a name unless their `fields` dicts are identical. Check for
-  collisions before finalising.
+- Two entries — tools, variants or resources — may not share a name unless their `fields`
+  dicts are identical. Check for collisions before finalising; a tool and a resource serving
+  the same entity is the easy one to miss. Should one slip through, `codegen` renames the
+  later model to `<Name>_2` and warns `shape collision for '<Name>' (<owner>)`: rename it in
+  the spec rather than ship the suffix.
 
 When several tools share a conceptual type but differ in fields, mint distinct names:
 

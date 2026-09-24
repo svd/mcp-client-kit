@@ -111,6 +111,15 @@
   require the `--save-raw` payload, checked element by element; without it the field stays a
   bare `list`.
 
+- **A renamed return model now reaches the wrapper that caused the rename.** When two shape
+  entries shared a `return_model` name with different `fields`, `codegen` emitted
+  `KnowledgeGraph_2` but still annotated and cast the second wrapper to `KnowledgeGraph`, so
+  the new class went unused and the wrapper promised the wrong keys. Tools, discriminated
+  variants and resource accessors now return the class emitted for them, and an entry whose
+  fields match an existing `_N` model reuses it instead of emitting another. The collision
+  warning names the tool, variant or URI involved. Resources made this easier to hit: a tool
+  and a resource serving the same entity often pick the same name.
+
 ## [0.10.0] — 2026-09-09
 
 ### Added

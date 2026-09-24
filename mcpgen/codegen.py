@@ -1081,33 +1081,47 @@ def render_module(
         seam, about = "McpResourceReader", _ABOUT_RESOURCES
     parts = [_HEADER.format(server=server, about=about, probe_note=note, imports=imports, seam=seam)]
 
+    # Specs whose return_model was renamed by a collision; the renderers read
+    # return_model from the spec they are handed, so they get these copies.
+    # The caller's `shapes` is never mutated.
+    resolved_tool_shapes: dict[str, dict] = {}
     if shapes:
         models: list[str] = []
-        _seen_models: dict[str, str] = {}  # name → rendered body; dedup across tools
+        _seen_models: dict[str, str] = {}  # emitted name → rendered body; dedup across tools and resources
 
-        def _append_model(name: str, fields: dict) -> None:
+        def _append_model(name: str, fields: dict, owner: str) -> str:
+            """Emit the model unless an identical one exists; return the class name the owner must annotate.
+
+            Same name with different fields gets the first `_2`, `_3`, … suffix
+            whose body matches, or else the first free one.
+            """
             if name in _PY_BUILTINS:
                 print(
                     f"[codegen] ⚠  return_model {name!r} is a Python builtin — ignored; use null instead",
                     file=sys.stderr,
                 )
-                return
-            body = render_model(name, fields)
-            if name not in _seen_models:
-                _seen_models[name] = body
-                models.append(body)
-            elif _seen_models[name] == body:
-                pass  # identical duplicate — skip silently
-            else:
-                # True shape collision: same name, different fields → emit suffixed variant.
-                suffix = 2
-                while f"{name}_{suffix}" in _seen_models:
-                    suffix += 1
-                suffixed = f"{name}_{suffix}"
-                suffixed_body = render_model(suffixed, fields)
-                _seen_models[suffixed] = suffixed_body
-                models.append(suffixed_body)
-                print(f"[codegen] ⚠  shape collision for {name!r}; emitted {suffixed!r}", file=sys.stderr)
+                return name
+            candidate, suffix = name, 1
+            while candidate in _seen_models:
+                if _seen_models[candidate] == render_model(candidate, fields):
+                    return candidate
+                suffix += 1
+                candidate = f"{name}_{suffix}"
+            body = render_model(candidate, fields)
+            _seen_models[candidate] = body
+            models.append(body)
+            if candidate != name:
+                print(
+                    f"[codegen] ⚠  shape collision for {name!r} ({owner}); emitted {candidate!r}",
+                    file=sys.stderr,
+                )
+            return candidate
+
+        def _resolve_flat(sp: dict, owner: str) -> dict:
+            if not sp.get("return_model"):
+                return sp
+            got = _append_model(sp["return_model"], sp.get("fields") or {}, owner)
+            return sp if got == sp["return_model"] else {**sp, "return_model": got}
 
         for tool in sorted(tools, key=lambda t: t["name"]):
             sp = shapes.get(tool["name"])
@@ -1116,14 +1130,22 @@ def render_module(
             if sp.get("discriminator") and sp.get("variants"):
                 variants = sp["variants"]
                 disc, numeric = _discriminator_context(tool, sp)
-                for _, variant in sorted(variants.items(), key=lambda kv: _variant_key(kv[0], disc, numeric)):
-                    if variant.get("return_model"):
-                        _append_model(variant["return_model"], variant.get("fields") or {})
-            elif sp.get("return_model"):
-                _append_model(sp["return_model"], sp.get("fields") or {})
-        for sp in resource_specs:
-            if sp.get("return_model"):
-                _append_model(sp["return_model"], sp.get("fields") or {})
+                renamed: dict = {}
+                for key, variant in sorted(variants.items(), key=lambda kv: _variant_key(kv[0], disc, numeric)):
+                    resolved = _resolve_flat(variant, f"{tool['name']}[{key}]")
+                    if resolved is not variant:
+                        renamed[key] = resolved
+                if renamed:
+                    resolved_tool_shapes[tool["name"]] = {**sp, "variants": {**variants, **renamed}}
+            else:
+                resolved = _resolve_flat(sp, tool["name"])
+                if resolved is not sp:
+                    resolved_tool_shapes[tool["name"]] = resolved
+        static_specs = [_resolve_flat(sp, r["uri"]) for r, sp in zip(static_list, static_specs, strict=True)]
+        template_specs = [
+            _resolve_flat(sp, t["uriTemplate"]) for t, sp in zip(template_list, template_specs, strict=True)
+        ]
+        resource_specs = static_specs + template_specs
         parts.extend(models)
         specs = [shapes.get(t["name"]) or {} for t in tools] + resource_specs
         if any(s.get("unwrap") and s.get("return_container") != "list" for s in specs):
@@ -1134,7 +1156,8 @@ def render_module(
         parts.append(_EXPAND_URI)
 
     for tool in sorted(tools, key=lambda t: t["name"]):
-        parts.append(render_tool(tool, shapes.get(tool["name"]), embed_schema=embed_schema))
+        shape = resolved_tool_shapes.get(tool["name"]) or shapes.get(tool["name"])
+        parts.append(render_tool(tool, shape, embed_schema=embed_schema))
     for r, spec in zip(static_list, static_specs, strict=True):
         parts.append(render_resource(r, resource_names["resource", r["uri"]], spec))
     for t, spec in zip(template_list, template_specs, strict=True):

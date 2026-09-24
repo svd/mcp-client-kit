@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import copy
 import inspect
 
 import pytest
@@ -1121,6 +1122,140 @@ def test_render_module_collision_emits_suffixed_variant(capsys):
     assert "class Result(TypedDict, total=False):" in src
     assert "class Result_2(TypedDict, total=False):" in src
     assert "collision" in err.lower() or "Result_2" in err
+    assert "async def tool_a(caller: McpCaller) -> Result:" in src
+    assert "async def tool_b(caller: McpCaller) -> Result_2:" in src
+    assert 'cast("Result_2", await caller.call(SERVER, "tool_b", {}))' in src
+    _assert_every_model_is_returned(src)
+
+
+def _assert_every_model_is_returned(src: str) -> None:
+    """Every emitted TypedDict is named in some return annotation — a dead model means a mis-annotated wrapper."""
+    tree = ast.parse(src)
+    models = {
+        n.name
+        for n in tree.body
+        if isinstance(n, ast.ClassDef) and any(isinstance(b, ast.Name) and b.id == "TypedDict" for b in n.bases)
+    }
+    returned = {
+        node.id
+        for fn in ast.walk(tree)
+        if isinstance(fn, ast.AsyncFunctionDef) and fn.returns is not None
+        for node in ast.walk(fn.returns)
+        if isinstance(node, ast.Name)
+    }
+    assert models <= returned, f"models never returned: {sorted(models - returned)}"
+
+
+def test_render_module_collision_between_tool_and_resource_annotates_suffixed_model(capsys):
+    """A resource whose model name a tool already took returns the suffixed class it caused."""
+    shapes = {
+        "read_graph": {"return_model": "KnowledgeGraph", "fields": {"nodes": "list"}},
+        "memory://graph": {"kind": "resource", "return_model": "KnowledgeGraph", "fields": {"edges": "list"}},
+    }
+    src = codegen.render_module(
+        "memory",
+        [{"name": "read_graph", "description": "x", "inputSchema": {}}],
+        shapes=shapes,
+        resources=[{"uri": "memory://graph"}],
+    )
+    err = capsys.readouterr().err
+
+    assert "async def read_graph(caller: McpCaller) -> KnowledgeGraph:" in src
+    assert "async def read_memory_graph(caller: McpResourceReader) -> KnowledgeGraph_2:" in src
+    assert 'cast("KnowledgeGraph_2", await caller.read_resource(SERVER, "memory://graph"))' in src
+    assert "memory://graph" in err
+    _assert_every_model_is_returned(src)
+
+
+def test_render_module_collision_with_template_keeps_list_container():
+    shapes = {
+        "get_dim": {"return_model": "Dimension", "fields": {"id": "str"}},
+        "dim://{unit}": {
+            "kind": "resource_template",
+            "unwrap": ["items"],
+            "return_container": "list",
+            "return_model": "Dimension",
+            "fields": {"name": "str"},
+        },
+    }
+    src = codegen.render_module(
+        "dc",
+        [{"name": "get_dim", "description": "x", "inputSchema": {}}],
+        shapes=shapes,
+        resource_templates=[{"uriTemplate": "dim://{unit}"}],
+    )
+    assert "async def read_dim(caller: McpResourceReader, *, unit: str) -> list[Dimension_2]:" in src
+    assert "cast(\"list[Dimension_2]\", _dig_list(result, ('items', )))" in src
+    _assert_every_model_is_returned(src)
+
+
+def test_render_module_collision_between_variants_annotates_each_overload():
+    tool = {
+        "name": "get",
+        "description": "x",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"kind": {"type": "string", "enum": ["a", "b"]}},
+            "required": ["kind"],
+        },
+    }
+    shapes = {
+        "get": {
+            "discriminator": "kind",
+            "variants": {
+                "a": {"return_model": "R", "fields": {"x": "str"}},
+                "b": {"return_model": "R", "fields": {"y": "str"}},
+            },
+        }
+    }
+    src = codegen.render_module("d", [tool], shapes=shapes)
+
+    assert "async def get(caller: McpCaller, *, kind: Literal['a']) -> R: ..." in src
+    assert "async def get(caller: McpCaller, *, kind: Literal['b']) -> R_2: ..." in src
+    assert "async def get(caller: McpCaller, *, kind: str) -> R | R_2:" in src
+    _assert_every_model_is_returned(src)
+
+
+def test_render_module_collision_reuses_matching_suffixed_model(capsys):
+    """A third spec with the fields of `R_2` returns `R_2` rather than emitting `R_3`."""
+    tools = [{"name": n, "description": "x", "inputSchema": {}} for n in ("a", "b", "c")]
+    shapes = {
+        "a": {"return_model": "R", "fields": {"x": "str"}},
+        "b": {"return_model": "R", "fields": {"y": "str"}},
+        "c": {"return_model": "R", "fields": {"y": "str"}},
+    }
+    src = codegen.render_module("d", tools, shapes=shapes)
+    err = capsys.readouterr().err
+
+    assert "class R_3" not in src
+    assert src.count("class R_2(TypedDict, total=False):") == 1
+    assert "async def c(caller: McpCaller) -> R_2:" in src
+    assert err.count("collision") == 1
+    _assert_every_model_is_returned(src)
+
+
+def test_render_module_collision_leaves_callers_shapes_untouched():
+    tool = {
+        "name": "get",
+        "description": "x",
+        "inputSchema": {"type": "object", "properties": {"kind": {"type": "string"}}, "required": ["kind"]},
+    }
+    shapes = {
+        "first": {"return_model": "R", "fields": {"x": "str"}},
+        "get": {
+            "discriminator": "kind",
+            "variants": {"a": {"return_model": "R", "fields": {"y": "str"}}},
+        },
+        "x://r": {"kind": "resource", "return_model": "R", "fields": {"z": "str"}},
+    }
+    before = copy.deepcopy(shapes)
+    codegen.render_module(
+        "d",
+        [{"name": "first", "description": "x", "inputSchema": {}}, tool],
+        shapes=shapes,
+        resources=[{"uri": "x://r"}],
+    )
+    assert shapes == before
 
 
 # ---------------------------------------------------------------------------
