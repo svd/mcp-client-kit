@@ -2316,7 +2316,7 @@ def _dump_listing(item: Any) -> dict:
     return item.model_dump(mode="json", exclude_none=True, by_alias=True)
 
 
-async def list_resource_inventory(s: Any) -> tuple[list[dict], list[dict]]:
+async def list_resource_inventory(s: Any, *, statics: bool = True) -> tuple[list[dict], list[dict]]:
     """List every resource and resource template on the initialized session *s*.
 
     Returns ``(resources, templates)`` as plain JSON-safe dicts — the SDK models
@@ -2331,12 +2331,17 @@ async def list_resource_inventory(s: Any) -> tuple[list[dict], list[dict]]:
     requests and yields ``([], [])``. ``resources/templates/list`` answered with
     METHOD_NOT_FOUND yields no templates, since some servers implement only
     ``resources/list``; every other ``McpError`` propagates.
+
+    ``statics=False`` sends no ``resources/list`` and yields ``[]`` for
+    resources, for callers that want only the templates of a server that may
+    list thousands of static resources.
     """
     capabilities = s.get_server_capabilities()
     if capabilities is None or capabilities.resources is None:
         return [], []
+    raw_resources = await _list_all_pages(s.list_resources, "resources") if statics else []
     resources = []
-    for resource in await _list_all_pages(s.list_resources, "resources"):
+    for resource in raw_resources:
         entry = _dump_listing(resource)
         entry["uri"] = normalize_resource_uri(str(resource.uri))
         resources.append(entry)

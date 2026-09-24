@@ -16,10 +16,14 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote as _url_quote
+
+from mcp.shared.exceptions import McpError
 
 from . import _bridge, codegen, discovery
 from . import manifest as manifest_mod
@@ -36,7 +40,14 @@ async def _list_tools(
     cred_backend: str | None = None,
     creds_path: Path | None = None,
     env: dict[str, str] | None = None,
+    on_session: Callable[[Any], Awaitable[None]] | None = None,
 ) -> list[dict]:
+    """List the server's tools as plain dicts.
+
+    *on_session*, when given, is awaited with the initialized session after
+    ``tools/list``, before the session closes, so a caller can issue further
+    list requests over the same connection and OAuth handshake.
+    """
     async with _bridge.session(
         server,
         cmd=cmd,
@@ -49,6 +60,8 @@ async def _list_tools(
         env=env,
     ) as s:
         result = await s.list_tools()
+        if on_session is not None:
+            await on_session(s)
     tools = []
     for t in result.tools:
         raw_annotations = getattr(t, "annotations", None)
@@ -62,6 +75,59 @@ async def _list_tools(
             }
         )
     return tools
+
+
+INVENTORY_SCOPES = ("all", "templates", "none")
+
+
+@dataclass
+class Inventory:
+    """A server's tools plus, when collected, its resources and resource templates.
+
+    ``None`` means "not collected" (manifest: untracked, never compared); ``[]``
+    means collected and empty. ``resource_error`` is set only by a non-strict
+    ``_list_inventory`` whose resource listing failed.
+    """
+
+    tools: list[dict]
+    resources: list[dict] | None = None
+    templates: list[dict] | None = None
+    resource_error: McpError | ValueError | None = None
+
+
+async def _list_inventory(server: str, *, scope: str, strict: bool = True, **conn: Any) -> Inventory:
+    """List tools and, per *scope*, resources/templates over one session.
+
+    *scope* is ``all`` (resources and templates), ``templates`` (templates only:
+    no ``resources/list`` is sent and ``resources`` stays ``None``) or ``none``
+    (no resource requests).
+
+    Goes through the module-global ``_list_tools``, so a test that patches it
+    never runs the hook and gets ``resources=None, templates=None``.
+
+    A resource-listing ``McpError``/``ValueError`` (pydantic validation, a
+    pagination fault) is caught inside the session and re-raised after it closes,
+    so it surfaces as itself rather than inside the transport's ExceptionGroup.
+    With ``strict=False`` it is recorded on ``resource_error`` instead, and the
+    tools are still returned.
+    """
+    if scope not in INVENTORY_SCOPES:
+        raise ValueError(f"unknown resource scope {scope!r}; expected one of {', '.join(INVENTORY_SCOPES)}")
+    inv = Inventory(tools=[])
+
+    async def _collect(s: Any) -> None:
+        try:
+            resources, templates = await _bridge.list_resource_inventory(s, statics=scope == "all")
+        except (McpError, ValueError) as exc:
+            inv.resource_error = exc
+            return
+        inv.resources = resources if scope == "all" else None
+        inv.templates = templates
+
+    inv.tools = await _list_tools(server, on_session=None if scope == "none" else _collect, **conn)
+    if strict and inv.resource_error is not None:
+        raise inv.resource_error
+    return inv
 
 
 async def _probe(

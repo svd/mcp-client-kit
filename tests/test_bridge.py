@@ -5667,6 +5667,17 @@ def test_inventory_without_server_capabilities_sends_no_requests():
     assert s.requests == []
 
 
+def test_inventory_statics_false_sends_no_resources_list():
+    s = _ListingSession(
+        resource_pages={None: ([_res("demo://a")], None)},
+        template_pages={None: ([_tpl("demo://t/{x}")], None)},
+    )
+    resources, templates = asyncio.run(_bridge.list_resource_inventory(s, statics=False))
+    assert resources == []
+    assert [t["uriTemplate"] for t in templates] == ["demo://t/{x}"]
+    assert s.requests == [("resources/templates/list", None)]
+
+
 def test_inventory_returns_plain_dicts():
     s = _ListingSession(
         resource_pages={
