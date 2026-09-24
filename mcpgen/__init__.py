@@ -14,12 +14,13 @@ from mcpgen._bridge import (
     login,
     migrate_creds,
 )
-from mcpgen.seam import McpCaller
+from mcpgen.seam import McpCaller, McpResourceReader
 
 __all__ = [
     "DEFAULT_CREDS_PATH",
     "McpBridgeCaller",
     "McpCaller",
+    "McpResourceReader",
     "ReauthenticationRequired",
     "LoginWontHelp",
     "PostLoginCheckFailed",
