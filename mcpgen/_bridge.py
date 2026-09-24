@@ -61,7 +61,13 @@ from mcp.shared.auth import (
     OAuthClientMetadata,
     OAuthToken,
 )
-from mcp.types import BlobResourceContents, TextResourceContents
+from mcp.shared.exceptions import McpError
+from mcp.types import (
+    METHOD_NOT_FOUND,
+    BlobResourceContents,
+    PaginatedRequestParams,
+    TextResourceContents,
+)
 from pydantic import AnyUrl, TypeAdapter, UrlConstraints
 
 if sys.version_info < (3, 11):  # pragma: no cover - version-gated
@@ -2276,6 +2282,71 @@ def parse_resource(contents: Sequence[TextResourceContents | BlobResourceContent
     if len(contents) == 1:
         return _parse_resource_one(contents[0])
     return [_parse_resource_one(item) for item in contents]
+
+
+_MAX_LIST_PAGES = 1000
+"""Upper bound on pages fetched for one listing; a server that never stops paging fails loudly."""
+
+
+async def _list_all_pages(fetch: Callable[..., Awaitable[Any]], field: str) -> list:
+    """Collect *field* from every page of a paginated MCP list request.
+
+    The first request carries no params, as the SDK's own no-argument call does.
+    An absent or empty ``nextCursor`` ends the listing. A cursor the server has
+    already handed out, or more than ``_MAX_LIST_PAGES`` pages, raises
+    ``ValueError`` rather than looping forever.
+    """
+    items: list = []
+    seen: set[str] = set()
+    params: PaginatedRequestParams | None = None
+    for _ in range(_MAX_LIST_PAGES):
+        page = await fetch(params=params)
+        items.extend(getattr(page, field))
+        cursor = page.nextCursor
+        if not cursor:
+            return items
+        if cursor in seen:
+            raise ValueError(f"MCP server repeated pagination cursor {cursor!r} while listing {field}")
+        seen.add(cursor)
+        params = PaginatedRequestParams(cursor=cursor)
+    raise ValueError(f"MCP server returned more than {_MAX_LIST_PAGES} pages while listing {field}")
+
+
+def _dump_listing(item: Any) -> dict:
+    return item.model_dump(mode="json", exclude_none=True, by_alias=True)
+
+
+async def list_resource_inventory(s: Any) -> tuple[list[dict], list[dict]]:
+    """List every resource and resource template on the initialized session *s*.
+
+    Returns ``(resources, templates)`` as plain JSON-safe dicts — the SDK models
+    dumped by alias with ``None`` fields dropped — so each carries ``uri`` or
+    ``uriTemplate`` plus whatever of ``name``, ``title``, ``description``,
+    ``mimeType``, ``size``, ``icons``, ``annotations`` and ``_meta`` the server
+    sent, and any non-standard fields too (the SDK models allow extras). A
+    resource's ``uri`` is in ``normalize_resource_uri`` form; a template's
+    ``uriTemplate`` is the server's string unchanged.
+
+    A server that does not advertise the ``resources`` capability gets no
+    requests and yields ``([], [])``. ``resources/templates/list`` answered with
+    METHOD_NOT_FOUND yields no templates, since some servers implement only
+    ``resources/list``; every other ``McpError`` propagates.
+    """
+    capabilities = s.get_server_capabilities()
+    if capabilities is None or capabilities.resources is None:
+        return [], []
+    resources = []
+    for resource in await _list_all_pages(s.list_resources, "resources"):
+        entry = _dump_listing(resource)
+        entry["uri"] = normalize_resource_uri(str(resource.uri))
+        resources.append(entry)
+    try:
+        raw_templates = await _list_all_pages(s.list_resource_templates, "resourceTemplates")
+    except McpError as exc:
+        if exc.error.code != METHOD_NOT_FOUND:
+            raise
+        raw_templates = []
+    return resources, [_dump_listing(t) for t in raw_templates]
 
 
 # ---------------------------------------------------------------------------

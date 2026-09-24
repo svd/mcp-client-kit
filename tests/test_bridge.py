@@ -39,6 +39,7 @@ import pytest
 from mcp import types as mcp_types
 from mcp.client.auth import OAuthRegistrationError
 from mcp.shared.auth import OAuthClientMetadata, OAuthToken
+from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
 from mcpgen import _bridge
@@ -5583,6 +5584,196 @@ def test_bridge_caller_satisfies_both_seam_protocols():
     caller = _bridge.McpBridgeCaller(cmd="python srv.py")
     assert isinstance(caller, McpCaller)
     assert isinstance(caller, McpResourceReader)
+
+
+# ---------------------------------------------------------------------------
+# Resources: list_resource_inventory
+# ---------------------------------------------------------------------------
+
+
+class _ListingSession:
+    """Fake ClientSession serving paginated resources/list and resources/templates/list.
+
+    *resource_pages* / *template_pages* map the request cursor (None for the first
+    page) to ``(items, next_cursor)``. A *templates_error* is raised by every
+    templates request instead of answering it.
+    """
+
+    def __init__(
+        self,
+        *,
+        resources_capability: bool = True,
+        resource_pages: dict | None = None,
+        template_pages: dict | None = None,
+        resources_error: Exception | None = None,
+        templates_error: Exception | None = None,
+    ) -> None:
+        self._caps = mcp_types.ServerCapabilities(
+            resources=mcp_types.ResourcesCapability() if resources_capability else None
+        )
+        self._resource_pages = resource_pages or {None: ([], None)}
+        self._template_pages = template_pages or {None: ([], None)}
+        self._resources_error = resources_error
+        self._templates_error = templates_error
+        self.requests: list[tuple[str, str | None]] = []
+
+    def get_server_capabilities(self):
+        return self._caps
+
+    @staticmethod
+    def _cursor(params) -> str | None:
+        assert params is None or isinstance(params, mcp_types.PaginatedRequestParams)
+        return None if params is None else params.cursor
+
+    async def list_resources(self, *, params=None):
+        cursor = self._cursor(params)
+        self.requests.append(("resources/list", cursor))
+        if self._resources_error is not None:
+            raise self._resources_error
+        items, next_cursor = self._resource_pages[cursor]
+        return mcp_types.ListResourcesResult(resources=items, nextCursor=next_cursor)
+
+    async def list_resource_templates(self, *, params=None):
+        cursor = self._cursor(params)
+        self.requests.append(("resources/templates/list", cursor))
+        if self._templates_error is not None:
+            raise self._templates_error
+        items, next_cursor = self._template_pages[cursor]
+        return mcp_types.ListResourceTemplatesResult(resourceTemplates=items, nextCursor=next_cursor)
+
+
+def _res(uri: str, name: str = "r", **kw) -> mcp_types.Resource:
+    return mcp_types.Resource(uri=uri, name=name, **kw)
+
+
+def _tpl(uri_template: str, name: str = "t", **kw) -> mcp_types.ResourceTemplate:
+    return mcp_types.ResourceTemplate(uriTemplate=uri_template, name=name, **kw)
+
+
+def _mcp_error(code: int, message: str = "boom") -> McpError:
+    return McpError(mcp_types.ErrorData(code=code, message=message))
+
+
+def test_inventory_without_resources_capability_sends_no_requests():
+    s = _ListingSession(resources_capability=False, resource_pages={None: ([_res("demo://x")], None)})
+    assert asyncio.run(_bridge.list_resource_inventory(s)) == ([], [])
+    assert s.requests == []
+
+
+def test_inventory_without_server_capabilities_sends_no_requests():
+    s = _ListingSession()
+    s.get_server_capabilities = lambda: None
+    assert asyncio.run(_bridge.list_resource_inventory(s)) == ([], [])
+    assert s.requests == []
+
+
+def test_inventory_returns_plain_dicts():
+    s = _ListingSession(
+        resource_pages={
+            None: (
+                [_res("risk://dictionary", "risk_dictionary", mimeType="application/json", _meta={"k": 1})],
+                None,
+            )
+        },
+        template_pages={None: ([_tpl("dimension://by-unit-type/{unitType}", "dims", description="By type")], None)},
+    )
+    resources, templates = asyncio.run(_bridge.list_resource_inventory(s))
+    assert resources == [
+        {"uri": "risk://dictionary", "name": "risk_dictionary", "mimeType": "application/json", "_meta": {"k": 1}}
+    ]
+    assert templates == [
+        {"uriTemplate": "dimension://by-unit-type/{unitType}", "name": "dims", "description": "By type"}
+    ]
+    json.dumps([resources, templates])  # JSON-safe as returned
+
+
+def test_inventory_follows_cursors():
+    s = _ListingSession(
+        resource_pages={
+            None: ([_res("demo://a")], "c1"),
+            "c1": ([_res("demo://b")], "c2"),
+            "c2": ([_res("demo://c")], None),
+        },
+        template_pages={
+            None: ([_tpl("demo://t/{x}")], "t1"),
+            "t1": ([_tpl("demo://u/{y}")], None),
+        },
+    )
+    resources, templates = asyncio.run(_bridge.list_resource_inventory(s))
+    assert [r["uri"] for r in resources] == ["demo://a", "demo://b", "demo://c"]
+    assert [t["uriTemplate"] for t in templates] == ["demo://t/{x}", "demo://u/{y}"]
+    assert s.requests == [
+        ("resources/list", None),
+        ("resources/list", "c1"),
+        ("resources/list", "c2"),
+        ("resources/templates/list", None),
+        ("resources/templates/list", "t1"),
+    ]
+
+
+def test_inventory_raises_on_a_repeated_cursor():
+    s = _ListingSession(
+        resource_pages={
+            None: ([_res("demo://a")], "c1"),
+            "c1": ([_res("demo://b")], "c2"),
+            "c2": ([_res("demo://c")], "c1"),
+        }
+    )
+    with pytest.raises(ValueError, match="repeated.*c1"):
+        asyncio.run(_bridge.list_resource_inventory(s))
+
+
+def test_inventory_stops_at_the_page_cap(monkeypatch):
+    monkeypatch.setattr(_bridge, "_MAX_LIST_PAGES", 3)
+    pages = {None: ([_res("demo://p0")], "c1")} | {f"c{i}": ([_res(f"demo://p{i}")], f"c{i + 1}") for i in range(1, 10)}
+    s = _ListingSession(resource_pages=pages)
+    with pytest.raises(ValueError, match="3 pages"):
+        asyncio.run(_bridge.list_resource_inventory(s))
+    assert len(s.requests) == 3
+
+
+def test_inventory_treats_templates_method_not_found_as_empty():
+    s = _ListingSession(
+        resource_pages={None: ([_res("demo://a")], None)},
+        templates_error=_mcp_error(mcp_types.METHOD_NOT_FOUND, "Method not found"),
+    )
+    resources, templates = asyncio.run(_bridge.list_resource_inventory(s))
+    assert [r["uri"] for r in resources] == ["demo://a"]
+    assert templates == []
+
+
+def test_inventory_propagates_other_templates_errors():
+    s = _ListingSession(templates_error=_mcp_error(mcp_types.INTERNAL_ERROR))
+    with pytest.raises(McpError) as exc_info:
+        asyncio.run(_bridge.list_resource_inventory(s))
+    assert exc_info.value.error.code == mcp_types.INTERNAL_ERROR
+
+
+def test_inventory_propagates_resources_method_not_found():
+    """Only the templates list is optional; a server advertising resources must list them."""
+    s = _ListingSession(resources_error=_mcp_error(mcp_types.METHOD_NOT_FOUND))
+    with pytest.raises(McpError):
+        asyncio.run(_bridge.list_resource_inventory(s))
+
+
+def test_inventory_normalizes_resource_uris():
+    """The function normalizes itself rather than trusting the listing's models to have done it."""
+    raw = "Dimension://by-unit-type/Delivery Unit"
+
+    class _RawResource:
+        uri = raw
+
+        def model_dump(self, **kwargs):
+            return {"uri": raw, "name": "dims"}
+
+    s = _ListingSession()
+
+    async def list_resources(*, params=None):
+        return SimpleNamespace(resources=[_RawResource()], nextCursor=None)
+
+    s.list_resources = list_resources
+    resources, _ = asyncio.run(_bridge.list_resource_inventory(s))
+    assert resources == [{"uri": "dimension://by-unit-type/Delivery%20Unit", "name": "dims"}]
 
 
 # ---------------------------------------------------------------------------
