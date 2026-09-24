@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
@@ -582,8 +583,22 @@ def test_render_text_untracked_advisory():
     stored = manifest.build("demo", TOOLS)
     text = manifest.render_text(manifest.diff(stored, _rm(templates=[])))
     assert "ADVISORY  demo: live resources are not tracked by the stored manifest" in text
-    assert "mcpgen check demo --update" in text
+    assert "re-run with `--update` to track them, or pass `--resources none` to skip them" in text
     assert text.endswith("No drift. (1 advisory)")
+
+
+def test_resources_error_is_an_advisory():
+    stored = manifest.build("demo", TOOLS)
+    report = dataclasses.replace(
+        manifest.diff(stored, _rm(None, None)), resources_error="could not list resources: McpError: boom"
+    )
+    assert not report.has_drift
+    text = manifest.render_text(report)
+    assert "ADVISORY  demo: could not list resources: McpError: boom; the stored manifest tracks no resources" in text
+    assert text.endswith("No drift. (1 advisory)")
+    block = manifest.to_json(report)["resources"]
+    assert block["error"] == "could not list resources: McpError: boom"
+    assert block["compared"] is False
 
 
 def test_render_text_unchanged_without_resources():

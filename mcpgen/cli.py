@@ -19,7 +19,7 @@ import os
 import shutil
 import sys
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1431,8 +1431,29 @@ CHECK_DRIFT = 1
 CHECK_ERROR = 2
 
 
+def _tracked_sections(stored: Any) -> set[str]:
+    """The resource sections (`resources`, `resource_templates`) the stored manifest tracks."""
+    if not isinstance(stored, dict):
+        return set()
+    return {section for section, _kind in manifest_mod._RESOURCE_SECTIONS if section in stored}
+
+
+def _check_scope(tracked: set[str]) -> str:
+    """The resource scope `check` lists with when --resources is not given.
+
+    Follows the *tracked* sections, as `codegen --resources` chose them: only
+    `resource_templates` means `templates`, so a server that lists its data as
+    resources is not paged through. Anything else is `all`. A manifest that
+    tracks neither section may predate resource tracking or come from
+    `codegen --resources none`; it cannot tell which, so its live resources
+    show up as untracked advisories, `--update` starts tracking them and
+    `--resources none` skips them.
+    """
+    return "templates" if tracked == {"resource_templates"} else "all"
+
+
 def _cmd_check(ns: argparse.Namespace) -> int:
-    """Compare a server's live tool inventory against a stored manifest."""
+    """Compare a server's live tool and resource inventory against a stored manifest."""
     manifest_path = Path(ns.manifest) if ns.manifest else Path(f"{ns.server}.mcpgen.json")
 
     def _fail(message: str) -> int:
@@ -1465,25 +1486,62 @@ def _cmd_check(ns: argparse.Namespace) -> int:
         creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
-    # No probing: tools/list only. `check` never calls a tool and never touches
-    # the shape-spec sidecar.
+    explicit_scope = getattr(ns, "resource_scope", None)
+    tracked = _tracked_sections(stored)
+    scope = explicit_scope or _check_scope(tracked)
+    # A manifest that tracks no resources compares none, so without --update or
+    # an explicit --resources the listing only feeds the untracked advisory: a
+    # non-strict first-page preview is enough, and its failure is an advisory
+    # rather than an error. Everything else lists strictly.
+    preview = not tracked and explicit_scope is None and not getattr(ns, "update", False)
+    # No probing: tools/list and the resource lists only. `check` never calls a
+    # tool, never reads a resource and never touches the shape-spec sidecar.
     try:
-        tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
+        inv = asyncio.run(_list_inventory(ns.server, scope=scope, strict=not preview, cmd=cmd, **conn))
+    except ResourceListingFailed as exc:
+        return _fail(str(exc))
     except Exception as exc:  # transport, auth, config — all operational
-        return _fail(f"{type(exc).__name__}: {exc}")
+        return _fail(_bridge._describe(exc))
 
     try:
-        live = manifest_mod.build(ns.server, tools)
+        live = manifest_mod.build(ns.server, inv.tools, inv.resources, inv.templates)
         report = manifest_mod.diff(stored, live)
     except ValueError as exc:
         return _fail(str(exc))
+    if preview:
+        # A truncated first page can be empty; the list still has entries.
+        truncated = {"resource": inv.resources_truncated, "resource_template": inv.templates_truncated}
+        untracked = [
+            kind
+            for _section, kind in manifest_mod._RESOURCE_SECTIONS
+            if kind in report.resources_untracked or truncated[kind]
+        ]
+        error = inv.resource_error
+        report = replace(
+            report,
+            resources_untracked=untracked,
+            resources_error=None if error is None else f"could not list resources: {_bridge._describe(error)}",
+        )
 
     updated = False
     if getattr(ns, "update", False):
         # The only write path outside `codegen`, and it requires the explicit
-        # flag. Nothing above this line ever touches the manifest file.
-        _atomic_write_text(manifest_path, manifest_mod.dumps(live))
+        # flag. Nothing above this line ever touches the manifest file. A
+        # resource section the live inventory did not collect was not compared,
+        # so the stored one is carried over rather than dropped.
+        accepted_manifest = dict(live)
+        newly_tracked: list[str] = []
+        for section, kind in manifest_mod._RESOURCE_SECTIONS:
+            if section not in live and section in stored:
+                accepted_manifest[section] = stored[section]
+            elif section in live and section not in stored:
+                newly_tracked.append(manifest_mod._UNTRACKED_LABEL[kind])
+        _atomic_write_text(manifest_path, manifest_mod.dumps(accepted_manifest))
         updated = True
+        # A section written above is tracked from now on; the report says so via
+        # "now tracking" instead of advising the update that just happened.
+        written = {kind for section, kind in manifest_mod._RESOURCE_SECTIONS if section in accepted_manifest}
+        report = replace(report, resources_untracked=[k for k in report.resources_untracked if k not in written])
 
     if getattr(ns, "json", False):
         payload = manifest_mod.to_json(report)
@@ -1493,9 +1551,17 @@ def _cmd_check(ns: argparse.Namespace) -> int:
     else:
         sys.stdout.write(manifest_mod.render_text(report) + "\n")
         if updated:
-            accepted = len(report.added) + len(report.removed) + len(report.changed)
+            accepted = (
+                len(report.added)
+                + len(report.removed)
+                + len(report.changed)
+                + len(report.resources_added)
+                + len(report.resources_removed)
+                + len(report.resources_changed)
+            )
             verb = "created" if bootstrapping else "updated"
-            sys.stdout.write(f"[check] {verb} {manifest_path} (accepted {accepted} change(s))\n")
+            tracking = f"; now tracking {' and '.join(newly_tracked)}" if newly_tracked else ""
+            sys.stdout.write(f"[check] {verb} {manifest_path} (accepted {accepted} change(s){tracking})\n")
 
     if updated:
         return CHECK_OK
@@ -1864,7 +1930,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ck = sub.add_parser(
         "check",
-        help="compare a server's live tool inventory against a stored manifest",
+        help="compare a server's live tool and resource inventory against a stored manifest",
         description="Exit codes: 0 = no drift, 1 = drift, 2 = operational/config/auth error.",
     )
     ck.add_argument("server", help="server name (e.g. acme) or URL")
@@ -1879,6 +1945,15 @@ def main(argv: list[str] | None = None) -> int:
         "--update",
         action="store_true",
         help="accept the live inventory and rewrite the manifest (never happens without this flag)",
+    )
+    ck.add_argument(
+        "--resources",
+        dest="resource_scope",
+        choices=INVENTORY_SCOPES,
+        default=None,
+        help="resources to list and compare: all, templates or none (default: what the stored manifest "
+        "tracks, as `codegen --resources` wrote it: templates when it tracks only resource templates, "
+        "else all). A section not listed is kept as stored by --update",
     )
     _add_conn_args(ck)
     ck.set_defaults(func=_cmd_check)

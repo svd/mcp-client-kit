@@ -177,6 +177,9 @@ class DriftReport:
     resources_untracked: list[str] = field(default_factory=list)
     # True when at least one resource section was present on both sides.
     resources_compared: bool = False
+    # Set by the caller when listing resources failed while the stored manifest
+    # tracks none, so nothing was compared. Advisory only.
+    resources_error: str | None = None
 
     @property
     def has_drift(self) -> bool:
@@ -196,7 +199,12 @@ class DriftReport:
 
     @property
     def advisory_count(self) -> int:
-        return len(self.advisory) + len(self.resources_advisory) + len(self.resources_untracked)
+        return (
+            len(self.advisory)
+            + len(self.resources_advisory)
+            + len(self.resources_untracked)
+            + (1 if self.resources_error else 0)
+        )
 
 
 def _validate(m: dict, label: str) -> None:
@@ -384,7 +392,12 @@ def render_text(report: DriftReport) -> str:
     for kind in report.resources_untracked:
         lines.append(
             f"ADVISORY  {report.server}: live {_UNTRACKED_LABEL[kind]} are not tracked by the stored manifest; "
-            f"run `mcpgen check {report.server} --update` to track them"
+            "re-run with `--update` to track them, or pass `--resources none` to skip them"
+        )
+    if report.resources_error:
+        lines.append(
+            f"ADVISORY  {report.server}: {report.resources_error}; "
+            "the stored manifest tracks no resources, so none were compared"
         )
 
     advisories = report.advisory_count
@@ -428,7 +441,8 @@ def to_json(report: DriftReport) -> dict:
     """Structured drift report for CI consumers.
 
     The ``"resources"`` block appears only when a resource section was compared
-    or is untracked, so tool-only reports keep their original shape.
+    or is untracked, or listing resources failed, so tool-only reports keep
+    their original shape. Its ``"error"`` key is present only for a failure.
     """
     payload: dict[str, Any] = {
         "server": report.server,
@@ -438,7 +452,7 @@ def to_json(report: DriftReport) -> dict:
         "changed": [_change_to_json(c) for c in report.changed],
         "advisory": [_change_to_json(c) for c in report.advisory],
     }
-    if report.resources_compared or report.resources_untracked:
+    if report.resources_compared or report.resources_untracked or report.resources_error:
         payload["resources"] = {
             "compared": report.resources_compared,
             "untracked": list(report.resources_untracked),
@@ -447,4 +461,6 @@ def to_json(report: DriftReport) -> dict:
             "changed": [_resource_change_to_json(c) for c in report.resources_changed],
             "advisory": [_resource_change_to_json(c) for c in report.resources_advisory],
         }
+        if report.resources_error:
+            payload["resources"]["error"] = report.resources_error
     return payload
