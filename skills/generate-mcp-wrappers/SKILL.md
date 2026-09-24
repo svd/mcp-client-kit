@@ -61,26 +61,34 @@ barrier stays on main.
 
 ## Procedure
 
-0. **Resolve the CLI.** Requires `mcpgen >= 0.11.0` — one floor for the whole procedure and
-   for the plugin, step 7's runner included, so no later step gates on a different number.
-   Do not proceed on an older one: 0.10.0 has no `list --resources` or `probe --resource`,
-   and its `codegen` emits no resource accessors.
+0. **Resolve the CLI.** Requires `mcpgen >= 0.11.0.dev1`. Do not proceed on an older one.
 
    The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
    Probe the three forms and keep the first that both answers **and** meets the floor — an
    outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
 
    ```bash
-   min=0.11.0; MCPGEN=
+   min=0.11.0.dev1; MCPGEN=
+   vkey() {  # PEP 440 version -> dotted key that sort -V orders correctly
+     local r s
+     r=${1%%[!0-9.]*}; r=${r%.}; s=${1#"$r"}; s=${s#.}
+     case $s in
+       '')   s=4.0 ;;
+       dev*) s=0.${s#dev} ;;
+       a*)   s=1.${s#a} ;;
+       b*)   s=2.${s#b} ;;
+       rc*)  s=3.${s#rc} ;;
+       post*) s=5.${s#post} ;;
+       *)    return 1 ;;
+     esac
+     printf '%s.%s\n' "$r" "$s" | grep -E '^[0-9]+(\.[0-9]+)+$'
+   }
+   mkey=$(vkey "$min")
    for c in "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
      out=$(eval "$c --version" 2>/dev/null) || continue
      ver=$(printf '%s\n' "$out" | awk '{print $2}')
-     base=${ver%%[!0-9.]*}; base=${base%.}
-     printf '%s' "$base" | grep -Eq '^[0-9]+(\.[0-9]+)+$' || continue
-     if [ "$base" = "$min" ] && [ "$base" != "$ver" ]; then
-       echo "skipping $c ($ver is a pre-release of $min)"; continue
-     fi
-     [ "$(printf '%s\n%s\n' "$min" "$base" | sort -V | head -n 1)" = "$min" ] || \
+     key=$(vkey "$ver") || { echo "skipping $c (unparsable version '$ver')"; continue; }
+     [ "$(printf '%s\n%s\n' "$mkey" "$key" | sort -V | head -n 1)" = "$mkey" ] || \
        { echo "skipping $c ($ver < $min)"; continue; }
      MCPGEN="$c"; break
    done
@@ -88,17 +96,11 @@ barrier stays on main.
    echo "resolved: $MCPGEN ($ver)"
    ```
 
-   The comparison runs on `$base`, the release part alone: `${ver%%[!0-9.]*}` trims from the
-   first character that is neither digit nor dot and `${base%.}` drops the dot a `.devN`
-   suffix leaves behind, so `0.11.0rc1` and `0.11.0.dev1` both reduce to `0.11.0`. That split
-   is what lets the guard accept a newer pre-release (`0.12.0.dev1` clears a `0.11.0` floor)
-   while rejecting a pre-release *of the floor itself*, which `sort -V` alone orders above
-   `0.11.0` even though it may predate the feature the floor exists for. The `$`-anchored
-   `grep` is what makes the trim load-bearing: without it a version that is not a dotted
-   number at all would slip through as its own prefix.
-
-   Until 0.11.0 ships, the floor rejects a `0.11.0.dev` engine, so a local run from a dev
-   clone fails step 0.
+   `sort -V` alone misorders PEP 440: it puts `0.11.0.dev1` above `0.11.0`. `vkey` fixes that
+   by splitting the release part from the suffix and appending a rank for the suffix, so
+   `.devN` < `aN` < `bN` < `rcN` < final < `.postN`: `0.11.0.dev1` becomes `0.11.0.0.1` and
+   `0.11.0` becomes `0.11.0.4.0`. The `$`-anchored `grep` rejects anything the ranks do not
+   cover, such as a combined `rc1.dev2`, rather than letting it through as its own prefix.
 
 1. **Mechanical stubs.**
 
@@ -725,9 +727,8 @@ barrier stays on main.
    Generation adds one new file, so it is the default in every non-interactive run — a subagent
    that cannot reach `AskUserQuestion` generates the runner rather than skipping the step.
 
-   Step 0's floor already covers runner generation, so there is no engine check to repeat
-   here. When the output folder already holds a `run.py`, leave it alone and report that it
-   exists; a hand-edited runner is not regenerated over.
+   When the output folder already holds a `run.py`, leave it alone and report that it exists;
+   a hand-edited runner is not regenerated over.
 
    > **Interactive exception:** where 2d's condition holds, offer the choice first
    > (single-select, 2 options: **Yes** — invoke `mcp-client-kit:generate-mcp-runner` now;

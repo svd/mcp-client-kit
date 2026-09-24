@@ -37,6 +37,26 @@ uv version --bump stable --dry-run   # preview: 0.2.0.dev1 => 0.2.0
 uv version --bump stable             # writes pyproject.toml + uv.lock
 ```
 
+**2a. Settle the skill floor**
+
+On `dev` the plugin floor may name a pre-release (`min=0.2.0.dev1`), so a dev checkout passes
+step 0 of both skills while the feature it gates is unreleased. That floor must not reach
+`main`: rewrite every hit to the stable version this release publishes (`0.2.0`), in the
+prose (`mcpgen >= …`) and the resolver (`min=…`) of both skills.
+
+```bash
+grep -nE '(min=|mcpgen >= `?)[0-9]+(\.[0-9]+)+\.dev' skills/*/SKILL.md   # rewrite each hit
+# after the rewrite — must print nothing:
+grep -nE '(min=|mcpgen >= `?)[0-9]+(\.[0-9]+)+\.dev' skills/*/SKILL.md
+```
+
+A floor that already names a stable version stays as is. A stable floor *above* the version
+being released means a skill depends on something this release does not ship — stop.
+
+Settling the floor edits skill files, so the plugin needs its own release too (see
+"Both changed" above): bump `.claude-plugin/plugin.json` and `marketplace.json` in the same
+commit, and tag `plugin-vX.Y.Z` after `vX.Y.Z`.
+
 **3. Finalize CHANGELOG**
 Change the unreleased header to a dated release header, e.g.:
 ```
@@ -50,7 +70,7 @@ Add a new blank `## [Unreleased] — 0.3.0` placeholder at the top (you'll fill 
 
 **4. Commit + PR → main**
 ```bash
-git add pyproject.toml uv.lock CHANGELOG.md
+git add pyproject.toml uv.lock CHANGELOG.md skills/ .claude-plugin/
 git commit -m "release: engine v0.2.0"
 git push origin dev
 gh pr create --base main --title "release: engine v0.2.0"
@@ -89,14 +109,17 @@ Files to update:
 - `.claude-plugin/marketplace.json` → `"plugins"[0]["version"]` field only  
   *(leave top-level `"version"` — that's the catalog version, bumped only when the catalog listing itself changes, not per plugin release)*
 
-Optionally raise the version floor — but only if a skill now requires a CLI feature from a newer engine. **One floor covers the plugin**, stated in both `skills/generate-mcp-wrappers/SKILL.md` (step 0) and `skills/generate-mcp-runner/SKILL.md` (step 0), and each skill says so in its own words. Raise them together: a run that chains the two must not meet two different numbers, and the runner's step 0 asserts the floor is the same one the wrappers state. The runner is usually what forces a bump, because its templates `import` from `mcpgen` directly.
+Optionally raise the version floor — but only if a skill now requires a CLI feature from a newer engine. While the engine feature is unreleased, the floor on `dev` names the `.devN` it landed in (`min=0.3.0.dev1`); engine release step 2a rewrites it to stable. **One floor covers the plugin**, stated in both `skills/generate-mcp-wrappers/SKILL.md` (step 0) and `skills/generate-mcp-runner/SKILL.md` (step 0). Raise them together: a run that chains the two must not meet two different numbers. The runner is usually what forces a bump, because its templates `import` from `mcpgen` directly.
 
 Coupled spots *per skill* — `grep -n 'X\.Y\.Z' skills/*/SKILL.md` and fix every hit, not the first two:
 - Line with `mcpgen >= X.Y.Z` in the prose
 - `min=X.Y.Z` in the bash resolver below it
-- The resolver's `$base` rationale, which works the guard through named examples
-  (`X.Y.Zrc1` and `X.Y.Z.dev1` reduce to `X.Y.Z`; `sort -V` orders `X.Y.Z.dev1` above it).
-  Miss these and the guard contradicts the worked example that explains it.
+- The resolver's `vkey` rationale, which works the ordering through named examples
+  (`X.Y.Z.dev1` becomes `X.Y.Z.0.1`, `X.Y.Z` becomes `X.Y.Z.4.0`). Miss these and the guard
+  contradicts the worked example that explains it.
+
+**A plugin tag whose floor names a `.devN` must not be cut** — no one outside a dev checkout
+can satisfy it. The step 2a grep must print nothing before the plugin PR merges.
 
 **A plugin tag whose floor exceeds the latest published engine must not be cut.** The floor
 promises a version users can install; publish the engine tag (`vX.Y.Z`) first, then the
@@ -154,5 +177,6 @@ In the `svd/agent-skills` marketplace repo, bump the `mcp-client-kit` entry's `r
 | Split step 6 into `--bump minor` then `--bump dev` | Second call fails: `--bump dev` alone computes `0.3.0.dev1`, which sorts *below* `0.3.0`, so uv rejects it as a decrease. Both bumps must be in one call. `--bump` never produces `.dev0` — uv's dev segment starts at 1 |
 | Bump `pyproject.toml` for plugin-only | Triggers unnecessary PyPI republish |
 | Bump `marketplace.json` top-level `version` for every plugin release | Top-level is catalog metadata, not plugin version — leave it unless the catalog listing changed |
+| Leave a `.devN` floor in `skills/*/SKILL.md` on `main` | The released skill admits dev builds of that version cut before the feature landed, and before the engine ships no installable version meets it. Engine step 2a catches it |
 | Raise SKILL.md floor preemptively | Floor should only move when the skill actually needs the new engine feature |
 | PR `dev` → `main` for a plugin release while `dev` carries a `.devN` bump | `main` ends up claiming an unreleased engine version, and the plugin tag points at it. Step 2 is the check that catches it |

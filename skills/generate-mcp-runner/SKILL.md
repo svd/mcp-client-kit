@@ -89,31 +89,36 @@ invocation). The invocation comes first because the check below runs on it.
 once in your report, then substitute that literal string wherever a block below writes
 `<mcpgen>`.
 
-Requires `mcpgen >= 0.11.0` (install: see README) — one floor across the plugin, the same
-number `generate-mcp-wrappers` step 0 states, so a chained run and a standalone one gate
-identically. The floor guarantees the symbols `runner_templates/` import: `http_oauth.py`
-needs `LoginWontHelp`, and an engine without it produces a `run.py` that dies with
-`ImportError` on the first line that matters. It also guarantees
-`McpBridgeCaller.read_resource`, which every generated resource accessor calls; below 0.11.0
-the first accessor call raises `AttributeError`.
+Requires `mcpgen >= 0.11.0.dev1` (install: see README). Do not proceed on an older one.
 
 The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
 Try each candidate in turn and keep the first that both answers **and** meets the floor —
 an outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
 
 ```bash
-min=0.11.0; MCPGEN=
+min=0.11.0.dev1; MCPGEN=
+vkey() {  # PEP 440 version -> dotted key that sort -V orders correctly
+  local r s
+  r=${1%%[!0-9.]*}; r=${r%.}; s=${1#"$r"}; s=${s#.}
+  case $s in
+    '')   s=4.0 ;;
+    dev*) s=0.${s#dev} ;;
+    a*)   s=1.${s#a} ;;
+    b*)   s=2.${s#b} ;;
+    rc*)  s=3.${s#rc} ;;
+    post*) s=5.${s#post} ;;
+    *)    return 1 ;;
+  esac
+  printf '%s.%s\n' "$r" "$s" | grep -E '^[0-9]+(\.[0-9]+)+$'
+}
+mkey=$(vkey "$min")
 # First candidate is the caller's invocation — drop it when none was handed over.
 for c in "<handed-over>" "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
   [ -n "$c" ] || continue
   out=$(eval "$c --version" 2>/dev/null) || continue
   ver=$(printf '%s\n' "$out" | awk '{print $2}')
-  base=${ver%%[!0-9.]*}; base=${base%.}
-  printf '%s' "$base" | grep -Eq '^[0-9]+(\.[0-9]+)+$' || continue
-  if [ "$base" = "$min" ] && [ "$base" != "$ver" ]; then
-    echo "skipping $c ($ver is a pre-release of $min)"; continue
-  fi
-  [ "$(printf '%s\n%s\n' "$min" "$base" | sort -V | head -n 1)" = "$min" ] || \
+  key=$(vkey "$ver") || { echo "skipping $c (unparsable version '$ver')"; continue; }
+  [ "$(printf '%s\n%s\n' "$mkey" "$key" | sort -V | head -n 1)" = "$mkey" ] || \
     { echo "skipping $c ($ver < $min)"; continue; }
   MCPGEN="$c"; break
 done
@@ -127,17 +132,14 @@ Three things the loop depends on:
   `--version` call settles the common case, since a caller that resolved an invocation
   almost always resolved a good one. Checking it anyway is what covers the callers that
   gated nothing — a user who names an invocation by hand, or a skill with no floor of its
-  own — for whom an unchecked string reintroduces the `ImportError` this floor exists to
-  prevent. A candidate that fails the floor falls through to the probe rather than aborting.
+  own — for whom an unchecked string would skip the floor. A candidate that fails the floor
+  falls through to the probe rather than aborting.
 - **`eval` for two-word invocations.** A bare `$c` does not word-split in `zsh`, so the
   `uv run mcpgen` form never matches without it.
-- **The comparison runs on `$base`, the release part alone.** `${ver%%[!0-9.]*}` trims from
-  the first character that is neither digit nor dot and `${base%.}` drops the dot a `.devN`
-  suffix leaves behind, so `0.11.0rc1` and `0.11.0.dev1` both reduce to `0.11.0`. That split
-  lets a newer pre-release through (`0.12.0.dev1` clears the floor) while rejecting a
-  pre-release *of the floor itself* — `sort -V` alone orders `0.11.0.dev1` above `0.11.0`,
-  and a clone parked there can predate the commit that made `0.11.0` worth gating on. The
-  `$`-anchored `grep` is what makes the trim load-bearing.
+- **`vkey` orders versions the PEP 440 way.** `sort -V` alone puts `0.11.0.dev1` above
+  `0.11.0`. `vkey` splits the release part from the suffix and appends a rank, so `.devN` <
+  `aN` < `bN` < `rcN` < final < `.postN`. The `$`-anchored `grep` rejects any suffix the ranks
+  do not cover rather than letting it through as its own prefix.
 
 ### 1. Locate artifacts
 
