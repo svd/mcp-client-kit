@@ -61,8 +61,9 @@ A container field carries an element/value type only where the evidence covers e
 Dict evidence is complete: the skeleton carries every key of that object, so one probe settles
 it. **List evidence is not** — `summarize_shape` records the first element and an `...xN`
 sentinel, so `list[str]` needs the raw payload
-(`mcpgen probe --save-raw <server>.<tool>.probe-raw.json`, git-ignored) or a second probe
-confirming the rest. Without that, `list`.
+(`mcpgen probe --save-raw <server>.<tool>.probe-raw.json`, git-ignored) with every element
+checked. More probes do not help: each one samples its own first element again, so
+`['a', 7]` and `['b', {}]` both summarize as `['str', '...x2']`. Without the raw check, `list`.
 
 `dict[str, Any]` and `list[Any]` state exactly what `dict` and `list` state — never write them.
 Neither is `dict[str, str | None]` on offer: the caller narrows a `.get()` either way.

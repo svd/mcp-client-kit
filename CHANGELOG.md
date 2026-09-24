@@ -101,6 +101,16 @@
   now instruct `list --resources` and `probe --resource`, which 0.10.0 does not have, and
   generated runners call `McpBridgeCaller.read_resource`.
 
+### Fixed
+
+- **A second probe no longer counts as evidence for `list[T]`.** Plugin 0.5.0's
+  `generate-mcp-wrappers` skill let a `fields` entry claim `list[str]` on the strength of the
+  saved raw payload *or* a second probe. `summarize_shape` samples only the first element of
+  every probe, so `['a', 7]` and `['b', {}]` both summarize as `['str', '...x2']` and two
+  probes can agree on an element type neither list has. The skill and `shape-spec.md` now
+  require the `--save-raw` payload, checked element by element; without it the field stays a
+  bare `list`.
+
 ## [0.10.0] — 2026-09-09
 
 ### Added

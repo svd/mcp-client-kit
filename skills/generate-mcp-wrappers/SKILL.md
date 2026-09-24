@@ -806,9 +806,10 @@ barrier stays on main.
 
 - **Don't model depth from one probe.** A container is promoted no further than its own
   annotation: `list[str]` / `dict[str, str]` where every element or value the probe evidenced
-  is that same scalar, bare `list` / `dict` otherwise — a list needs `--save-raw` or a second
-  probe, since the skeleton samples one element. `dict[str, Any]` claims nothing `dict` does
-  not. There is no nested `TypedDict`; see `references/shape-spec.md`.
+  is that same scalar, bare `list` / `dict` otherwise — a list needs its `--save-raw` payload
+  checked element by element, since every probe's skeleton samples only the first element and a
+  second probe adds no evidence. `dict[str, Any]` claims nothing `dict` does not. There is no
+  nested `TypedDict`; see `references/shape-spec.md`.
 
 - **Never emit a variant-specific `return_model` from a single-variant probe.** If a tool takes a
   discriminator arg (flagged in step 2.e), every sibling sharing that arg is polymorphic-suspect
