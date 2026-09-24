@@ -16,7 +16,7 @@ from mcp import types as mcp_types
 from mcp.shared.exceptions import McpError
 
 from mcpgen import _bridge
-from mcpgen.cli import Inventory, _cmd_list, _list_inventory, _list_tools, main
+from mcpgen.cli import Inventory, ResourceListingFailed, _cmd_list, _list_inventory, _list_tools, main
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup, ExceptionGroup
@@ -457,18 +457,19 @@ def test_list_inventory_rejects_unknown_scope():
     "exc",
     [McpError(mcp_types.ErrorData(code=-32603, message="boom")), ValueError("repeated cursor")],
 )
-def test_list_inventory_raises_listing_error_unwrapped(exc):
-    """A resource-listing failure escapes the session as itself, not as an ExceptionGroup."""
+def test_list_inventory_wraps_listing_error(exc):
+    """A resource-listing failure escapes as ResourceListingFailed, not inside an ExceptionGroup."""
     fake = _FakeSessions()
 
     with (
         patch("mcpgen.cli._bridge.session", fake),
         patch("mcpgen.cli._bridge.list_resource_inventory", AsyncMock(side_effect=exc)),
-        pytest.raises(type(exc)) as caught,
+        pytest.raises(ResourceListingFailed) as caught,
     ):
         asyncio.run(_list_inventory("acme", scope="all"))
 
-    assert caught.value is exc
+    assert caught.value.__cause__ is exc
+    assert str(caught.value).startswith(f"could not list resources: {type(exc).__name__}: ")
 
 
 def test_list_tools_hook_failure_propagates():

@@ -960,6 +960,40 @@ auth/transport backend is the caller's concern, not this module's."""
 _PY_BUILTINS = frozenset({"str", "int", "float", "list", "dict", "bool", "bytes", "object", "type", "set", "tuple"})
 
 
+def _warn_unmatched_resource_entries(
+    shapes: dict, tool_names: set[str], resources: list[dict] | None, templates: list[dict] | None
+) -> None:
+    """Warn for each resource shapes entry that no listed resource or template picks up.
+
+    Catches a probe keyed by a template that differs from the listed one
+    (`demo://records/{id}` vs `demo://records/{record_id}`), whose entry would
+    otherwise be dropped silently. An entry tagged with a `kind` is checked
+    against that kind's listing, an untagged one against both, as
+    `_resource_shape` applies it to either. A listing of `None` was not
+    collected, so an entry that could belong to it is not judged. An entry
+    whose `kind` is neither `resource` nor `resource_template` (a misspelling
+    such as `resource-template`) applies to nothing and always warns, unless
+    its key names a tool, whose wrapper ignores `kind`.
+    """
+    listed = {
+        "resource": None if resources is None else {r["uri"] for r in resources},
+        "resource_template": None if templates is None else {t["uriTemplate"] for t in templates},
+    }
+    for key, entry in shapes.items():
+        kind = entry.get("kind") if isinstance(entry, dict) else None
+        if kind is not None and kind not in _RESOURCE_KINDS and key not in tool_names:
+            print(f"[codegen] ⚠  shapes entry {key!r} has unknown kind {kind!r} — not applied", file=sys.stderr)
+            continue
+        if not _is_resource_entry(key, entry, tool_names):
+            continue
+        kinds = [kind] if kind in _RESOURCE_KINDS else list(_RESOURCE_KINDS)
+        keys = [listed[k] for k in kinds]
+        if any(k is None for k in keys) or any(key in k for k in keys if k is not None):
+            continue
+        label = " or ".join(k.replace("_", " ") for k in kinds)
+        print(f"[codegen] ⚠  shapes entry {key!r} matches no listed {label} — not applied", file=sys.stderr)
+
+
 def _valid_templates(templates: list[dict]) -> list[dict]:
     """Templates that parse, first occurrence per template string; each malformed one warns and is skipped."""
     out: dict[str, dict] = {}
@@ -990,7 +1024,8 @@ def render_module(
     return models and a `_dig` unwrap helper; the no-shapes path is
     byte-identical to pure stub generation. Resource accessors follow the tools,
     statics before templates; without resources the output is byte-identical to
-    a tools-only module.
+    a tools-only module. A resource entry in `shapes` that matches no listed
+    resource or template warns on stderr.
     """
     shapes = shapes or {}
     note = f"\n{probe_note}\n" if probe_note else ""
@@ -1006,6 +1041,7 @@ def render_module(
     # Tool-level flags ignore resource entries: those only count when rendered,
     # via resource_specs.
     tool_names = {t["name"] for t in tools}
+    _warn_unmatched_resource_entries(shapes, tool_names, resources, resource_templates)
     tool_shapes = [s for k, s in shapes.items() if not _is_resource_entry(k, s, tool_names)]
     has_disc = any(s.get("discriminator") and s.get("variants") for s in tool_shapes)
     needs_json = bool(shapes) and any(

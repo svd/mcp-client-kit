@@ -96,12 +96,14 @@ under httpx's own 30s timeout) are outside it.
 
 
 class ResourceListingFailed(Exception):
-    """The session failed under a strict ``_list_inventory`` while resources were being listed.
+    """A strict ``_list_inventory`` could not list resources.
 
-    Raised for a transport failure outside the hook, such as an HTTP 502 on
-    ``resources/list`` failing the transport's per-request task, which would
-    otherwise escape as an ExceptionGroup. The message is already
-    ``_bridge._describe``d; the original is chained as ``__cause__``.
+    Raised for an ``McpError`` / ``ValueError`` from the listing itself and for
+    a transport failure while it ran, such as an HTTP 502 on ``resources/list``
+    failing the transport's per-request task, which would otherwise escape as
+    an ExceptionGroup. The message reads ``could not list resources: <cause>``
+    with the cause already ``_bridge._describe``d; the original is chained as
+    ``__cause__``.
     """
 
 
@@ -175,10 +177,10 @@ async def _list_inventory(server: str, *, scope: str, strict: bool = True, **con
     How a resource failure surfaces depends on where it happens:
 
     - ``McpError`` / ``ValueError`` from the listing (an error response,
-      pydantic validation, a pagination fault) is caught inside the hook. Strict
-      re-raises it after the session closes, so it surfaces as itself rather
-      than inside the transport's ExceptionGroup; non-strict records it on
-      ``resource_error``.
+      pydantic validation, a pagination fault) is caught inside the hook, so it
+      never reaches the transport's ExceptionGroup. Strict raises it as
+      ``ResourceListingFailed`` after the session closes; non-strict records it
+      on ``resource_error``.
     - A transport failure: the hook is cancelled from outside (an HTTP 502 fails
       the transport's per-request task, whose task group then cancels the
       session body) or sees ``anyio.BrokenResourceError`` /
@@ -242,7 +244,8 @@ async def _list_inventory(server: str, *, scope: str, strict: bool = True, **con
             raise ResourceListingFailed(f"could not list resources: {_bridge._describe(exc)}") from exc
         inv = Inventory(tools=await _list_tools(server, on_session=None, **conn), resource_error=exc)
     if strict and inv.resource_error is not None:
-        raise inv.resource_error
+        err = inv.resource_error
+        raise ResourceListingFailed(f"could not list resources: {_bridge._describe(err)}") from err
     return inv
 
 
@@ -668,7 +671,7 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
                     shapes = codegen.merge_skeletons(skeletons)
                     changes = _normalize_shapes(shapes)
                     print(
-                        f"[codegen] shapes: {parts_d}/ ({len(shapes)} tool(s), "
+                        f"[codegen] shapes: {parts_d}/ ({len(shapes)} entry(ies), "
                         "in-memory merge — run `mcpgen merge` to persist)",
                         file=sys.stderr,
                     )
@@ -682,7 +685,7 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
         return None
     shapes = json.loads(path.read_text())
     changes = _normalize_shapes(shapes)
-    print(f"[codegen] shapes: {path} ({len(shapes)} tool(s))", file=sys.stderr)
+    print(f"[codegen] shapes: {path} ({len(shapes)} entry(ies))", file=sys.stderr)
     if changes:
         print(
             f"[codegen] shapes: normalized {len(changes)} type string(s): " + ", ".join(changes),
@@ -710,6 +713,11 @@ def _manifest_path(ns: argparse.Namespace) -> Path | None:
     return out.with_name(out.stem + ".mcpgen.json")
 
 
+# Above this many static resources, `codegen` suggests a narrower --resources
+# scope: a server that lists its data as resources gets one accessor per item.
+_STATIC_RESOURCE_WARN = 50
+
+
 def _cmd_codegen(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
     conn = dict(
@@ -721,12 +729,39 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
+    scope = getattr(ns, "resource_scope", "all")
     try:
-        tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
+        inv = asyncio.run(_list_inventory(ns.server, scope=scope, cmd=cmd, **conn))
+    except ResourceListingFailed as exc:
+        print(f"[codegen] error: {exc}", file=sys.stderr)
+        print(
+            "[codegen] hint: retry with `--resources none` to generate the tool wrappers without resource accessors",
+            file=sys.stderr,
+        )
+        return 1
     except (FileNotFoundError, ValueError) as exc:
         print(f"[codegen] error: {exc}", file=sys.stderr)
         return 1
+    except McpError as exc:
+        print(f"[codegen] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+    except BaseExceptionGroup as exc:
+        _check_reportable(exc)
+        print(f"[codegen] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+    tools = inv.tools
     print(f"[codegen] {ns.server}: {len(tools)} tools", file=sys.stderr)
+    if inv.resources:
+        print(f"[codegen] {ns.server}: {len(inv.resources)} resource(s)", file=sys.stderr)
+        if len(inv.resources) > _STATIC_RESOURCE_WARN:
+            print(
+                f"[codegen] ⚠  {len(inv.resources)} static resources listed, one accessor each; if the server "
+                "lists its data as resources, regenerate with `--resources templates` (templates only) "
+                "or `--resources none`",
+                file=sys.stderr,
+            )
+    if inv.templates:
+        print(f"[codegen] {ns.server}: {len(inv.templates)} resource template(s)", file=sys.stderr)
 
     shapes = _load_shapes(ns)
 
@@ -743,7 +778,13 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         probe_note = f"\nObserved response shape of {ns.probe!r} (keys/types/nesting only):\n" + shape_json
 
     source = codegen.render_module(
-        ns.server, tools, shapes=shapes, probe_note=probe_note, embed_schema=getattr(ns, "embed_schema", False)
+        ns.server,
+        tools,
+        shapes=shapes,
+        probe_note=probe_note,
+        embed_schema=getattr(ns, "embed_schema", False),
+        resources=inv.resources,
+        resource_templates=inv.templates,
     )
     if ns.out:
         Path(ns.out).write_text(source)
@@ -753,8 +794,15 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
 
     target = _manifest_path(ns)
     if target is not None:
-        _atomic_write_text(target, manifest_mod.dumps(manifest_mod.build(ns.server, tools)))
-        print(f"[codegen] wrote {target} ({len(tools)} tool(s))", file=sys.stderr)
+        _atomic_write_text(
+            target, manifest_mod.dumps(manifest_mod.build(ns.server, tools, inv.resources, inv.templates))
+        )
+        counts = [f"{len(tools)} tool(s)"]
+        if inv.resources:
+            counts.append(f"{len(inv.resources)} resource(s)")
+        if inv.templates:
+            counts.append(f"{len(inv.templates)} resource template(s)")
+        print(f"[codegen] wrote {target} ({', '.join(counts)})", file=sys.stderr)
     return 0
 
 
@@ -1688,6 +1736,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         dest="no_manifest",
         help="do not write a tool-inventory manifest",
+    )
+    cg.add_argument(
+        "--resources",
+        dest="resource_scope",
+        choices=INVENTORY_SCOPES,
+        default="all",
+        help="resources to generate accessors for and track in the manifest: all (default), "
+        "templates (resource templates only; static resources are neither listed nor tracked) "
+        "or none (a tools-only module and manifest)",
     )
     _add_conn_args(cg)
     cg.set_defaults(func=_cmd_codegen)
