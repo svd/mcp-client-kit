@@ -25,6 +25,7 @@ from urllib.parse import quote as _url_quote
 
 import anyio
 from mcp.shared.exceptions import McpError
+from mcp.types import ReadResourceResult, TextResourceContents
 
 from . import _bridge, codegen, discovery
 from . import manifest as manifest_mod
@@ -126,6 +127,35 @@ def _leaves(exc: BaseException) -> list[BaseException]:
     return [exc]
 
 
+def _auth_leaf(exc: BaseException) -> BaseException | None:
+    """The first leaf of *exc* when every leaf is ``ReauthenticationRequired`` / ``LoginWontHelp``."""
+    leaves = _leaves(exc)
+    if all(isinstance(leaf, (_bridge.ReauthenticationRequired, _bridge.LoginWontHelp)) for leaf in leaves):
+        return leaves[0]
+    return None
+
+
+def _check_reportable(group: BaseExceptionGroup) -> None:
+    """Return when *group*, escaping a one-shot session, is an error to report; raise otherwise.
+
+    A session that fails while opening (a stdio server crashing on startup, a
+    failed HTTP ``initialize``) or in a transport task (``ReauthenticationRequired``
+    from a mid-request 401) surfaces as the transport's ExceptionGroup, never
+    as the bare error. An interrupt re-raises the group unchanged. An auth-only
+    group raises its leaf for ``main()``'s auth handler. A group of nothing but
+    ``McpError`` / ``ValueError`` returns: the caller prints
+    ``_bridge._describe(group)`` and exits 1. Anything else is a bug and
+    re-raises the group, to traceback.
+    """
+    if _bridge._carries_interrupt(group):
+        raise group
+    auth = _auth_leaf(group)
+    if auth is not None:
+        raise auth from group
+    if not all(isinstance(leaf, (McpError, ValueError)) for leaf in _leaves(group)):
+        raise group
+
+
 async def _list_inventory(server: str, *, scope: str, strict: bool = True, **conn: Any) -> Inventory:
     """List tools and, per *scope*, resources/templates over one session.
 
@@ -201,9 +231,9 @@ async def _list_inventory(server: str, *, scope: str, strict: bool = True, **con
     except BaseException as exc:
         if hook_outcome is None or _bridge._carries_interrupt(exc):
             raise
-        leaves = _leaves(exc)
-        if all(isinstance(leaf, (_bridge.ReauthenticationRequired, _bridge.LoginWontHelp)) for leaf in leaves):
-            raise leaves[0] from exc
+        auth = _auth_leaf(exc)
+        if auth is not None:
+            raise auth from exc
         if hook_outcome != "transport":
             raise
         if strict:
@@ -275,6 +305,87 @@ async def _call(
     return await caller.call(server, tool, args)
 
 
+async def _read_resource(
+    server: str,
+    uri: str,
+    *,
+    cmd: str | None = None,
+    url: str | None = None,
+    bearer: str | None = None,
+    client_name: str | None = None,
+    config_path: str | None = None,
+    cred_backend: str | None = None,
+    creds_path: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> ReadResourceResult:
+    """Read *uri* and return the unparsed result, for `read`'s per-content output."""
+    caller = _bridge.McpBridgeCaller(
+        cmd=cmd,
+        url=url,
+        bearer=bearer,
+        client_name=client_name,
+        config_path=config_path,
+        cred_backend=cred_backend,
+        creds_path=creds_path,
+        env=env,
+    )
+    return await caller.read_resource_result(server, uri)
+
+
+def _json_object_arg(raw: str) -> dict:
+    """Parse one ``--args`` value, which must be a JSON object; raises ``ValueError``."""
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--args must be valid JSON ({exc})") from None
+    if not isinstance(value, dict):
+        raise ValueError(f"--args must be a JSON object, got {type(value).__name__}: {raw}")
+    return value
+
+
+def _static_args_error(target: str) -> ValueError:
+    """The error for --args given with *target*, a static resource URI."""
+    return ValueError(f"--args applies to a URI template only; {target!r} has no {{variable}}")
+
+
+def _resource_uri(target: str, values: dict | None) -> str:
+    """The normalized URI that `read` / `probe --resource` reads for *target*.
+
+    A target containing ``{`` is a URI template, expanded with *values* keyed by
+    raw variable name: every required variable must be given, no unknown one may
+    be, and values must be scalars. A static URI takes no values: *values* is
+    ``None`` unless ``--args`` was passed, and passing it is an error. Raises
+    ``ValueError`` (``codegen.UriTemplateError`` for a malformed template).
+    """
+    if "{" not in target:
+        if values is not None:
+            raise _static_args_error(target)
+        return _normalized_uri(target)
+    variables = codegen.uri_template_variables(target)
+    values = values or {}
+    names = [name for name, _required in variables]
+    unknown = sorted(set(values) - set(names))
+    if unknown:
+        raise ValueError(
+            f"unknown variable(s) {', '.join(unknown)} for {target!r}; the template has: {', '.join(names)}"
+        )
+    missing = [name for name, required in variables if required and values.get(name) is None]
+    if missing:
+        raise ValueError(f"missing required variable(s) {', '.join(missing)} for {target!r}; pass them in --args")
+    nested = sorted(name for name, value in values.items() if isinstance(value, (dict, list)))
+    if nested:
+        raise ValueError(f"variable(s) {', '.join(nested)} must be a string, number, boolean or null")
+    return _normalized_uri(codegen.expand_uri_template(target, values))
+
+
+def _normalized_uri(uri: str) -> str:
+    try:
+        return _bridge.normalize_resource_uri(uri)
+    except ValueError:
+        # pydantic's multi-line ValidationError text adds nothing for a CLI user.
+        raise ValueError(f"not a valid resource URI: {uri!r}") from None
+
+
 def _server_stem(server: str) -> str:
     """Return a filesystem-safe stem for a server identifier (name or URL)."""
     if server.startswith(("http://", "https://")):
@@ -317,7 +428,17 @@ def _parse_env(ns: argparse.Namespace) -> dict[str, str] | None:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write *text* to *path* atomically via a pid-unique temp file + os.replace.
+    """Write *text* to *path* atomically; see ``_atomic_write``."""
+    _atomic_write(path, lambda tmp: tmp.write_text(text))
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write *data* to *path* atomically and byte for byte; see ``_atomic_write``."""
+    _atomic_write(path, lambda tmp: tmp.write_bytes(data))
+
+
+def _atomic_write(path: Path, write: Callable[[Path], object]) -> None:
+    """Stage *path* through *write* into a pid-unique temp file, then os.replace it.
 
     Safe on all OS (Windows, macOS, Linux) — os.replace is atomic when src and
     dst are on the same filesystem, which is always true here.  Using the pid in
@@ -328,7 +449,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
     try:
-        tmp.write_text(text)
+        write(tmp)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -672,6 +793,67 @@ def _cmd_call(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _read_output(result: ReadResourceResult) -> bytes:
+    """The bytes `read --out` writes for one ``resources/read`` result.
+
+    A single text content is its text, verbatim; a single blob is its decoded
+    bytes. Several contents are a JSON array of the contents as the server sent
+    them, so each keeps its own uri and mimeType. Raises ``ValueError`` for no
+    contents or invalid base64.
+    """
+    contents = result.contents
+    if not contents:
+        raise ValueError("MCP resource read returned no contents")
+    if len(contents) > 1:
+        dumps = [c.model_dump(mode="json", by_alias=True, exclude_none=True) for c in contents]
+        return (json.dumps(dumps, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    item = contents[0]
+    if isinstance(item, TextResourceContents):
+        return item.text.encode("utf-8")
+    return _bridge.parse_resource([item])
+
+
+def _cmd_read(ns: argparse.Namespace) -> int:
+    """Read one resource live and write its contents to --out.
+
+    The resource-side twin of `call`: the payload goes to a file, never to
+    stdout. A URI template target is expanded from --args first.
+    """
+    cmd = getattr(ns, "stdio", None)
+    conn = dict(
+        url=ns.url,
+        bearer=ns.bearer,
+        client_name=ns.client_name,
+        config_path=ns.config,
+        cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
+        env=_parse_env(ns),
+    )
+    try:
+        values = _json_object_arg(ns.args) if ns.args is not None else None
+        uri = _resource_uri(ns.uri, values)
+        print(f"[read] {ns.server} {uri} (live) …", file=sys.stderr)
+        data = _read_output(asyncio.run(_read_resource(ns.server, uri, cmd=cmd, **conn)))
+        out = Path(ns.out)
+        _atomic_write_bytes(out, data)
+    except (OSError, ValueError) as exc:
+        print(f"[read] error: {exc}", file=sys.stderr)
+        return 1
+    except McpError as exc:
+        print(f"[read] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+    except BaseExceptionGroup as exc:
+        _check_reportable(exc)
+        print(f"[read] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+    print(f"[read] wrote {len(data) / 1024:.1f} KB to {out}", file=sys.stderr)
+    print(
+        "[read] ⚠  resource contents may contain real ids/PII — use a *.probe-raw.json name (git-ignored).",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def _cmd_merge(ns: argparse.Namespace) -> int:
     """Consolidate per-tool part files into a single <server>.shapes.json.
 
@@ -927,6 +1109,10 @@ def _cmd_list(ns: argparse.Namespace) -> int:
         print(f"[list] error: {exc}", file=sys.stderr)
         return 1
     except (FileNotFoundError, ValueError, McpError) as exc:
+        print(f"[list] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+    except BaseExceptionGroup as exc:
+        _check_reportable(exc)
         print(f"[list] error: {_bridge._describe(exc)}", file=sys.stderr)
         return 1
 
@@ -1326,6 +1512,26 @@ def main(argv: list[str] | None = None) -> int:
     cl.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(cl)
     cl.set_defaults(func=_cmd_call)
+
+    rd = sub.add_parser("read", help="live-read a resource and write its contents to --out")
+    rd.add_argument("server", help="server name (e.g. acme) or URL")
+    rd.add_argument("uri", help="resource URI, or a URI template such as 'demo://records/{id}' (expanded from --args)")
+    rd.add_argument(
+        "--args",
+        metavar="JSON",
+        default=None,
+        help="JSON object of URI template variables, keyed by the template's variable names; a template target only",
+    )
+    rd.add_argument(
+        "--out",
+        required=True,
+        metavar="FILE",
+        help="write the contents here: one text content verbatim, one blob as raw bytes, "
+        "several as a JSON array. Use a *.probe-raw.json name for text — git-ignored",
+    )
+    rd.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    _add_conn_args(rd)
+    rd.set_defaults(func=_cmd_read)
 
     mg = sub.add_parser("merge", help="consolidate per-tool probe parts into <server>.shapes.json")
     mg.add_argument("server", help="server name (e.g. acme) or URL")

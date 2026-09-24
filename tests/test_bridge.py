@@ -5581,6 +5581,133 @@ def test_read_resource_decodes_a_blob():
     assert result == b"\x00\xffbin"
 
 
+def _anyio_like_session(s, log: list, *, exit_error: BaseException | None = None):
+    """A fake ``session`` CM that wraps a body exception the way anyio 4 does.
+
+    With mcp 1.27 an exception raised inside a one-shot session body leaves the
+    stdio/HTTP transport's task groups as ``ExceptionGroup(ExceptionGroup(exc))``.
+    *exit_error* is raised on a clean exit instead, like a transport task failing.
+    """
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        log.append(("enter", server))
+        try:
+            yield s
+        except BaseException as exc:
+            log.append(("exit", server))
+            inner = BaseExceptionGroup("unhandled errors in a TaskGroup", [exc])
+            raise BaseExceptionGroup("unhandled errors in a TaskGroup", [inner]) from None
+        log.append(("exit", server))
+        if exit_error is not None:
+            raise exit_error
+
+    return fake_session
+
+
+def _unknown_resource() -> McpError:
+    return McpError(mcp_types.ErrorData(code=-32002, message="Unknown resource: demo://missing"))
+
+
+def test_read_resource_one_shot_raises_a_read_error_bare():
+    """A failed read surfaces as itself, not inside the transport's nested ExceptionGroup."""
+    log: list = []
+    s = _resource_session()
+    s.read_resource = AsyncMock(side_effect=_unknown_resource())
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, log)):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").read_resource("demo", "demo://missing")
+
+    with pytest.raises(McpError, match="Unknown resource"):
+        asyncio.run(run())
+    assert log == [("enter", "demo"), ("exit", "demo")]
+
+
+def test_read_resource_one_shot_leaves_interrupts_to_the_session():
+    """Only ``Exception`` is carried out of the session; an interrupt-class error unwinds through it."""
+
+    class _Interrupt(BaseException):
+        pass
+
+    s = _resource_session()
+    s.read_resource = AsyncMock(side_effect=_Interrupt())
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, [])):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").read_resource("demo", "demo://config")
+
+    with pytest.raises(BaseExceptionGroup) as excinfo:
+        asyncio.run(run())
+    assert excinfo.group_contains(_Interrupt)
+
+
+def test_read_resource_one_shot_session_exit_failure_wins():
+    """A transport failure raised as the session closes propagates, chaining the read error as context."""
+    transport = ExceptionGroup("unhandled errors in a TaskGroup", [RuntimeError("502 Bad Gateway")])
+    read_error = _unknown_resource()
+    s = _resource_session()
+    s.read_resource = AsyncMock(side_effect=read_error)
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, [], exit_error=transport)):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").read_resource("demo", "demo://config")
+
+    with pytest.raises(ExceptionGroup) as excinfo:
+        asyncio.run(run())
+    assert excinfo.value is transport
+    assert excinfo.value.__context__ is read_error
+
+
+def test_read_resource_block_raises_a_read_error_bare():
+    """Inside ``connected()`` the read error reaches the caller directly, as before."""
+    s = _resource_session()
+    s.read_resource = AsyncMock(side_effect=_unknown_resource())
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, [])):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                with pytest.raises(McpError, match="Unknown resource"):
+                    await caller.read_resource("demo", "demo://missing")
+
+    asyncio.run(run())
+
+
+def test_read_resource_result_returns_the_unparsed_result():
+    """``read_resource_result`` keeps every content with its uri and mimeType."""
+    contents = [_text_contents('{"a": 1}'), _blob_contents(b"\x00\x01")]
+    log: list = []
+    s = _resource_session(contents)
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, log)):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            one_shot = await caller.read_resource_result("demo", "Demo://config")
+            async with caller.connected():
+                in_block = await caller.read_resource_result("demo", "demo://config")
+            return one_shot, in_block
+
+    one_shot, in_block = asyncio.run(run())
+    assert isinstance(one_shot, mcp_types.ReadResourceResult)
+    assert one_shot.contents == contents
+    assert in_block.contents == contents
+    (uri,), _ = s.read_resource.call_args_list[0]
+    assert str(uri) == "demo://config"
+
+
+def test_read_resource_result_rejects_an_invalid_uri_before_opening_a_session():
+    log: list = []
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(_resource_session(), log)):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").read_resource_result("demo", "not a uri")
+
+    with pytest.raises(ValueError):
+        asyncio.run(run())
+    assert log == []
+
+
 def test_bridge_caller_satisfies_both_seam_protocols():
     caller = _bridge.McpBridgeCaller(cmd="python srv.py")
     assert isinstance(caller, McpCaller)

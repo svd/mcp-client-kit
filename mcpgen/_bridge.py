@@ -47,7 +47,7 @@ from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, TypeVar
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
 import httpx
@@ -66,6 +66,7 @@ from mcp.types import (
     METHOD_NOT_FOUND,
     BlobResourceContents,
     PaginatedRequestParams,
+    ReadResourceResult,
     TextResourceContents,
 )
 from pydantic import AnyUrl, TypeAdapter, UrlConstraints
@@ -75,6 +76,8 @@ if sys.version_info < (3, 11):  # pragma: no cover - version-gated
     # that, so it is present wherever the MCP SDK is; the isinstance checks in
     # _carries_interrupt and _describe need the same class anyio raises.
     from exceptiongroup import BaseExceptionGroup
+
+_T = TypeVar("_T")
 
 DEFAULT_CREDS_PATH = Path.home() / ".mcpgen" / "credentials.json"
 DEFAULT_CONFIG_PATH = Path.home() / ".mcpgen" / "config.json"
@@ -2128,24 +2131,52 @@ class McpBridgeCaller:
         return parse(content)
 
     async def read_resource(self, server: str, uri: str) -> Any:
-        """Read the resource at *uri* and return its parsed contents (see ``parse_resource``).
+        """Read the resource at *uri* and return its parsed contents (see ``parse_resource``)."""
+        return parse_resource((await self.read_resource_result(server, uri)).contents)
 
-        Shares ``call()``'s session handling: one-shot outside ``connected()``, the
-        block's session for *server* inside it.
+    async def read_resource_result(self, server: str, uri: str) -> ReadResourceResult:
+        """Read the resource at *uri* and return the SDK's unparsed ``ReadResourceResult``.
+
+        Session handling is ``call()``'s: one-shot outside ``connected()``, the
+        block's session for *server* inside it. A read error raised in a one-shot
+        session is re-raised bare once the session has closed (see ``_one_shot``).
         """
         # Validated before any session opens, so a malformed URI costs no
         # subprocess spawn, handshake or OAuth refresh.
         url = _RESOURCE_URI.validate_python(uri)
+
+        async def read(s: Any) -> ReadResourceResult:
+            return await s.read_resource(url)
+
         block = self._block
         if block is None:
-            async with self._session_cm(server) as s:
-                return await self._read(s, url)
-        return await self._read(await block.session_for(server), url)
+            return await self._one_shot(server, read)
+        return await read(await block.session_for(server))
 
-    @staticmethod
-    async def _read(s: Any, uri: AnyUrl) -> Any:
-        result = await s.read_resource(uri)
-        return parse_resource(result.contents)
+    async def _one_shot(self, server: str, op: Callable[[Any], Awaitable[_T]]) -> _T:
+        """Run *op* on a fresh session for *server* and close it.
+
+        An ``Exception`` raised by *op* is caught inside the session and re-raised
+        after it closes. Raised through the session instead, it would cross the
+        transport's anyio task groups and reach the caller as
+        ``ExceptionGroup(ExceptionGroup(exc))``. Interrupts and anything the
+        session itself raises (auth, transport) propagate unchanged. A failure
+        the session raises while closing replaces the captured one, which is
+        kept as its ``__context__`` when that is unset.
+        """
+        failure: Exception | None = None
+        try:
+            async with self._session_cm(server) as s:
+                try:
+                    return await op(s)
+                except Exception as exc:  # noqa: BLE001 — re-raised below, outside the session
+                    failure = exc
+        except BaseException as close_exc:
+            if failure is not None and close_exc.__context__ is None:
+                close_exc.__context__ = failure
+            raise
+        assert failure is not None  # the body either returned or captured
+        raise failure
 
 
 def _summarize_content_item(item: Any) -> dict:

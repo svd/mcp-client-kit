@@ -294,6 +294,17 @@ def test_list_handles_list_tools_error(capsys):
     assert "error" in err.lower()
 
 
+def test_list_grouped_tools_error_exits_one_without_traceback(capsys):
+    """Real transports deliver a tools/list McpError inside an ExceptionGroup."""
+    group = ExceptionGroup("x", [McpError(mcp_types.ErrorData(code=-32603, message="boom"))])
+
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, side_effect=group):
+        rc = _cmd_list(_ns("acme", schema=False))
+
+    assert rc == 1
+    assert capsys.readouterr().err == "[list] error: McpError: boom\n"
+
+
 # ── inventory plumbing (_list_tools hook, _list_inventory) ────────────────────
 
 
