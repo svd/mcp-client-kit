@@ -9,3 +9,4 @@ __pycache__/
 eval_preflight.py
 eval/
 .codegraph/
+.coverage
