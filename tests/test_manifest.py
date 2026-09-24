@@ -307,3 +307,337 @@ def test_to_json_advisory_does_not_set_drift():
     payload = manifest.to_json(manifest.diff(BASE, _m(mutated)))
     assert payload["drift"] is False
     assert payload["advisory"][0]["category"] == "description"
+
+
+# ── resources ─────────────────────────────────────────────────────────────────
+
+RESOURCES = [
+    {
+        "uri": "risk://dictionary",
+        "name": "risk_dictionary",
+        "description": "Read first",
+        "mimeType": "application/json",
+    },
+    {"uri": "dimension://all", "name": "dimensions", "description": "All dimensions", "mimeType": "application/json"},
+]
+TEMPLATES = [
+    {
+        "uriTemplate": "dimension://by-unit-type/{unitType}",
+        "name": "by_unit_type",
+        "description": "Dimensions for one unit type",
+        "mimeType": "application/json",
+    },
+]
+
+
+def _rm(resources: list[dict] | None = RESOURCES, templates: list[dict] | None = TEMPLATES) -> dict:
+    return manifest.build("demo", TOOLS, resources, templates)
+
+
+def _edit(items: list[dict], index: int, **changes) -> list[dict]:
+    copied = json.loads(json.dumps(items))
+    copied[index].update(changes)
+    return copied
+
+
+RBASE = _rm()
+
+
+def test_build_omits_resource_sections_when_not_collected():
+    m = manifest.build("demo", TOOLS)
+    assert "resources" not in m
+    assert "resource_templates" not in m
+
+
+def test_build_keeps_empty_resource_sections():
+    """An empty section is present, meaning the server was asked and tracked."""
+    m = manifest.build("demo", TOOLS, [], [])
+    assert m["resources"] == {}
+    assert m["resource_templates"] == {}
+
+
+def test_build_sections_are_independent():
+    m = manifest.build("demo", TOOLS, RESOURCES, None)
+    assert "resources" in m
+    assert "resource_templates" not in m
+
+
+def test_build_keys_resources_by_uri_and_templates_by_uri_template():
+    assert set(RBASE["resources"]) == {"risk://dictionary", "dimension://all"}
+    assert set(RBASE["resource_templates"]) == {"dimension://by-unit-type/{unitType}"}
+    assert RBASE["resources"]["risk://dictionary"] == {
+        "name": "risk_dictionary",
+        "description": "Read first",
+        "mimeType": "application/json",
+    }
+
+
+def test_build_normalizes_missing_resource_fields():
+    m = manifest.build("demo", [], [{"uri": "a://b", "name": "b"}], [])
+    assert m["resources"]["a://b"] == {"name": "b", "description": "", "mimeType": None}
+
+
+def test_build_with_resources_is_byte_stable_across_ordering():
+    a = manifest.dumps(_rm())
+    b = manifest.dumps(manifest.build("demo", TOOLS, list(reversed(RESOURCES)), TEMPLATES))
+    assert a == b
+    assert manifest.dumps(json.loads(a)) == a
+
+
+def test_build_duplicate_keys_resolve_independently_of_input_order():
+    dupes = [
+        {"uri": "a://x", "name": "first", "mimeType": "text/plain"},
+        {"uri": "a://x", "name": "second", "mimeType": "application/json"},
+    ]
+    tpl_dupes = [{"uriTemplate": "t://{id}", "name": "one"}, {"uriTemplate": "t://{id}", "name": "two"}]
+    tool_dupes = [
+        {"name": "t", "description": "one", "inputSchema": {}},
+        {"name": "t", "description": "two", "inputSchema": {}},
+    ]
+    a = manifest.dumps(manifest.build("demo", tool_dupes, dupes, tpl_dupes))
+    b = manifest.dumps(
+        manifest.build("demo", list(reversed(tool_dupes)), list(reversed(dupes)), list(reversed(tpl_dupes)))
+    )
+    assert a == b
+
+
+def test_diff_identical_resources_has_no_drift():
+    report = manifest.diff(RBASE, _rm())
+    assert not report.has_drift
+    assert report.resources_compared
+    assert report.resources_added == []
+    assert report.resources_removed == []
+    assert report.resources_changed == []
+    assert report.resources_advisory == []
+    assert report.resources_untracked == []
+
+
+def test_diff_detects_added_resource():
+    extra = [*RESOURCES, {"uri": "status://now", "name": "status", "mimeType": "text/plain"}]
+    report = manifest.diff(RBASE, _rm(extra))
+    assert report.resources_added == [manifest.ResourceRef("resource", "status://now")]
+    assert report.has_drift
+
+
+def test_diff_detects_removed_resource():
+    report = manifest.diff(RBASE, _rm(RESOURCES[:1]))
+    assert report.resources_removed == [manifest.ResourceRef("resource", "dimension://all")]
+    assert report.has_drift
+
+
+def test_diff_detects_added_template():
+    extra = [*TEMPLATES, {"uriTemplate": "record://{id}", "name": "record"}]
+    report = manifest.diff(RBASE, _rm(templates=extra))
+    assert report.resources_added == [manifest.ResourceRef("resource_template", "record://{id}")]
+    assert report.has_drift
+
+
+def test_diff_detects_removed_template():
+    report = manifest.diff(RBASE, _rm(templates=[]))
+    assert report.resources_removed == [
+        manifest.ResourceRef("resource_template", "dimension://by-unit-type/{unitType}")
+    ]
+    assert report.has_drift
+
+
+def test_diff_mime_type_change_is_drift():
+    report = manifest.diff(RBASE, _rm(_edit(RESOURCES, 0, mimeType="text/plain")))
+    assert report.has_drift
+    assert len(report.resources_changed) == 1
+    change = report.resources_changed[0]
+    assert (change.kind, change.key, change.category) == ("resource", "risk://dictionary", "mimeType")
+    assert (change.old, change.new) == ("application/json", "text/plain")
+
+
+def test_diff_template_mime_type_change_is_drift():
+    report = manifest.diff(RBASE, _rm(templates=_edit(TEMPLATES, 0, mimeType="text/csv")))
+    assert report.has_drift
+    assert report.resources_changed[0].kind == "resource_template"
+
+
+def test_diff_resource_description_change_is_advisory():
+    report = manifest.diff(RBASE, _rm(_edit(RESOURCES, 0, description="Changed")))
+    assert not report.has_drift
+    assert [(c.key, c.category) for c in report.resources_advisory] == [("risk://dictionary", "description")]
+    assert report.resources_advisory[0].old == "Read first"
+    assert report.resources_advisory[0].new == "Changed"
+
+
+def test_diff_resource_name_change_is_advisory():
+    report = manifest.diff(RBASE, _rm(templates=_edit(TEMPLATES, 0, name="renamed")))
+    assert not report.has_drift
+    assert [(c.kind, c.category) for c in report.resources_advisory] == [("resource_template", "name")]
+
+
+def test_diff_missing_and_empty_name_or_description_are_equal():
+    stored = _rm()
+    del stored["resources"]["risk://dictionary"]["description"]
+    stored["resource_templates"]["dimension://by-unit-type/{unitType}"]["name"] = None
+    live = _rm(_edit(RESOURCES, 0, description=""), _edit(TEMPLATES, 0, name=""))
+    report = manifest.diff(stored, live)
+    assert report.resources_advisory == []
+    assert not report.has_drift
+
+
+def test_diff_mime_type_comparison_is_case_insensitive():
+    """RFC 2045 §5.1: MIME type and subtype names are case-insensitive."""
+    report = manifest.diff(RBASE, _rm(_edit(RESOURCES, 0, mimeType="Application/JSON")))
+    assert report.resources_changed == []
+    assert not report.has_drift
+
+
+def test_diff_mime_type_appearing_is_drift():
+    stored = _rm(_edit(RESOURCES, 0, mimeType=None))
+    report = manifest.diff(stored, RBASE)
+    assert [(c.key, c.old, c.new) for c in report.resources_changed] == [
+        ("risk://dictionary", None, "application/json")
+    ]
+    assert report.has_drift
+
+
+def test_diff_mime_type_and_description_change_reports_changed_not_advisory():
+    report = manifest.diff(RBASE, _rm(_edit(RESOURCES, 0, mimeType="text/plain", description="x")))
+    assert [c.category for c in report.resources_changed] == ["mimeType"]
+    assert report.resources_advisory == []
+
+
+def test_diff_untracked_with_live_resources_is_advisory_not_drift():
+    stored = manifest.build("demo", TOOLS)
+    report = manifest.diff(stored, _rm())
+    assert not report.has_drift
+    assert not report.resources_compared
+    assert report.resources_untracked == ["resource", "resource_template"]
+    assert report.resources_added == []
+
+
+def test_diff_untracked_with_empty_live_is_silent():
+    stored = manifest.build("demo", TOOLS)
+    report = manifest.diff(stored, manifest.build("demo", TOOLS, [], []))
+    assert not report.has_drift
+    assert report.resources_untracked == []
+    assert manifest.render_text(report) == "No drift."
+    assert "resources" not in manifest.to_json(report)
+
+
+def test_diff_tracking_is_per_section():
+    """Resources tracked, templates untracked: resources compare, templates advise."""
+    stored = manifest.build("demo", TOOLS, RESOURCES, None)
+    extra = [*RESOURCES, {"uri": "status://now", "name": "status"}]
+    report = manifest.diff(stored, _rm(extra))
+    assert report.resources_compared
+    assert report.resources_added == [manifest.ResourceRef("resource", "status://now")]
+    assert report.resources_untracked == ["resource_template"]
+    assert report.has_drift
+
+
+def test_diff_skips_sections_not_collected_live():
+    """A live inventory that did not collect resources cannot contradict a tracked manifest."""
+    report = manifest.diff(RBASE, manifest.build("demo", TOOLS))
+    assert not report.has_drift
+    assert not report.resources_compared
+    assert report.resources_untracked == []
+
+
+def test_diff_rejects_non_dict_resource_section():
+    bad = {**_rm(), "resources": ["risk://dictionary"]}
+    with pytest.raises(ValueError, match="resources"):
+        manifest.diff(bad, _rm())
+    bad = {**_rm(), "resource_templates": None}
+    with pytest.raises(ValueError, match="resource_templates"):
+        manifest.diff(_rm(), bad)
+
+
+@pytest.mark.parametrize("section", ["tools", "resources", "resource_templates"])
+def test_diff_rejects_non_dict_entry(section):
+    """A hand-edited entry must fail as ValueError, never an AttributeError traceback."""
+    bad = _rm()
+    bad[section] = {**bad[section], "x://a": "oops"}
+    with pytest.raises(ValueError, match=section):
+        manifest.diff(bad, _rm())
+
+
+def test_render_text_resource_lines():
+    resources = [*_edit(RESOURCES[:1], 0, mimeType="text/plain", description="x"), {"uri": "status://now", "name": "s"}]
+    templates = [*_edit(TEMPLATES, 0, description="new"), {"uriTemplate": "record://{id}", "name": "record"}]
+    stored = _rm([*RESOURCES, {"uri": "old://gone", "name": "gone"}])
+    text = manifest.render_text(manifest.diff(stored, _rm(resources, templates)))
+    assert "ADDED     demo resource status://now" in text
+    assert "ADDED     demo resource template record://{id}" in text
+    assert "REMOVED   demo resource dimension://all" in text
+    assert "REMOVED   demo resource old://gone" in text
+    assert "CHANGED   demo resource risk://dictionary: mimeType changed" in text
+    assert "ADVISORY  demo resource template dimension://by-unit-type/{unitType}: description changed" in text
+    assert "Drift detected: 2 added, 2 removed, 1 changed (1 advisory)." in text
+
+
+def test_render_text_resource_advisory_shows_old_and_new():
+    text = manifest.render_text(manifest.diff(RBASE, _rm(_edit(RESOURCES, 0, description="Changed"))))
+    lines = text.splitlines()
+    head = lines.index("ADVISORY  demo resource risk://dictionary: description changed")
+    assert lines[head + 1] == "            - 'Read first'"
+    assert lines[head + 2] == "            + 'Changed'"
+
+
+def test_render_text_untracked_advisory():
+    stored = manifest.build("demo", TOOLS)
+    text = manifest.render_text(manifest.diff(stored, _rm(templates=[])))
+    assert "ADVISORY  demo: live resources are not tracked by the stored manifest" in text
+    assert "mcpgen check demo --update" in text
+    assert text.endswith("No drift. (1 advisory)")
+
+
+def test_render_text_unchanged_without_resources():
+    """Tool-only manifests render exactly as before."""
+    stored = manifest.build("demo", TOOLS)
+    assert manifest.render_text(manifest.diff(stored, _rm(None, None))) == "No drift."
+
+
+def test_to_json_has_no_resources_block_when_untracked_on_both_sides():
+    payload = manifest.to_json(manifest.diff(BASE, _m(TOOLS)))
+    assert "resources" not in payload
+
+
+def test_to_json_resources_block_when_compared():
+    extra = [*RESOURCES, {"uri": "status://now", "name": "status"}]
+    payload = manifest.to_json(manifest.diff(RBASE, _rm(extra, _edit(TEMPLATES, 0, mimeType="text/csv"))))
+    assert payload["drift"] is True
+    assert payload["resources"] == {
+        "compared": True,
+        "untracked": [],
+        "added": [{"kind": "resource", "key": "status://now"}],
+        "removed": [],
+        "changed": [
+            {
+                "kind": "resource_template",
+                "key": "dimension://by-unit-type/{unitType}",
+                "category": "mimeType",
+                "detail": "mimeType changed: 'application/json' -> 'text/csv'",
+                "old": "application/json",
+                "new": "text/csv",
+            }
+        ],
+        "advisory": [],
+    }
+    json.dumps(payload)
+
+
+def test_to_json_resources_advisory():
+    payload = manifest.to_json(manifest.diff(RBASE, _rm(templates=_edit(TEMPLATES, 0, name="renamed"))))
+    assert payload["drift"] is False
+    assert payload["resources"]["advisory"] == [
+        {
+            "kind": "resource_template",
+            "key": "dimension://by-unit-type/{unitType}",
+            "category": "name",
+            "detail": "name changed",
+            "old": "by_unit_type",
+            "new": "renamed",
+        }
+    ]
+
+
+def test_to_json_resources_block_when_untracked():
+    payload = manifest.to_json(manifest.diff(manifest.build("demo", TOOLS), _rm()))
+    assert payload["drift"] is False
+    assert payload["resources"]["compared"] is False
+    assert payload["resources"]["untracked"] == ["resource", "resource_template"]
