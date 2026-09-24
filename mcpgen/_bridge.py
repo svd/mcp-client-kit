@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import errno as _errno
 import json
 import os
@@ -42,11 +43,11 @@ import threading
 import time
 import warnings
 import webbrowser
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
 import httpx
@@ -60,6 +61,8 @@ from mcp.shared.auth import (
     OAuthClientMetadata,
     OAuthToken,
 )
+from mcp.types import BlobResourceContents, TextResourceContents
+from pydantic import AnyUrl, TypeAdapter, UrlConstraints
 
 if sys.version_info < (3, 11):  # pragma: no cover - version-gated
     # ExceptionGroup became a builtin in 3.11. anyio requires this backport below
@@ -1979,9 +1982,9 @@ class _SessionBlock:
         self._caller = caller
         self._requests: asyncio.Queue = asyncio.Queue()
         self._sessions: dict[str, Any] = {}
-        # Guards the open path only. call_tool() itself runs unserialized, so
-        # asyncio.gather() over wrappers stays genuinely concurrent — the SDK's
-        # ClientSession multiplexes on JSON-RPC request id.
+        # Guards the open path only. call_tool() and read_resource() themselves
+        # run unserialized, so asyncio.gather() over wrappers stays genuinely
+        # concurrent — the SDK's ClientSession multiplexes on JSON-RPC request id.
         self._open_lock = asyncio.Lock()
         self._ready = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -2078,10 +2081,10 @@ class McpBridgeCaller:
     async def connected(self):
         """Reuse one initialized session per server for the duration of the block.
 
-        Inside the block every ``call()`` to the same server reuses one
-        ``ClientSession``: one ``initialize()``, one stdio subprocess, one OAuth
-        pre-flight refresh. Outside the block ``call()`` is unchanged — it opens
-        and closes a session per invocation.
+        Inside the block every ``call()`` and ``read_resource()`` to the same
+        server reuses one ``ClientSession``: one ``initialize()``, one stdio
+        subprocess, one OAuth pre-flight refresh. Outside the block each of them
+        opens and closes a session per invocation.
 
             caller = McpBridgeCaller(cmd="python server.py")
             async with caller.connected():
@@ -2118,6 +2121,26 @@ class McpBridgeCaller:
         content = [_summarize_content_item(item) for item in result.content]
         return parse(content)
 
+    async def read_resource(self, server: str, uri: str) -> Any:
+        """Read the resource at *uri* and return its parsed contents (see ``parse_resource``).
+
+        Shares ``call()``'s session handling: one-shot outside ``connected()``, the
+        block's session for *server* inside it.
+        """
+        # Validated before any session opens, so a malformed URI costs no
+        # subprocess spawn, handshake or OAuth refresh.
+        url = _RESOURCE_URI.validate_python(uri)
+        block = self._block
+        if block is None:
+            async with self._session_cm(server) as s:
+                return await self._read(s, url)
+        return await self._read(await block.session_for(server), url)
+
+    @staticmethod
+    async def _read(s: Any, uri: AnyUrl) -> Any:
+        result = await s.read_resource(uri)
+        return parse_resource(result.contents)
+
 
 def _summarize_content_item(item: Any) -> dict:
     """Reduce one MCP content block to a compact, JSON-safe dict.
@@ -2153,21 +2176,14 @@ def _summarize_content_item(item: Any) -> dict:
     return {"type": item_type, "text": getattr(item, "text", "")}
 
 
-def _parse_one(item: Any) -> Any:
-    """Parse a single MCP content block into a Python value.
+def _parse_text(text: str) -> Any:
+    """Parse a text payload into a Python value.
 
-    Falls back to ``ast.literal_eval`` for Python-repr payloads (e.g. servers
-    that return single-quoted dicts like sqlite), then to a plain string as a
-    last resort so callers can still inspect the response.
-
-    Non-text content blocks (image / resource / resource_link) carry no `.text`
-    to parse — return the block's own summary dict as-is rather than falling
-    through to an empty string, so the shape-spec records something real.
+    JSON first; then ``ast.literal_eval`` for Python-repr payloads (e.g. servers
+    that return single-quoted dicts like sqlite); then the plain string as a last
+    resort so callers can still inspect the response. Tool text blocks and text
+    resource contents both go through this chain.
     """
-    item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
-    if item_type in ("image", "resource", "resource_link"):
-        return item if isinstance(item, dict) else _summarize_content_item(item)
-    text = item.get("text", "") if isinstance(item, dict) else getattr(item, "text", "")
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -2175,6 +2191,21 @@ def _parse_one(item: Any) -> Any:
             return ast.literal_eval(text)
         except (ValueError, SyntaxError):
             return text
+
+
+def _parse_one(item: Any) -> Any:
+    """Parse a single MCP content block into a Python value.
+
+    Text blocks go through ``_parse_text``. Non-text content blocks (image /
+    resource / resource_link) carry no `.text` to parse — return the block's own
+    summary dict as-is rather than falling through to an empty string, so the
+    shape-spec records something real.
+    """
+    item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+    if item_type in ("image", "resource", "resource_link"):
+        return item if isinstance(item, dict) else _summarize_content_item(item)
+    text = item.get("text", "") if isinstance(item, dict) else getattr(item, "text", "")
+    return _parse_text(text)
 
 
 def parse(content_items: list) -> Any:
@@ -2199,6 +2230,52 @@ def parse(content_items: list) -> Any:
     if len(content_items) == 1:
         return _parse_one(content_items[0])
     return [_parse_one(item) for item in content_items]
+
+
+# The SDK types every resource URI as this annotation (``mcp.types.Resource.uri``,
+# ``ResourceContents.uri``), so validating through it reproduces the SDK's
+# normalization exactly: lower-cased scheme, percent-encoded spaces.
+_RESOURCE_URI: TypeAdapter[AnyUrl] = TypeAdapter(Annotated[AnyUrl, UrlConstraints(host_required=False)])
+
+
+def normalize_resource_uri(uri: str) -> str:
+    """Return *uri* in the form the SDK puts on the wire and in listings.
+
+    ``Dimension://ALL`` becomes ``dimension://ALL`` and ``a b`` becomes ``a%20b``.
+    Every place a resource URI is used as a key must pass through here, or a key
+    written from user input would not match the one read back from the server.
+    Raises ``ValueError`` (pydantic ``ValidationError``) for a string that is not
+    a URI.
+    """
+    return str(_RESOURCE_URI.validate_python(uri))
+
+
+_ASCII_WHITESPACE = re.compile(r"[ \t\n\r\f\v]+")
+
+
+def _parse_resource_one(item: TextResourceContents | BlobResourceContents) -> Any:
+    if isinstance(item, TextResourceContents):
+        return _parse_text(item.text)
+    # Line-wrapped (MIME-style) base64 is accepted; anything outside the standard
+    # alphabet, such as URL-safe base64, raises instead of silently decoding to
+    # different bytes.
+    return base64.b64decode(_ASCII_WHITESPACE.sub("", item.blob), validate=True)
+
+
+def parse_resource(contents: Sequence[TextResourceContents | BlobResourceContents]) -> Any:
+    """Extract the payload from the ``contents`` of an MCP ``resources/read`` result.
+
+    Text contents parse exactly like tool text blocks (``_parse_text``); blob
+    contents are base64-decoded to ``bytes``, raising ``ValueError`` for invalid
+    base64. One content returns its value directly, several return a list of
+    per-content values in server order — the same folding as ``parse``.
+    Per-content URIs and mimeTypes are not kept.
+    """
+    if not contents:
+        raise ValueError("MCP resource read returned no contents")
+    if len(contents) == 1:
+        return _parse_resource_one(contents[0])
+    return [_parse_resource_one(item) for item in contents]
 
 
 # ---------------------------------------------------------------------------

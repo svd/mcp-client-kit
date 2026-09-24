@@ -11,6 +11,7 @@ no pytest-asyncio dependency needed).
 from __future__ import annotations
 
 import asyncio
+import base64
 import errno as _errno
 import io
 import itertools
@@ -35,11 +36,13 @@ if sys.version_info < (3, 11):  # pragma: no cover - version-gated
 
 import httpx
 import pytest
+from mcp import types as mcp_types
 from mcp.client.auth import OAuthRegistrationError
 from mcp.shared.auth import OAuthClientMetadata, OAuthToken
 from pydantic import AnyUrl
 
 from mcpgen import _bridge
+from mcpgen.seam import McpCaller, McpResourceReader
 
 
 @pytest.fixture(autouse=True)
@@ -5374,6 +5377,212 @@ def test_parse_multiple_python_repr_blocks():
     """The ast.literal_eval fallback applies per block, not just to the first."""
     blocks = [{"type": "text", "text": "{'a': 1}"}, {"type": "text", "text": "{'b': 2}"}]
     assert _bridge.parse(blocks) == [{"a": 1}, {"b": 2}]
+
+
+# ---------------------------------------------------------------------------
+# Resources: parse_resource, normalize_resource_uri, read_resource
+# ---------------------------------------------------------------------------
+
+
+def _text_contents(text: str, uri: str = "demo://config") -> mcp_types.TextResourceContents:
+    return mcp_types.TextResourceContents(uri=uri, text=text, mimeType="application/json")
+
+
+def _blob_contents(data: bytes, uri: str = "demo://logo") -> mcp_types.BlobResourceContents:
+    return mcp_types.BlobResourceContents(uri=uri, blob=base64.b64encode(data).decode(), mimeType="image/png")
+
+
+def test_parse_resource_json_text():
+    assert _bridge.parse_resource([_text_contents('{"a": 1, "b": [2]}')]) == {"a": 1, "b": [2]}
+
+
+def test_parse_resource_python_repr_text():
+    """Text contents go through the same literal_eval fallback as tool results."""
+    assert _bridge.parse_resource([_text_contents("{'a': 1}")]) == {"a": 1}
+
+
+def test_parse_resource_plain_text():
+    assert (
+        _bridge.parse_resource([_text_contents("# Risk dictionary\n\nsee below")]) == "# Risk dictionary\n\nsee below"
+    )
+
+
+def test_parse_resource_blob_is_decoded_bytes():
+    payload = b"\x89PNG\r\n\x1a\n\x00\xff"
+    result = _bridge.parse_resource([_blob_contents(payload)])
+    assert isinstance(result, bytes)
+    assert result == payload
+
+
+def test_parse_resource_several_contents_fold_into_a_list():
+    contents = [_text_contents('{"a": 1}'), _text_contents("plain"), _blob_contents(b"\x00\x01")]
+    assert _bridge.parse_resource(contents) == [{"a": 1}, "plain", b"\x00\x01"]
+
+
+def test_parse_resource_empty_raises():
+    with pytest.raises(ValueError, match="no contents"):
+        _bridge.parse_resource([])
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('{"a": 1}', {"a": 1}),
+        ("{'a': 1}", {"a": 1}),
+        ("42", 42),
+        ("OK", "OK"),
+        ("__import__('os')", "__import__('os')"),
+    ],
+)
+def test_parse_text_chain(text, expected):
+    """JSON, then literal_eval, then the string itself — for tool blocks and resource text alike."""
+    assert _bridge._parse_text(text) == expected
+    assert _bridge._parse_one({"type": "text", "text": text}) == expected
+
+
+def test_parse_resource_blob_tolerates_line_wrapped_base64():
+    wrapped = base64.encodebytes(b"\x00" * 100).decode()  # MIME style: newline every 76 chars
+    assert "\n" in wrapped
+    blob = mcp_types.BlobResourceContents(uri="demo://logo", blob=wrapped)
+    assert _bridge.parse_resource([blob]) == b"\x00" * 100
+
+
+@pytest.mark.parametrize("bad", ["_-_-", "not base64!", "QUJ"])
+def test_parse_resource_blob_rejects_invalid_base64(bad):
+    """URL-safe alphabet or garbage raises instead of decoding to the wrong bytes."""
+    blob = mcp_types.BlobResourceContents(uri="demo://logo", blob=bad)
+    with pytest.raises(ValueError):
+        _bridge.parse_resource([blob])
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Dimension://ALL", "dimension://ALL"),
+        ("risk://dictionary", "risk://dictionary"),
+        ("dimension://by-unit-type/Delivery Unit", "dimension://by-unit-type/Delivery%20Unit"),
+        ("dimension://by-unit-type/Delivery%20Unit", "dimension://by-unit-type/Delivery%20Unit"),
+    ],
+)
+def test_normalize_resource_uri_matches_the_sdk(raw, expected):
+    assert _bridge.normalize_resource_uri(raw) == expected
+    # The SDK's own Resource model normalizes the same way; keys must agree with it.
+    assert str(mcp_types.Resource(uri=raw, name="n").uri) == expected
+
+
+def test_normalize_resource_uri_rejects_a_non_uri():
+    with pytest.raises(ValueError):
+        _bridge.normalize_resource_uri("not a uri")
+
+
+def _resource_session(contents: list | None = None):
+    """A mock session answering both call_tool and read_resource (JSON text by default)."""
+    if contents is None:
+        contents = [_text_contents('{"k": "v"}')]
+    s = _make_mock_session({"ok": True})
+    s.read_resource = AsyncMock(return_value=mcp_types.ReadResourceResult(contents=contents))
+    return s
+
+
+def _read_through_caller(uri: str, contents: list | None = None) -> tuple:
+    """Run a one-shot ``read_resource`` against a fake session; return (result, log, sessions)."""
+    log: list = []
+    sessions: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        log.append(("enter", server))
+        s = _resource_session(contents)
+        sessions.append(s)
+        try:
+            yield s
+        finally:
+            log.append(("exit", server))
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            return await caller.read_resource("demo", uri)
+
+    return asyncio.run(run()), log, sessions
+
+
+def test_read_resource_one_shot_opens_and_closes_a_session():
+    result, log, sessions = _read_through_caller("demo://config")
+    assert result == {"k": "v"}
+    assert log == [("enter", "demo"), ("exit", "demo")]
+    sessions[0].read_resource.assert_awaited_once()
+
+
+def test_read_resource_rejects_an_invalid_uri_before_opening_a_session():
+    """A bad URI must not cost a subprocess spawn, handshake or OAuth round-trip."""
+    opened: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        opened.append(server)
+        yield _resource_session()
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            await caller.read_resource("demo", "not a uri")
+
+    with pytest.raises(ValueError):
+        asyncio.run(run())
+    assert opened == []
+
+
+def test_read_resource_with_empty_contents_raises():
+    with pytest.raises(ValueError, match="no contents"):
+        _read_through_caller("demo://config", contents=[])
+
+
+def test_read_resource_reuses_the_block_session_alongside_a_tool_call():
+    log: list = []
+    sessions: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        log.append(("enter", server))
+        s = _resource_session()
+        sessions.append(s)
+        try:
+            yield s
+        finally:
+            log.append(("exit", server))
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                tool = await caller.call("demo", "greet", {})
+                res = await caller.read_resource("demo", "demo://config")
+                return tool, res
+
+    assert asyncio.run(run()) == ({"ok": True}, {"k": "v"})
+    assert log == [("enter", "demo"), ("exit", "demo")]
+    assert len(sessions) == 1
+    sessions[0].call_tool.assert_awaited_once()
+    sessions[0].read_resource.assert_awaited_once()
+
+
+def test_read_resource_passes_a_normalized_anyurl_to_the_sdk():
+    _, _, sessions = _read_through_caller("Dimension://by-unit-type/Delivery Unit")
+    (uri,), _ = sessions[0].read_resource.call_args
+    assert isinstance(uri, AnyUrl)
+    assert str(uri) == "dimension://by-unit-type/Delivery%20Unit"
+
+
+def test_read_resource_decodes_a_blob():
+    result, _, _ = _read_through_caller("demo://logo", contents=[_blob_contents(b"\x00\xffbin")])
+    assert result == b"\x00\xffbin"
+
+
+def test_bridge_caller_satisfies_both_seam_protocols():
+    caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+    assert isinstance(caller, McpCaller)
+    assert isinstance(caller, McpResourceReader)
 
 
 # ---------------------------------------------------------------------------
