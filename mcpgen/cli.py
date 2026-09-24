@@ -560,6 +560,58 @@ def _merge_manifest_path(ns: argparse.Namespace, target: Path) -> Path | None:
     return candidates[0] if doc.get("server") == ns.server else None
 
 
+# shapes.json `kind` → the manifest section that lists entries of that kind.
+_MANIFEST_SECTION_FOR_KIND = {kind: section for section, kind in manifest_mod._RESOURCE_SECTIONS}
+
+
+def _stale_entries(carried: list[str], merged: dict, manifest_doc: Any) -> tuple[list[str], list[str]] | None:
+    """Split *carried* shapes keys into `(stale, unchecked)` against *manifest_doc*.
+
+    Returns None when the manifest has no `tools` dict.  A key naming a
+    manifest tool is a tool entry whatever it looks like: MCP tool names may
+    contain `:`.  Otherwise an entry whose `kind` is `resource` or
+    `resource_template` is looked up in that kind's section, and an untagged
+    key containing `:` in both sections, since codegen applies an untagged
+    entry to either kind.  Every other key is a tool entry and is stale when
+    absent from `tools`.
+
+    A resource entry is stale only when every section it could live in is
+    present in the manifest and none lists it.  When one of those sections is
+    missing, resources were not collected, so the entry is unchecked rather
+    than stale.
+
+    Known gap: a retired tool whose name contains `:` reads as an untagged
+    resource entry, so while the resource sections are untracked it is
+    reported as unchecked, not stale.  Probe always sets `kind`, so untagged
+    `:` keys come only from hand edits or tools with such names.
+    """
+    if not isinstance(manifest_doc, dict) or not isinstance(manifest_doc.get("tools"), dict):
+        return None
+    tools = manifest_doc["tools"]
+    stale: list[str] = []
+    unchecked: list[str] = []
+    for key in carried:
+        if key in tools:
+            continue
+        entry = merged.get(key)
+        kind = entry.get("kind") if isinstance(entry, dict) else None
+        if kind in _MANIFEST_SECTION_FOR_KIND:
+            names = [_MANIFEST_SECTION_FOR_KIND[kind]]
+        elif ":" in key:
+            names = list(_MANIFEST_SECTION_FOR_KIND.values())
+        else:
+            stale.append(key)
+            continue
+        sections = [manifest_doc.get(name) for name in names]
+        if any(isinstance(s, dict) and key in s for s in sections):
+            continue
+        if all(isinstance(s, dict) for s in sections):
+            stale.append(key)
+        else:
+            unchecked.append(key)
+    return stale, unchecked
+
+
 def _normalize_shapes(shapes: dict) -> list[str]:
     """Normalize type-annotation strings in *shapes* in-place.
 
@@ -1038,7 +1090,7 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
     base: dict = {}
     if target.is_file():
         base = json.loads(target.read_text())
-        print(f"[merge] base: {target} ({len(base)} tool(s))", file=sys.stderr)
+        print(f"[merge] base: {target} ({len(base)} entry(ies))", file=sys.stderr)
 
     part_skeletons = [json.loads(p.read_text()) for p in parts]
     merged = codegen.merge_skeletons([base] + part_skeletons)
@@ -1077,7 +1129,7 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
         merged, scrubbed_tools = codegen.scrub_skeletons(merged)
         if scrubbed_tools:
             print(
-                f"[merge] scrubbed probed_args for {len(scrubbed_tools)} tool(s): {', '.join(scrubbed_tools)}",
+                f"[merge] scrubbed probed_args for {len(scrubbed_tools)} entry(ies):{', '.join(scrubbed_tools)}",
                 file=sys.stderr,
             )
             print(
@@ -1086,12 +1138,12 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
             )
 
     _atomic_write_text(target, json.dumps(merged, indent=2) + "\n")
-    print(f"[merge] wrote {target} ({len(merged)} tool(s))", file=sys.stderr)
+    print(f"[merge] wrote {target} ({len(merged)} entry(ies))", file=sys.stderr)
 
     if verify_map:
         _atomic_write_text(verify_target, json.dumps(verify_map, indent=2) + "\n")
         print(
-            f"[merge] wrote {verify_target} ({len(verify_map)} tool(s))"
+            f"[merge] wrote {verify_target} ({len(verify_map)} entry(ies))"
             " — ⚠  raw args/PII, git-ignored (verify sidecar)",
             file=sys.stderr,
         )
@@ -1100,8 +1152,8 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
         verify_target.unlink()
         print(f"[merge] removed {verify_target} (all entries stale)", file=sys.stderr)
 
-    # Stale-entry advisory.  Merge is offline by contract — it makes no
-    # tools/list call — so it cannot know the server's current tool set.  It
+    # Stale-entry advisory.  Merge is offline by contract — it makes no list
+    # calls — so it cannot know the server's current inventory.  It
     # cross-checks entries that were carried forward unprobed against the last
     # recorded manifest instead, and only warns: dropping on this evidence
     # would silently delete hand-edited shape specs.
@@ -1109,23 +1161,20 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
     carried = sorted(set(merged) - probed_now)
     if carried:
         manifest_p = _merge_manifest_path(ns, target)
-        manifest_tools: set[str] | None = None
+        manifest_doc: Any = None
         manifest_name = ""
         if manifest_p is not None and manifest_p.is_file():
             manifest_name = manifest_p.name
             try:
-                doc = json.loads(manifest_p.read_text())
-                tools_obj = doc.get("tools")
-                if isinstance(tools_obj, dict):
-                    manifest_tools = set(tools_obj)
+                manifest_doc = json.loads(manifest_p.read_text())
             except (OSError, json.JSONDecodeError):
-                manifest_tools = None
-        if manifest_tools is not None:
-            stale = [t for t in carried if t not in manifest_tools]
+                manifest_doc = None
+        checked = _stale_entries(carried, merged, manifest_doc)
+        if checked is not None:
+            stale, unchecked = checked
             if stale:
                 print(
-                    f"[merge] ⚠  {len(stale)} shapes entry(ies) name tools absent from "
-                    f"{manifest_name}: {', '.join(stale)}",
+                    f"[merge] ⚠  {len(stale)} shapes entry(ies) absent from {manifest_name}: {', '.join(stale)}",
                     file=sys.stderr,
                 )
                 print(
@@ -1133,14 +1182,22 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
                     "Remove them by hand if the server no longer exposes them.",
                     file=sys.stderr,
                 )
+            if unchecked:
+                # Count only, like the no-manifest line below: these are
+                # undetectable, not suspect.
+                print(
+                    f"[merge] {len(unchecked)} resource entry(ies) not checked: "
+                    f"{manifest_name} does not track resources. Run `mcpgen codegen` to record them.",
+                    file=sys.stderr,
+                )
         else:
-            # No manifest: retired tools are undetectable here.  Carrying entries
-            # forward unprobed is the normal partial-re-probe case (re-probing one
-            # tool on a 40-tool server carries 39), so report the count only —
-            # enumerating names would make every partial merge noisy.
+            # No manifest: retired entries are undetectable here.  Carrying
+            # entries forward unprobed is the normal partial-re-probe case
+            # (re-probing one tool on a 40-tool server carries 39), so report the
+            # count only — enumerating names would make every partial merge noisy.
             print(
-                f"[merge] {len(carried)} entry(ies) carried forward unprobed; no tool manifest "
-                "beside the shapes file, so retired tools cannot be detected. "
+                f"[merge] {len(carried)} entry(ies) carried forward unprobed; no inventory manifest "
+                "beside the shapes file, so retired entries cannot be detected. "
                 "Run `mcpgen codegen` to write one.",
                 file=sys.stderr,
             )

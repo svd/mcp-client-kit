@@ -686,10 +686,13 @@ def test_merge_reports_scrubbed_tools_on_stderr(tmp_path, capsys):
 # ── stale-entry advisory ─────────────────────────────────────────────────────
 
 
-def _write_manifest(target: Path, tool_names: list[str]) -> Path:
+def _write_manifest(target: Path, tool_names: list[str], **sections: list[str]) -> Path:
+    """Write a manifest listing *tool_names*; each keyword adds a tracked resource section."""
     stem = target.name[: -len(".shapes.json")]
     manifest = target.with_name(stem + ".mcpgen.json")
-    manifest.write_text(json.dumps({"server": "acme", "tools": {n: {} for n in tool_names}}))
+    doc: dict = {"server": "acme", "tools": {n: {} for n in tool_names}}
+    doc |= {section: {k: {} for k in keys} for section, keys in sections.items()}
+    manifest.write_text(json.dumps(doc))
     return manifest
 
 
@@ -752,6 +755,7 @@ def test_merge_without_manifest_reports_count_not_names(tmp_path, capsys):
     assert "2 entry(ies) carried forward unprobed" in err
     assert "carried_a" not in err, "no per-tool enumeration without a manifest"
     assert "mcpgen codegen" in err, "the advisory must say how to get a manifest"
+    assert "retired entries cannot be detected" in err, "the wording covers resource entries too"
 
 
 def test_merge_ignores_sole_manifest_of_a_different_server(tmp_path, capsys):
@@ -778,3 +782,171 @@ def test_merge_unreadable_manifest_does_not_fail_merge(tmp_path, capsys):
 
     assert rc == 0, "a broken manifest must not break consolidation"
     assert "carried forward unprobed" in capsys.readouterr().err
+
+
+# ── resource entries ─────────────────────────────────────────────────────────
+
+_STATIC = "risk://dictionary"
+_TEMPLATE = "dimension://by-unit-type/{unitType}"
+
+
+def test_merge_preserves_resource_entries_and_verify_by_key(tmp_path, capsys):
+    """URI- and template-keyed entries survive merge with their `kind`, and so do their verify args."""
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({_STATIC: {"kind": "resource", "source": "live", "return_model": "RiskDictionary"}}))
+    (tmp_path / "acme.verify.json").write_text(json.dumps({_STATIC: {"lang": "en"}}))
+    _seed_parts(
+        target,
+        {
+            _TEMPLATE: {"kind": "resource_template", "source": "live", "probed_args": {"unitType": "PROJECT"}},
+            "list_units": {"source": "live", "probed_args": {"limit": 5}},
+        },
+    )
+
+    rc = _cmd_merge(_merge_ns("acme", target))
+
+    assert rc == 0
+    result = json.loads(target.read_text())
+    assert result[_STATIC] == {"kind": "resource", "source": "live", "return_model": "RiskDictionary"}
+    assert result[_TEMPLATE]["kind"] == "resource_template"
+    assert result[_TEMPLATE]["probed_args"] == {"unitType": "PROJECT"}
+    verify = json.loads((tmp_path / "acme.verify.json").read_text())
+    assert verify == {
+        _STATIC: {"lang": "en"},
+        _TEMPLATE: {"unitType": "PROJECT"},
+        "list_units": {"limit": 5},
+    }
+    # Counts cover tool and resource entries alike, so they are not called tools.
+    err = capsys.readouterr().err
+    assert "acme.shapes.json (3 entry(ies))" in err
+    assert "acme.verify.json (3 entry(ies))" in err
+    assert "tool(s)" not in err
+
+
+def test_merge_scrubs_template_probed_args(tmp_path):
+    """Template variables are args like any other: scrubbed in shapes.json, raw in verify.json."""
+    target = tmp_path / "acme.shapes.json"
+    template = "people://by-email/{email}"
+    _seed_parts(
+        target,
+        {template: {"kind": "resource_template", "source": "live", "probed_args": {"email": "ada@example.com"}}},
+    )
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    entry = json.loads(target.read_text())[template]
+    assert entry["probed_args"] == {"email": "<email>"}
+    assert entry["probe_args_scrubbed"] is True
+    assert entry["kind"] == "resource_template"
+    verify = json.loads((tmp_path / "acme.verify.json").read_text())
+    assert verify[template] == {"email": "ada@example.com"}
+
+
+def test_merge_does_not_flag_tracked_resources(tmp_path, capsys):
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(
+        json.dumps(
+            {
+                _STATIC: {"kind": "resource", "source": "live"},
+                _TEMPLATE: {"kind": "resource_template", "source": "live"},
+                "dimension://all": {"source": "live"},  # untagged: checked against both sections
+            }
+        )
+    )
+    _seed_parts(target, {"list_units": {"source": "live"}})
+    _write_manifest(
+        target,
+        ["list_units"],
+        resources=[_STATIC, "dimension://all"],
+        resource_templates=[_TEMPLATE],
+    )
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    err = capsys.readouterr().err
+    assert "absent from" not in err
+    assert "carried forward unprobed" not in err
+    assert "not checked" not in err
+
+
+def test_merge_flags_resource_missing_from_manifest(tmp_path, capsys):
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(
+        json.dumps(
+            {
+                "retired://static": {"kind": "resource", "source": "live"},
+                "retired://tpl/{id}": {"kind": "resource_template", "source": "live"},
+                "retired://untagged": {"source": "live"},
+                _STATIC: {"kind": "resource", "source": "live"},
+            }
+        )
+    )
+    _seed_parts(target, {"list_units": {"source": "live"}})
+    # A static URI listed only among templates is still missing: `kind` picks the section.
+    _write_manifest(target, ["list_units"], resources=[_STATIC], resource_templates=["retired://static"])
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    err = capsys.readouterr().err
+    assert "3 shapes entry(ies)" in err
+    assert "retired://static" in err
+    assert "retired://tpl/{id}" in err
+    assert "retired://untagged" in err
+    assert _STATIC not in err
+    assert "retired://static" in json.loads(target.read_text()), "warn, never drop"
+
+
+def test_merge_skips_resources_in_untracked_sections(tmp_path, capsys):
+    """An absent section means resources were not collected, not that they were retired."""
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(
+        json.dumps(
+            {
+                "absent://static": {"kind": "resource", "source": "live"},
+                "absent://tpl/{id}": {"kind": "resource_template", "source": "live"},
+                # Untagged: could be either kind, and templates are untracked.
+                "absent://untagged": {"source": "live"},
+            }
+        )
+    )
+    _seed_parts(target, {"list_units": {"source": "live"}})
+    _write_manifest(target, ["list_units"], resources=[])
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    err = capsys.readouterr().err
+    assert "1 shapes entry(ies)" in err
+    assert "absent://static" in err, "the tracked resources section still applies"
+    assert "absent://tpl/{id}" not in err
+    assert "absent://untagged" not in err
+    assert "2 resource entry(ies) not checked: acme.mcpgen.json does not track resources" in err
+
+
+def test_merge_retired_colon_named_tool_is_unchecked_while_resources_untracked(tmp_path, capsys):
+    """Known gap: an untagged `:` key missing from `tools` reads as a resource entry.
+
+    With a tools-only manifest it is counted as unchecked, not flagged as retired.
+    """
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"ns:gone": {"source": "live"}}))
+    _seed_parts(target, {"list_units": {"source": "live"}})
+    _write_manifest(target, ["list_units"])
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    err = capsys.readouterr().err
+    assert "absent from" not in err
+    assert "1 resource entry(ies) not checked" in err
+
+
+def test_merge_treats_colon_named_manifest_tool_as_tool(tmp_path, capsys):
+    """A key naming a manifest tool is a tool entry even when it contains `:`."""
+    target = tmp_path / "acme.shapes.json"
+    target.write_text(json.dumps({"ns:search": {"source": "live"}}))
+    _seed_parts(target, {"list_units": {"source": "live"}})
+    # Both resource sections tracked and empty: read as a resource, the key would be flagged.
+    _write_manifest(target, ["list_units", "ns:search"], resources=[], resource_templates=[])
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    assert "absent from" not in capsys.readouterr().err
