@@ -10,6 +10,8 @@ from __future__ import annotations
 import keyword
 import re
 import sys
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 # ── JSON Schema -> Python type ───────────────────────────────────────────────
@@ -98,6 +100,193 @@ def sanitize(name: str) -> str:
     if keyword.iskeyword(s):
         s += "_"
     return s
+
+
+# ── RFC 6570 URI templates ───────────────────────────────────────────────────
+#
+# Levels 1-4 for scalar values only: lists and associative arrays are out of
+# scope, so the explode modifier `*` leaves a scalar unchanged (section 3.2.1).
+# Literals are validated for braces only; any other character outside
+# unreserved/reserved is pct-encoded on expansion (section 3.1) instead of
+# rejected, because server templates are not always strictly conformant.
+# The prefix modifier counts code points of the raw value, so it can split a
+# pct-triplet already present in a `+`/`#` value.
+# Expansion itself lives in the emitted `_EXPAND_URI` source: generated
+# modules and `expand_uri_template` run the same code.
+
+
+class UriTemplateError(ValueError):
+    """A URI template whose expressions do not conform to RFC 6570 section 2."""
+
+
+@dataclass(frozen=True)
+class UriVar:
+    """One varspec of a template expression, keyed by its raw (unsanitized) name."""
+
+    name: str
+    operator: str = ""
+    prefix: int | None = None
+    explode: bool = False
+
+    @property
+    def required(self) -> bool:
+        """Form-style query variables (`?`, `&`) are optional; all others are required."""
+        return self.operator not in ("?", "&")
+
+
+_URI_OPERATORS = "+#./;?&"  # section 2.2 operator characters (level 2 and 3)
+_URI_OP_RESERVED = "=,!@|"  # section 2.2: reserved for future extensions
+_URI_VARCHAR = r"(?:[A-Za-z0-9_]|%[0-9A-Fa-f]{2})"
+# varname, then either a prefix ":" %x31-39 0*3DIGIT or an explode "*" (section 2.4).
+_URI_VARSPEC_RE = re.compile(rf"({_URI_VARCHAR}(?:\.?{_URI_VARCHAR})*)(?::([1-9][0-9]{{0,3}})|(\*))?")
+
+
+def _parse_uri_expression(body: str, template: str) -> tuple[UriVar, ...]:
+    if not body:
+        raise UriTemplateError(f"empty expression in URI template {template!r}")
+    if body[0] in _URI_OP_RESERVED:
+        raise UriTemplateError(f"reserved operator {body[0]!r} in URI template {template!r}")
+    op = body[0] if body[0] in _URI_OPERATORS else ""
+    out: list[UriVar] = []
+    for spec in body[len(op) :].split(","):
+        m = _URI_VARSPEC_RE.fullmatch(spec)
+        if not m:
+            raise UriTemplateError(f"invalid varspec {spec!r} in URI template {template!r}")
+        out.append(UriVar(m.group(1), op, int(m.group(2)) if m.group(2) else None, bool(m.group(3))))
+    return tuple(out)
+
+
+def parse_uri_template(template: str) -> list[str | tuple[UriVar, ...]]:
+    """Split *template* into literal strings and expressions (tuples of `UriVar`).
+
+    Raises `UriTemplateError` on an unbalanced or nested brace, an empty
+    expression, a reserved operator or an invalid varspec.
+    """
+    parts: list[str | tuple[UriVar, ...]] = []
+    pos = 0
+    while pos < len(template):
+        start = template.find("{", pos)
+        literal = template[pos:] if start < 0 else template[pos:start]
+        if "}" in literal:
+            raise UriTemplateError(f"unmatched '}}' in URI template {template!r}")
+        if literal:
+            parts.append(literal)
+        if start < 0:
+            break
+        end = template.find("}", start)
+        if end < 0:
+            raise UriTemplateError(f"unclosed '{{' in URI template {template!r}")
+        body = template[start + 1 : end]
+        if "{" in body:
+            raise UriTemplateError(f"nested '{{' in URI template {template!r}")
+        parts.append(_parse_uri_expression(body, template))
+        pos = end + 1
+    return parts
+
+
+def uri_template_variables(template: str) -> list[tuple[str, bool]]:
+    """Raw variable names in first-use order, each with whether it is required.
+
+    A variable used more than once is required if any use is outside `?`/`&`.
+    """
+    seen: dict[str, bool] = {}
+    for part in parse_uri_template(template):
+        if isinstance(part, str):
+            continue
+        for var in part:
+            seen[var.name] = seen.get(var.name, False) or var.required
+    return list(seen.items())
+
+
+# Emitted once per module when any resource template accessor is rendered, so
+# generated modules expand templates without importing mcpgen.codegen. It skips
+# validation: codegen only emits accessors for templates `parse_uri_template`
+# accepts, and `expand_uri_template` validates before delegating to it.
+# `ops` is RFC 6570 appendix A: operator -> (first, sep, named, ifemp); `+`
+# and `#` also allow reserved characters and pct-triplets.
+_EXPAND_URI = '''def _expand_uri(template: str, values: dict[str, Any]) -> str:
+    """Expand an RFC 6570 URI template (levels 1-4) with scalar values.
+
+    A None value is undefined and is omitted (RFC 6570 section 3.2.1); a bool
+    expands as true/false."""
+    from urllib.parse import quote
+
+    reserved = ":/?#[]@!$&'()*+,;="
+    hexdigits = "0123456789abcdefABCDEF"
+    ops = {
+        "": ("", ",", False, ""),
+        "+": ("", ",", False, ""),
+        "#": ("#", ",", False, ""),
+        ".": (".", ".", False, ""),
+        "/": ("/", "/", False, ""),
+        ";": (";", ";", True, ""),
+        "?": ("?", "&", True, "="),
+        "&": ("&", "&", True, "="),
+    }
+
+    def enc(text: str, allow_reserved: bool) -> str:
+        if not allow_reserved:
+            return quote(text, safe="")
+        out, i = [], 0
+        while i < len(text):
+            if text[i] == "%" and i + 2 < len(text) and text[i + 1] in hexdigits and text[i + 2] in hexdigits:
+                out.append(text[i : i + 3])
+                i += 3
+            else:
+                out.append(quote(text[i], safe=reserved))
+                i += 1
+        return "".join(out)
+
+    out, pos = [], 0
+    while True:
+        start = template.find("{", pos)
+        if start < 0:
+            out.append(enc(template[pos:], True))
+            return "".join(out)
+        end = template.find("}", start)
+        out.append(enc(template[pos:start], True))
+        body = template[start + 1 : end]
+        op = body[0] if body[0] in "+#./;?&" else ""
+        first, sep, named, ifemp = ops[op]
+        allow = op in ("+", "#")
+        items = []
+        for spec in body[len(op) :].split(","):
+            prefix = None
+            if spec.endswith("*"):
+                spec = spec[:-1]
+            elif ":" in spec:
+                spec, n = spec.split(":", 1)
+                prefix = int(n)
+            value = values.get(spec)
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                text = "true" if value else "false"
+            else:
+                text = str(value)
+            if prefix is not None:
+                text = text[:prefix]
+            if named:
+                items.append(spec + ("=" + enc(text, allow) if text else ifemp))
+            else:
+                items.append(enc(text, allow))
+        if items:
+            out.append(first + sep.join(items))
+        pos = end + 1'''
+
+_EXPAND_URI_NS: dict[str, Any] = {"Any": Any}
+exec(compile(_EXPAND_URI, "<mcpgen.codegen._EXPAND_URI>", "exec"), _EXPAND_URI_NS)
+
+
+def expand_uri_template(template: str, values: Mapping[str, Any]) -> str:
+    """Expand *template* with scalar *values* keyed by raw variable name.
+
+    A missing or `None` value is undefined and is omitted per section 3.2.1; a
+    bool expands as `true`/`false`, any other value as `str(value)`. Raises
+    `UriTemplateError` for a malformed template.
+    """
+    parse_uri_template(template)
+    return _EXPAND_URI_NS["_expand_uri"](template, values)
 
 
 # ── Rendering ────────────────────────────────────────────────────────────────
