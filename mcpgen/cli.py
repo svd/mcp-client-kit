@@ -23,10 +23,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote as _url_quote
 
+import anyio
 from mcp.shared.exceptions import McpError
 
 from . import _bridge, codegen, discovery
 from . import manifest as manifest_mod
+
+if sys.version_info < (3, 11):  # pragma: no cover - version-gated
+    from exceptiongroup import BaseExceptionGroup
 
 
 async def _list_tools(
@@ -79,20 +83,47 @@ async def _list_tools(
 
 INVENTORY_SCOPES = ("all", "templates", "none")
 
+PREVIEW_TIMEOUT = 10.0
+"""Seconds a non-strict ``_list_inventory`` waits for its resource requests.
+
+Bounds the ``resources/list`` / ``resources/templates/list`` round trips only:
+opening the session, ``tools/list`` and closing the session (on HTTP, a DELETE
+under httpx's own 30s timeout) are outside it.
+"""
+
+
+class ResourceListingFailed(Exception):
+    """The session failed under a strict ``_list_inventory`` while resources were being listed.
+
+    Raised for a transport failure outside the hook, such as an HTTP 502 on
+    ``resources/list`` failing the transport's per-request task, which would
+    otherwise escape as an ExceptionGroup. The message is already
+    ``_bridge._describe``d; the original is chained as ``__cause__``.
+    """
+
 
 @dataclass
 class Inventory:
     """A server's tools plus, when collected, its resources and resource templates.
 
     ``None`` means "not collected" (manifest: untracked, never compared); ``[]``
-    means collected and empty. ``resource_error`` is set only by a non-strict
-    ``_list_inventory`` whose resource listing failed.
+    means collected and empty. The remaining fields are set only by a non-strict
+    ``_list_inventory``: ``*_truncated`` when the server offered pages beyond the
+    first, and ``resource_error`` when the resource listing failed or timed out.
     """
 
     tools: list[dict]
     resources: list[dict] | None = None
     templates: list[dict] | None = None
-    resource_error: McpError | ValueError | None = None
+    resources_truncated: bool = False
+    templates_truncated: bool = False
+    resource_error: BaseException | None = None
+
+
+def _leaves(exc: BaseException) -> list[BaseException]:
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for inner in exc.exceptions for leaf in _leaves(inner)]
+    return [exc]
 
 
 async def _list_inventory(server: str, *, scope: str, strict: bool = True, **conn: Any) -> Inventory:
@@ -105,26 +136,79 @@ async def _list_inventory(server: str, *, scope: str, strict: bool = True, **con
     Goes through the module-global ``_list_tools``, so a test that patches it
     never runs the hook and gets ``resources=None, templates=None``.
 
-    A resource-listing ``McpError``/``ValueError`` (pydantic validation, a
-    pagination fault) is caught inside the session and re-raised after it closes,
-    so it surfaces as itself rather than inside the transport's ExceptionGroup.
-    With ``strict=False`` it is recorded on ``resource_error`` instead, and the
-    tools are still returned.
+    Strict (the default) lists every page. Non-strict is for a hint and must
+    never cost the tools listing: it reads only the first page of each list and
+    gives up on the resource requests after ``PREVIEW_TIMEOUT`` seconds.
+
+    How a resource failure surfaces depends on where it happens:
+
+    - ``McpError`` / ``ValueError`` from the listing (an error response,
+      pydantic validation, a pagination fault) is caught inside the hook. Strict
+      re-raises it after the session closes, so it surfaces as itself rather
+      than inside the transport's ExceptionGroup; non-strict records it on
+      ``resource_error``.
+    - A transport failure: the hook is cancelled from outside (an HTTP 502 fails
+      the transport's per-request task, whose task group then cancels the
+      session body) or sees ``anyio.BrokenResourceError`` /
+      ``ClosedResourceError``. Strict raises ``ResourceListingFailed``;
+      non-strict records it and lists the tools again in a fresh session
+      without the hook.
+    - If every leaf of the failure is ``ReauthenticationRequired`` /
+      ``LoginWontHelp``, that leaf is raised in both modes, for ``main()``'s
+      auth handler.
+    - Anything else the hook raises is a bug and propagates, as do interrupts, a
+      failure before the hook ran (a tools failure), and a failure while
+      closing the session after the hook finished (which fails a tools-only
+      listing just the same; the resources are not reported as unlisted).
     """
     if scope not in INVENTORY_SCOPES:
         raise ValueError(f"unknown resource scope {scope!r}; expected one of {', '.join(INVENTORY_SCOPES)}")
     inv = Inventory(tools=[])
+    # How the hook ended: None (never ran), "finished", "raised", or "transport"
+    # (cancelled from outside, or a broken/closed stream inside).
+    hook_outcome: str | None = None
 
     async def _collect(s: Any) -> None:
+        nonlocal hook_outcome
+        hook_outcome = "raised"
+        statics = scope == "all"
         try:
-            resources, templates = await _bridge.list_resource_inventory(s, statics=scope == "all")
+            if strict:
+                resources, templates = await _bridge.list_resource_inventory(s, statics=statics)
+            else:
+                with anyio.move_on_after(PREVIEW_TIMEOUT) as deadline:
+                    preview = await _bridge.preview_resource_inventory(s, statics=statics)
+                if deadline.cancelled_caught:
+                    inv.resource_error = TimeoutError(f"no answer within {PREVIEW_TIMEOUT:g}s")
+                    hook_outcome = "finished"
+                    return
+                resources, inv.resources_truncated, templates, inv.templates_truncated = preview
         except (McpError, ValueError) as exc:
             inv.resource_error = exc
+            hook_outcome = "finished"
             return
-        inv.resources = resources if scope == "all" else None
+        except (anyio.BrokenResourceError, anyio.ClosedResourceError, anyio.get_cancelled_exc_class()):
+            # Our own deadline is absorbed by move_on_after above, so a
+            # cancellation reaching here was requested from outside the hook.
+            hook_outcome = "transport"
+            raise
+        inv.resources = resources if statics else None
         inv.templates = templates
+        hook_outcome = "finished"
 
-    inv.tools = await _list_tools(server, on_session=None if scope == "none" else _collect, **conn)
+    try:
+        inv.tools = await _list_tools(server, on_session=None if scope == "none" else _collect, **conn)
+    except BaseException as exc:
+        if hook_outcome is None or _bridge._carries_interrupt(exc):
+            raise
+        leaves = _leaves(exc)
+        if all(isinstance(leaf, (_bridge.ReauthenticationRequired, _bridge.LoginWontHelp)) for leaf in leaves):
+            raise leaves[0] from exc
+        if hook_outcome != "transport":
+            raise
+        if strict:
+            raise ResourceListingFailed(f"could not list resources: {_bridge._describe(exc)}") from exc
+        inv = Inventory(tools=await _list_tools(server, on_session=None, **conn), resource_error=exc)
     if strict and inv.resource_error is not None:
         raise inv.resource_error
     return inv
@@ -807,8 +891,25 @@ def _cmd_discover(ns: argparse.Namespace) -> int:
     return 0
 
 
+# Fields `list --resources` prints per entry, in this order. Everything else the
+# server sends is dropped: `icons[].src` may be a whole data: URI, and `_meta` /
+# `annotations` / vendor extras are not part of the inventory mcpgen acts on.
+_LISTED_RESOURCE_FIELDS = ("uri", "name", "title", "description", "mimeType", "size")
+_LISTED_TEMPLATE_FIELDS = ("uriTemplate", "name", "title", "description", "mimeType")
+
+
+def _pick(entry: dict, fields: tuple[str, ...]) -> dict:
+    return {key: entry[key] for key in fields if key in entry}
+
+
 def _cmd_list(ns: argparse.Namespace) -> int:
-    """Print the tool inventory as JSON [{name, description}] for a server."""
+    """Print the tool inventory as JSON [{name, description}] for a server.
+
+    With --resources, print {"resources": [...], "resourceTemplates": [...]}
+    instead. Without it, the first page of each resource list is read in the
+    same session, non-strict, only to print a stderr hint when the server has
+    any; a resource failure there becomes a stderr note, never a failed `list`.
+    """
     cmd = getattr(ns, "stdio", None)
     conn = dict(
         url=ns.url,
@@ -819,11 +920,25 @@ def _cmd_list(ns: argparse.Namespace) -> int:
         creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
+    want_resources = getattr(ns, "resources", False)
     try:
-        tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
-    except (FileNotFoundError, ValueError) as exc:
+        inv = asyncio.run(_list_inventory(ns.server, scope="all", strict=want_resources, cmd=cmd, **conn))
+    except ResourceListingFailed as exc:
         print(f"[list] error: {exc}", file=sys.stderr)
         return 1
+    except (FileNotFoundError, ValueError, McpError) as exc:
+        print(f"[list] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+
+    if want_resources:
+        payload = {
+            "resources": [_pick(r, _LISTED_RESOURCE_FIELDS) for r in inv.resources or []],
+            "resourceTemplates": [_pick(t, _LISTED_TEMPLATE_FIELDS) for t in inv.templates or []],
+        }
+        sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+        return 0
+
+    tools = inv.tools
 
     def _entry(t: dict) -> dict:
         entry = {"name": t["name"], "description": t.get("description") or ""}
@@ -844,6 +959,18 @@ def _cmd_list(ns: argparse.Namespace) -> int:
             print(f"[list]   {param} → {', '.join(tool_names)}", file=sys.stderr)
         print(
             "[list]   Probe EACH value or use a base model — do NOT type from one probe. See SKILL step 4.",
+            file=sys.stderr,
+        )
+
+    if inv.resource_error is not None:
+        print(f"[list] note: could not list resources: {_bridge._describe(inv.resource_error)}", file=sys.stderr)
+    elif inv.resources or inv.templates or inv.resources_truncated or inv.templates_truncated:
+        # Counts come from the first page only; "N+" marks a list with more pages.
+        n_resources = f"{len(inv.resources or [])}{'+' if inv.resources_truncated else ''}"
+        n_templates = f"{len(inv.templates or [])}{'+' if inv.templates_truncated else ''}"
+        print(
+            f"[list] {n_resources} resource(s) and {n_templates} resource template(s) available; "
+            "re-run with `--resources` to list them",
             file=sys.stderr,
         )
 
@@ -1234,9 +1361,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     mg.set_defaults(func=_cmd_merge)
 
-    ls = sub.add_parser("list", help="list tools for a server as JSON [{name, description}]")
+    ls = sub.add_parser(
+        "list",
+        help="list tools for a server as JSON [{name, description}]; with --resources, its resources instead",
+    )
     ls.add_argument("server", help="server name (e.g. acme) or URL")
     ls.add_argument("--schema", action="store_true", help="include raw inputSchema JSON per tool")
+    ls.add_argument(
+        "--resources",
+        action="store_true",
+        help='print resources and resource templates as JSON {"resources": [...], "resourceTemplates": [...]} '
+        "instead of tools (--schema is ignored)",
+    )
     ls.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(ls)
     ls.set_defaults(func=_cmd_list)

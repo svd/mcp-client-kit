@@ -5,26 +5,30 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
+import httpx
 import pytest
 from mcp import types as mcp_types
 from mcp.shared.exceptions import McpError
 
-from mcpgen.cli import Inventory, _cmd_list, _list_inventory, _list_tools
+from mcpgen import _bridge
+from mcpgen.cli import Inventory, _cmd_list, _list_inventory, _list_tools, main
 
 if sys.version_info < (3, 11):
-    from exceptiongroup import ExceptionGroup
+    from exceptiongroup import BaseExceptionGroup, ExceptionGroup
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
-def _ns(server: str, schema: bool = False) -> SimpleNamespace:
+def _ns(server: str, schema: bool = False, **extra) -> SimpleNamespace:
     return SimpleNamespace(
         server=server,
         schema=schema,
+        **extra,
         stdio=None,
         url=None,
         bearer=None,
@@ -296,27 +300,49 @@ def test_list_handles_list_tools_error(capsys):
 class _FakeSessions:
     """A `_bridge.session` stand-in that counts opens and tracks whether one is live.
 
-    Like the anyio task groups inside the real transports, it re-raises an exception
-    escaping the session body wrapped in an ExceptionGroup.
+    Like the real transports, it runs the session body inside an anyio task group,
+    so an exception escaping the body arrives wrapped in an ExceptionGroup.
+    `kill(exc)` fails the session from a sibling task, as a transport's request
+    task does on an HTTP 502: the body sees only a cancellation. `close_with` is
+    raised once the task group has exited, as a failing session close.
     """
 
     def __init__(self, tools=(), capabilities=None):
         self.opened = 0
         self.live = False
+        self.close_with: BaseException | None = None
         self.session = MagicMock()
         self.session.list_tools = AsyncMock(return_value=MagicMock(tools=list(tools)))
         self.session.get_server_capabilities = MagicMock(return_value=capabilities)
+        self._tg = None
 
     @asynccontextmanager
     async def __call__(self, server, **kwargs):
         self.opened += 1
         self.live = True
         try:
-            yield self.session
-        except Exception as exc:
-            raise ExceptionGroup("unhandled errors in a TaskGroup", [exc]) from None
+            async with anyio.create_task_group() as tg:
+                self._tg = tg
+                yield self.session
+            if self.close_with is not None:
+                raise self.close_with
         finally:
             self.live = False
+
+    def kill(self, exc: BaseException) -> None:
+        async def request_task():
+            raise exc
+
+        self._tg.start_soon(request_task)
+
+    def killing(self, exc: BaseException):
+        """A resource lister/preview whose request fails the session from a sibling task."""
+
+        async def lister(s, **kwargs):
+            self.kill(exc)
+            await anyio.sleep_forever()
+
+        return lister
 
 
 RESOURCES = [{"uri": "risk://dictionary", "name": "risk_dictionary", "mimeType": "application/json"}]
@@ -452,7 +478,7 @@ def test_list_inventory_non_strict_keeps_tools_and_records_error():
 
     with (
         patch("mcpgen.cli._bridge.session", fake),
-        patch("mcpgen.cli._bridge.list_resource_inventory", AsyncMock(side_effect=exc)),
+        patch("mcpgen.cli._bridge.preview_resource_inventory", AsyncMock(side_effect=exc)),
     ):
         inv = asyncio.run(_list_inventory("acme", scope="all", strict=False))
 
@@ -460,3 +486,374 @@ def test_list_inventory_non_strict_keeps_tools_and_records_error():
     assert inv.resources is None
     assert inv.templates is None
     assert inv.resource_error is exc
+
+
+# ── list --resources ──────────────────────────────────────────────────────────
+
+LISTED_RESOURCES = [
+    {
+        "uri": "risk://dictionary",
+        "name": "risk_dictionary",
+        "title": "Risk dictionary",
+        "description": "Read this before calling upsert_unit_risk",
+        "mimeType": "application/json",
+        "size": 2048,
+        "icons": [{"src": "data:image/png;base64," + "A" * 64}],
+        "annotations": {"audience": ["assistant"]},
+        "_meta": {"vendor": "x"},
+        "vendorExtra": 1,
+    },
+    {"uri": "dimension://all", "name": "dimensions"},
+]
+LISTED_TEMPLATES = [
+    {
+        "uriTemplate": "dimension://by-unit-type/{unitType}",
+        "name": "by_unit_type",
+        "description": "Dimensions for one unit type",
+        "mimeType": "application/json",
+        "icons": [{"src": "https://example.com/i.png"}],
+        "_meta": {"vendor": "x"},
+    }
+]
+
+
+def _run_list(ns_or_argv, *, lister=None, preview=None, tools=(), capabilities=None, fake=None):
+    """Run `list` over a fake session (*fake*, or a new one from *tools*/*capabilities*).
+
+    *lister* replaces the bridge's full resource listing (`--resources`), *preview*
+    its first-page preview (plain `list`); either left None runs the real one.
+    """
+    fake = fake or _FakeSessions(tools=tools, capabilities=capabilities)
+    run = main if isinstance(ns_or_argv, list) else _cmd_list
+    with ExitStack() as stack:
+        stack.enter_context(patch("mcpgen.cli._bridge.session", fake))
+        if lister is not None:
+            stack.enter_context(patch("mcpgen.cli._bridge.list_resource_inventory", lister))
+        if preview is not None:
+            stack.enter_context(patch("mcpgen.cli._bridge.preview_resource_inventory", preview))
+        return run(ns_or_argv), fake
+
+
+def test_list_resources_prints_resource_inventory_json(capsys):
+    lister = AsyncMock(return_value=(LISTED_RESOURCES, LISTED_TEMPLATES))
+
+    rc, fake = _run_list(_ns("acme", resources=True), lister=lister, tools=[_mock_tool("whoami", "Who")])
+
+    assert rc == 0
+    assert fake.opened == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "resources": [
+            {
+                "uri": "risk://dictionary",
+                "name": "risk_dictionary",
+                "title": "Risk dictionary",
+                "description": "Read this before calling upsert_unit_risk",
+                "mimeType": "application/json",
+                "size": 2048,
+            },
+            {"uri": "dimension://all", "name": "dimensions"},
+        ],
+        "resourceTemplates": [
+            {
+                "uriTemplate": "dimension://by-unit-type/{unitType}",
+                "name": "by_unit_type",
+                "description": "Dimensions for one unit type",
+                "mimeType": "application/json",
+            }
+        ],
+    }
+
+
+def test_list_resources_without_capability_prints_empty_lists(capsys):
+    rc, fake = _run_list(
+        _ns("acme", resources=True),
+        capabilities=mcp_types.ServerCapabilities(),
+    )
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {"resources": [], "resourceTemplates": []}
+    fake.session.list_resources.assert_not_called()
+
+
+def test_list_default_output_unchanged_plus_hint(capsys):
+    tools = [_mock_tool("whoami", "Who am I"), _mock_tool("get_user", "Get user")]
+    preview = AsyncMock(return_value=(LISTED_RESOURCES, False, LISTED_TEMPLATES, False))
+
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock) as baseline:
+        baseline.return_value = [
+            {"name": "whoami", "description": "Who am I", "inputSchema": {}, "annotations": None},
+            {"name": "get_user", "description": "Get user", "inputSchema": {}, "annotations": None},
+        ]
+        _cmd_list(_ns("acme"))
+    expected = capsys.readouterr()
+
+    rc, fake = _run_list(_ns("acme"), preview=preview, tools=tools)
+
+    assert rc == 0
+    assert fake.opened == 1
+    preview.assert_awaited_once_with(fake.session, statics=True)
+    got = capsys.readouterr()
+    assert got.out == expected.out
+    assert expected.err == ""
+    assert got.err == (
+        "[list] 2 resource(s) and 1 resource template(s) available; re-run with `--resources` to list them\n"
+    )
+
+
+def test_list_default_hint_marks_a_truncated_first_page(capsys):
+    """Plain `list` reads one page per list; a further page shows as "N+"."""
+    fake = _FakeSessions(
+        tools=[_mock_tool("whoami", "Who am I")],
+        capabilities=mcp_types.ServerCapabilities(resources=mcp_types.ResourcesCapability()),
+    )
+    fake.session.list_resources = AsyncMock(
+        return_value=mcp_types.ListResourcesResult(
+            resources=[mcp_types.Resource(uri="demo://a", name="a"), mcp_types.Resource(uri="demo://b", name="b")],
+            nextCursor="page-2",
+        )
+    )
+    fake.session.list_resource_templates = AsyncMock(
+        return_value=mcp_types.ListResourceTemplatesResult(
+            resourceTemplates=[mcp_types.ResourceTemplate(uriTemplate="demo://t/{x}", name="t")]
+        )
+    )
+
+    with patch("mcpgen.cli._bridge.session", fake):
+        rc = _cmd_list(_ns("acme"))
+
+    assert rc == 0
+    fake.session.list_resources.assert_awaited_once_with(params=None)
+    assert capsys.readouterr().err == (
+        "[list] 2+ resource(s) and 1 resource template(s) available; re-run with `--resources` to list them\n"
+    )
+
+
+def test_list_default_without_capability_has_no_hint(capsys):
+    rc, _ = _run_list(
+        _ns("acme"),
+        tools=[_mock_tool("whoami", "Who am I")],
+        capabilities=mcp_types.ServerCapabilities(),
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == [{"name": "whoami", "description": "Who am I"}]
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [McpError(mcp_types.ErrorData(code=-32603, message="resources exploded")), ValueError("resources exploded")],
+)
+def test_list_resources_listing_error_exits_1_without_traceback(capsys, exc):
+    rc, _ = _run_list(_ns("acme", resources=True), lister=AsyncMock(side_effect=exc))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[list] error: " in captured.err
+    assert "resources exploded" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_list_default_survives_resource_listing_error(capsys):
+    exc = McpError(mcp_types.ErrorData(code=-32603, message="resources exploded"))
+
+    rc, fake = _run_list(_ns("acme"), preview=AsyncMock(side_effect=exc), tools=[_mock_tool("whoami", "Who am I")])
+
+    assert rc == 0
+    assert fake.opened == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == [{"name": "whoami", "description": "Who am I"}]
+    assert captured.err == "[list] note: could not list resources: McpError: resources exploded\n"
+
+
+def _http_502() -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://acme.example.com/mcp")
+    return httpx.HTTPStatusError(
+        "Server error '502 Bad Gateway'", request=request, response=httpx.Response(502, request=request)
+    )
+
+
+TRANSPORT_FAULTS = pytest.mark.parametrize(
+    "make_exc", [lambda: RuntimeError("transport died"), _http_502], ids=["runtime", "http502"]
+)
+
+
+@TRANSPORT_FAULTS
+def test_list_default_recovers_tools_when_resources_take_the_session_down(capsys, make_exc):
+    """A request task failing outside the hook cancels it and closes the session;
+    plain `list` lists the tools again in a fresh session and notes the fault."""
+    exc = make_exc()
+    fake = _FakeSessions(tools=[_mock_tool("whoami", "Who am I")])
+
+    rc, _ = _run_list(_ns("acme"), preview=fake.killing(exc), fake=fake)
+
+    assert rc == 0
+    assert fake.opened == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == [{"name": "whoami", "description": "Who am I"}]
+    assert captured.err.startswith(f"[list] note: could not list resources: {type(exc).__name__}: ")
+    assert "Traceback" not in captured.err
+
+
+@TRANSPORT_FAULTS
+def test_list_resources_session_failure_exits_1_without_traceback(capsys, make_exc):
+    exc = make_exc()
+    fake = _FakeSessions()
+
+    rc, _ = _run_list(_ns("acme", resources=True), lister=fake.killing(exc), fake=fake)
+
+    assert rc == 1
+    assert fake.opened == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith(f"[list] error: could not list resources: {type(exc).__name__}: ")
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize("exc_type", [anyio.ClosedResourceError, anyio.BrokenResourceError])
+def test_list_default_recovers_from_a_dead_stream_inside_the_hook(capsys, exc_type):
+    fake = _FakeSessions(tools=[_mock_tool("whoami", "Who am I")])
+
+    rc, _ = _run_list(_ns("acme"), preview=AsyncMock(side_effect=exc_type()), fake=fake)
+
+    assert rc == 0
+    assert fake.opened == 2
+    assert capsys.readouterr().err.startswith(f"[list] note: could not list resources: {exc_type.__name__}")
+
+
+@pytest.mark.parametrize("resources", [False, True], ids=["default", "resources"])
+def test_list_hook_bug_propagates_unrecovered(resources):
+    """A bug in the listing code is not a transport failure: it must traceback."""
+    fake = _FakeSessions(
+        tools=[_mock_tool("whoami", "Who am I")],
+        capabilities=mcp_types.ServerCapabilities(resources=mcp_types.ResourcesCapability()),
+    )
+    fake.session.list_resources = AsyncMock(
+        return_value=mcp_types.ListResourcesResult(resources=[mcp_types.Resource(uri="demo://a", name="a")])
+    )
+
+    with (
+        patch("mcpgen._bridge._dump_listing", side_effect=KeyError("uri")),
+        pytest.raises(ExceptionGroup) as caught,
+    ):
+        _run_list(_ns("acme", resources=resources), fake=fake)
+
+    assert [type(e) for e in caught.value.exceptions] == [KeyError]
+    assert fake.opened == 1
+
+
+def test_list_close_failure_after_the_hook_finished_propagates():
+    """Resources were listed; a failing close fails `list` as it would a tools-only listing."""
+    fake = _FakeSessions(tools=[_mock_tool("whoami", "Who am I")])
+    fake.close_with = ExceptionGroup("unhandled errors in a TaskGroup", [RuntimeError("close failed")])
+    preview = AsyncMock(return_value=(RESOURCES, False, TEMPLATES, False))
+
+    with pytest.raises(ExceptionGroup, match="unhandled errors"):
+        _run_list(_ns("acme"), preview=preview, fake=fake)
+
+    assert fake.opened == 1
+
+
+@pytest.mark.parametrize("argv", [["list", "acme"], ["list", "acme", "--resources"]], ids=["default", "resources"])
+def test_list_auth_failure_mid_session_reaches_main_handler(capsys, argv):
+    fake = _FakeSessions(tools=[_mock_tool("whoami", "Who am I")])
+    lister = fake.killing(_bridge.ReauthenticationRequired("credential is dead. Run: mcpgen login acme"))
+
+    rc, _ = _run_list(argv, lister=lister, preview=lister, fake=fake)
+
+    assert rc == 1
+    assert fake.opened == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "[mcpgen] error: credential is dead. Run: mcpgen login acme\n"
+
+
+def test_list_default_hint_on_an_empty_truncated_first_page(capsys):
+    preview = AsyncMock(return_value=([], True, [], False))
+
+    rc, _ = _run_list(_ns("acme"), preview=preview, tools=[_mock_tool("whoami", "Who am I")])
+
+    assert rc == 0
+    assert capsys.readouterr().err == (
+        "[list] 0+ resource(s) and 0 resource template(s) available; re-run with `--resources` to list them\n"
+    )
+
+
+def test_list_default_times_out_on_a_silent_resources_list(capsys):
+    async def never_answers(s, **kwargs):
+        await asyncio.sleep(30)
+
+    with patch("mcpgen.cli.PREVIEW_TIMEOUT", 0.05):
+        rc, fake = _run_list(_ns("acme"), preview=never_answers, tools=[_mock_tool("whoami", "Who am I")])
+
+    assert rc == 0
+    assert fake.opened == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == [{"name": "whoami", "description": "Who am I"}]
+    assert captured.err == "[list] note: could not list resources: TimeoutError: no answer within 0.05s\n"
+
+
+def test_list_inventory_tools_failure_before_hook_propagates():
+    """Only a failure after the hook started is a resource failure worth recovering from."""
+    fake = _FakeSessions()
+    fake.session.list_tools = AsyncMock(side_effect=RuntimeError("tools/list died"))
+    preview = AsyncMock()
+
+    with (
+        patch("mcpgen.cli._bridge.session", fake),
+        patch("mcpgen.cli._bridge.preview_resource_inventory", preview),
+        pytest.raises(ExceptionGroup),
+    ):
+        asyncio.run(_list_inventory("acme", scope="all", strict=False))
+
+    assert fake.opened == 1
+    preview.assert_not_awaited()
+
+
+def test_list_inventory_interrupt_is_not_recovered():
+    fake = _FakeSessions(tools=[_mock_tool("whoami", "Who am I")])
+
+    with (
+        patch("mcpgen.cli._bridge.session", fake),
+        patch("mcpgen.cli._bridge.preview_resource_inventory", AsyncMock(side_effect=KeyboardInterrupt)),
+        pytest.raises(BaseExceptionGroup) as caught,
+    ):
+        asyncio.run(_list_inventory("acme", scope="all", strict=False))
+
+    assert [type(e) for e in caught.value.exceptions] == [KeyboardInterrupt]
+    assert fake.opened == 1
+
+
+def test_list_inventory_grouped_interrupt_from_outside_is_not_recovered():
+    """Real anyio delivers Ctrl-C as BaseExceptionGroup([KeyboardInterrupt]) after
+    cancelling the body; that is an interrupt, not a transport failure."""
+    fake = _FakeSessions(tools=[_mock_tool("whoami", "Who am I")])
+
+    async def interrupted(s, **kwargs):
+        fake.close_with = BaseExceptionGroup("unhandled errors in a TaskGroup", [KeyboardInterrupt()])
+        fake._tg.cancel_scope.cancel()
+        await anyio.sleep_forever()
+
+    with (
+        patch("mcpgen.cli._bridge.session", fake),
+        patch("mcpgen.cli._bridge.preview_resource_inventory", interrupted),
+        pytest.raises(BaseExceptionGroup) as caught,
+    ):
+        asyncio.run(_list_inventory("acme", scope="all", strict=False))
+
+    assert [type(e) for e in caught.value.exceptions] == [KeyboardInterrupt]
+    assert fake.opened == 1
+
+
+def test_list_resources_flag_is_wired(capsys):
+    lister = AsyncMock(return_value=(LISTED_RESOURCES[1:], []))
+
+    rc, _ = _run_list(["list", "acme", "--resources"], lister=lister)
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "resources": [{"uri": "dimension://all", "name": "dimensions"}],
+        "resourceTemplates": [],
+    }

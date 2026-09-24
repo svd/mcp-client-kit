@@ -4726,6 +4726,7 @@ def _fake_session_factory(captured: dict):
         captured.update(kwargs)
         s = MagicMock()
         s.list_tools = AsyncMock(return_value=MagicMock(tools=[]))
+        s.get_server_capabilities = MagicMock(return_value=None)
         yield s
 
     return fake_session
@@ -5676,6 +5677,34 @@ def test_inventory_statics_false_sends_no_resources_list():
     assert resources == []
     assert [t["uriTemplate"] for t in templates] == ["demo://t/{x}"]
     assert s.requests == [("resources/templates/list", None)]
+
+
+def test_preview_reads_only_the_first_page_of_each_list():
+    s = _ListingSession(
+        resource_pages={None: ([_res("Demo://a")], "c1"), "c1": ([_res("demo://b")], None)},
+        template_pages={None: ([_tpl("demo://t/{x}")], None)},
+    )
+    resources, more_resources, templates, more_templates = asyncio.run(_bridge.preview_resource_inventory(s))
+    assert [r["uri"] for r in resources] == ["demo://a"]
+    assert more_resources is True
+    assert [t["uriTemplate"] for t in templates] == ["demo://t/{x}"]
+    assert more_templates is False
+    assert s.requests == [("resources/list", None), ("resources/templates/list", None)]
+
+
+def test_preview_statics_false_and_no_capability():
+    s = _ListingSession(template_pages={None: ([_tpl("demo://t/{x}")], "t1")})
+    assert asyncio.run(_bridge.preview_resource_inventory(s, statics=False))[:2] == ([], False)
+    assert s.requests == [("resources/templates/list", None)]
+
+    bare = _ListingSession(resources_capability=False)
+    assert asyncio.run(_bridge.preview_resource_inventory(bare)) == ([], False, [], False)
+    assert bare.requests == []
+
+
+def test_preview_treats_templates_method_not_found_as_empty():
+    s = _ListingSession(templates_error=_mcp_error(mcp_types.METHOD_NOT_FOUND))
+    assert asyncio.run(_bridge.preview_resource_inventory(s)) == ([], False, [], False)
 
 
 def test_inventory_returns_plain_dicts():

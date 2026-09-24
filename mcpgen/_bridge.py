@@ -2316,6 +2316,44 @@ def _dump_listing(item: Any) -> dict:
     return item.model_dump(mode="json", exclude_none=True, by_alias=True)
 
 
+async def _every_page(fetch: Callable[..., Awaitable[Any]], field: str) -> tuple[list, bool]:
+    return await _list_all_pages(fetch, field), False
+
+
+async def _first_page(fetch: Callable[..., Awaitable[Any]], field: str) -> tuple[list, bool]:
+    page = await fetch(params=None)
+    return list(getattr(page, field)), bool(page.nextCursor)
+
+
+async def _resource_listing(
+    s: Any,
+    *,
+    statics: bool,
+    pages: Callable[[Callable[..., Awaitable[Any]], str], Awaitable[tuple[list, bool]]],
+) -> tuple[list[dict], bool, list[dict], bool]:
+    """``(resources, more_resources, templates, more_templates)`` read via *pages*.
+
+    Shared body of ``list_resource_inventory`` and ``preview_resource_inventory``;
+    see the former for the capability gate, METHOD_NOT_FOUND and *statics*.
+    """
+    capabilities = s.get_server_capabilities()
+    if capabilities is None or capabilities.resources is None:
+        return [], False, [], False
+    raw_resources, more_resources = await pages(s.list_resources, "resources") if statics else ([], False)
+    resources = []
+    for resource in raw_resources:
+        entry = _dump_listing(resource)
+        entry["uri"] = normalize_resource_uri(str(resource.uri))
+        resources.append(entry)
+    try:
+        raw_templates, more_templates = await pages(s.list_resource_templates, "resourceTemplates")
+    except McpError as exc:
+        if exc.error.code != METHOD_NOT_FOUND:
+            raise
+        raw_templates, more_templates = [], False
+    return resources, more_resources, [_dump_listing(t) for t in raw_templates], more_templates
+
+
 async def list_resource_inventory(s: Any, *, statics: bool = True) -> tuple[list[dict], list[dict]]:
     """List every resource and resource template on the initialized session *s*.
 
@@ -2336,22 +2374,18 @@ async def list_resource_inventory(s: Any, *, statics: bool = True) -> tuple[list
     resources, for callers that want only the templates of a server that may
     list thousands of static resources.
     """
-    capabilities = s.get_server_capabilities()
-    if capabilities is None or capabilities.resources is None:
-        return [], []
-    raw_resources = await _list_all_pages(s.list_resources, "resources") if statics else []
-    resources = []
-    for resource in raw_resources:
-        entry = _dump_listing(resource)
-        entry["uri"] = normalize_resource_uri(str(resource.uri))
-        resources.append(entry)
-    try:
-        raw_templates = await _list_all_pages(s.list_resource_templates, "resourceTemplates")
-    except McpError as exc:
-        if exc.error.code != METHOD_NOT_FOUND:
-            raise
-        raw_templates = []
-    return resources, [_dump_listing(t) for t in raw_templates]
+    resources, _, templates, _ = await _resource_listing(s, statics=statics, pages=_every_page)
+    return resources, templates
+
+
+async def preview_resource_inventory(s: Any, *, statics: bool = True) -> tuple[list[dict], bool, list[dict], bool]:
+    """First page of each listing: ``(resources, more_resources, templates, more_templates)``.
+
+    One request per list at most, no cursor followed: a ``more_*`` flag is True
+    when the server offered a further page. Entries, the capability gate,
+    METHOD_NOT_FOUND and *statics* are as in ``list_resource_inventory``.
+    """
+    return await _resource_listing(s, statics=statics, pages=_first_page)
 
 
 # ---------------------------------------------------------------------------
