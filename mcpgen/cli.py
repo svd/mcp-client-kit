@@ -28,7 +28,7 @@ from urllib.parse import quote as _url_quote
 
 import anyio
 from mcp.shared.exceptions import McpError
-from mcp.types import ReadResourceResult, TextResourceContents
+from mcp.types import CallToolResult, EmbeddedResource, ReadResourceResult, TextContent, TextResourceContents
 
 from . import _bridge, codegen, discovery
 from . import manifest as manifest_mod
@@ -159,6 +159,59 @@ def _check_reportable(group: BaseExceptionGroup) -> None:
         raise group
 
 
+class ToolReportedError(Exception):
+    """A ``tools/call`` result flagged ``isError``: the tool ran and reported a failure.
+
+    The protocol carries a tool's own failure in the result rather than as a JSON-RPC
+    error, so ``McpBridgeCaller.call`` returns it like an answer. ``probe`` and
+    ``codegen --probe`` must not record its shape; ``call`` still writes it.
+    *result* is the unparsed result, which may have no content at all, and
+    ``excerpt`` its text for a one-line report (see ``_tool_error_excerpt``).
+    """
+
+    def __init__(self, result: CallToolResult) -> None:
+        self.result = result
+        self.excerpt = _tool_error_excerpt(result)
+        super().__init__(self.excerpt)
+
+
+TOOL_ERROR_EXCERPT = 300
+"""Characters of an ``isError`` result's text that ``probe``, ``codegen`` and ``call`` print."""
+
+
+def _tool_error_excerpt(result: CallToolResult) -> str:
+    """*result*'s text, redacted, whitespace collapsed and cut at ``TOOL_ERROR_EXCERPT`` characters.
+
+    The text is that of its text blocks and embedded text resources, joined. It is
+    server text bound for stderr, so it passes through ``_bridge._redact_secret_text``
+    like every other error line. Only a prefix four times the excerpt is read, so a
+    multi-megabyte body is never split whole. The redaction patterns accept a quoted
+    member cut off at the end of that prefix, except the Python-repr one when the cut
+    falls just after a backslash, so trailing backslashes are stripped first.
+    Collapsing keeps a pretty-printed JSON body on the marker line.
+    """
+    texts = []
+    for item in result.content:
+        if isinstance(item, TextContent):
+            texts.append(item.text)
+        elif isinstance(item, EmbeddedResource) and isinstance(item.resource, TextResourceContents):
+            texts.append(item.resource.text)
+    head = " ".join(texts)[: TOOL_ERROR_EXCERPT * 4].rstrip("\\")
+    text = " ".join(_bridge._redact_secret_text(head, pydantic_frames=False).split())
+    if not text:
+        return "(no text content)"
+    if len(text) > TOOL_ERROR_EXCERPT:
+        return text[:TOOL_ERROR_EXCERPT] + "…"
+    return text
+
+
+def _tool_payload(result: CallToolResult) -> Any:
+    """*result* parsed as ``McpBridgeCaller.call`` parses it; raises ``ToolReportedError`` when ``isError``."""
+    if result.isError:
+        raise ToolReportedError(result)
+    return _bridge._parse_tool_result(result)
+
+
 CALL_TIMEOUT = 60.0
 """Default seconds ``probe``, ``call`` and ``codegen --probe`` wait for a tool's answer (``--timeout``).
 
@@ -198,11 +251,13 @@ def _call_timeout_of(ns: argparse.Namespace) -> float | None:
 def _report_call_failure(command: str, exc: BaseException, timeout: float | None) -> int:
     """Print why a live call or read for *command* (``probe``, ``call``, ``codegen``) failed; return exit status 1.
 
-    *exc* is an ``McpError``, bare or in the group escaping a one-shot session. A
-    group goes through ``_check_reportable`` first, so interrupts, auth failures
-    and bugs raise instead of printing. *timeout* is the read timeout the call
-    ran under (None for none); when it expired the line names ``--timeout``,
-    otherwise it is ``_bridge._describe(exc)``.
+    *exc* is an ``McpError`` from the call or read itself, which
+    ``call_tool_result`` and ``read_resource`` re-raise bare, or the transport's
+    group escaping a session that failed while opening or closing. A group goes
+    through ``_check_reportable`` first, so interrupts, auth failures and bugs
+    raise instead of printing. *timeout* is the read timeout the call ran under
+    (None for none); when it expired the line names ``--timeout``, otherwise it
+    is ``_bridge._describe(exc)``.
     """
     if isinstance(exc, BaseExceptionGroup):
         _check_reportable(exc)
@@ -321,7 +376,8 @@ async def _probe(
 
     The raw payload is kept so `probe --save-raw` can persist it without a
     second live call against a rate-limited server (see cli `_cmd_probe`).
-    *call_timeout* is ``McpBridgeCaller``'s.
+    *call_timeout* is ``McpBridgeCaller``'s. A result flagged ``isError`` has no
+    shape to observe and raises ``ToolReportedError``.
     """
     caller = _bridge.McpBridgeCaller(
         cmd=cmd,
@@ -334,7 +390,7 @@ async def _probe(
         env=env,
         call_timeout=call_timeout,
     )
-    raw = await caller.call(server, tool, args)
+    raw = _tool_payload(await caller.call_tool_result(server, tool, args))
     size = len(json.dumps(raw, default=str, ensure_ascii=False).encode("utf-8"))
     return codegen.summarize_shape(raw), size, raw
 
@@ -398,6 +454,7 @@ async def _call(
     env: dict[str, str] | None = None,
     call_timeout: float | None = None,
 ) -> Any:
+    """The parsed payload of one live tool call; raises ``ToolReportedError`` when it is flagged ``isError``."""
     caller = _bridge.McpBridgeCaller(
         cmd=cmd,
         url=url,
@@ -409,7 +466,7 @@ async def _call(
         env=env,
         call_timeout=call_timeout,
     )
-    return await caller.call(server, tool, args)
+    return _tool_payload(await caller.call_tool_result(server, tool, args))
 
 
 async def _read_resource(
@@ -867,6 +924,9 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         except (FileNotFoundError, ValueError) as exc:
             print(f"[codegen] error: {exc}", file=sys.stderr)
             return 1
+        except ToolReportedError as exc:
+            print(f"[codegen] tool returned isError: {exc.excerpt}", file=sys.stderr)
+            return 1
         except (McpError, BaseExceptionGroup) as exc:
             return _report_call_failure("codegen", exc, timeout)
         shape_json = json.dumps(shape, indent=2)
@@ -1035,6 +1095,9 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         except (FileNotFoundError, ValueError) as exc:
             print(f"[probe] error: {exc}", file=sys.stderr)
             return 1
+        except ToolReportedError as exc:
+            print(f"[probe] tool returned isError: {exc.excerpt}", file=sys.stderr)
+            return 1
         except (McpError, BaseExceptionGroup) as exc:
             return _report_call_failure("probe", exc, timeout if kind is None else None)
         shapes.append(shape)
@@ -1105,7 +1168,8 @@ def _cmd_call(ns: argparse.Namespace) -> int:
     Use it for bootstrapping (e.g. call a no-arg whoami first to get real ids)
     or inspecting a tool's actual output.  The --out file is required to avoid
     flooding model context with large payloads; use a *.probe-raw.json name
-    so it stays git-ignored.
+    so it stays git-ignored. A result flagged ``isError`` exits 1; see
+    ``_call_tool_error`` for what it writes.
     """
     cmd = getattr(ns, "stdio", None)
     try:
@@ -1127,23 +1191,50 @@ def _cmd_call(ns: argparse.Namespace) -> int:
     print(f"[call] {ns.server}.{ns.tool} (live) …", file=sys.stderr)
     try:
         raw = asyncio.run(_call(ns.server, ns.tool, args, cmd=cmd, call_timeout=timeout, **conn))
+    except ToolReportedError as exc:
+        return _call_tool_error(exc, Path(ns.out))
     except (FileNotFoundError, ValueError) as exc:
         print(f"[call] error: {exc}", file=sys.stderr)
         return 1
     except (McpError, BaseExceptionGroup) as exc:
         return _report_call_failure("call", exc, timeout)
 
-    text = raw if isinstance(raw, str) else json.dumps(raw, indent=2)
-    out = Path(ns.out)
-    _atomic_write_text(out, text + "\n")
+    _write_call_payload(Path(ns.out), _call_payload_text(raw))
+    return 0
 
+
+def _call_payload_text(raw: Any) -> str:
+    """What `call --out` writes for the parsed payload *raw*, before the final newline."""
+    return raw if isinstance(raw, str) else json.dumps(raw, indent=2)
+
+
+def _write_call_payload(out: Path, text: str) -> None:
+    _atomic_write_text(out, text + "\n")
     kb = len(text.encode()) / 1024
     print(f"[call] wrote raw payload ({kb:.1f} KB) to {out}", file=sys.stderr)
     print(
         "[call] ⚠  raw payload may contain real ids/PII — use a *.probe-raw.json name (git-ignored).",
         file=sys.stderr,
     )
-    return 0
+
+
+def _call_tool_error(exc: ToolReportedError, out: Path) -> int:
+    """`call`'s handling of a result flagged ``isError``: write its body to *out*, report, return 1.
+
+    The body is written as a successful payload would be, as evidence. A body that
+    cannot be written that way — no content, text the parse chain rejects (an
+    unhashable ``literal_eval`` key, nesting past the recursion limit) or a parsed
+    value ``json.dumps`` cannot serialise — writes nothing and notes the exception
+    type; the marker still prints.
+    """
+    try:
+        text = _call_payload_text(_bridge._parse_tool_result(exc.result))
+    except (ValueError, TypeError, RecursionError) as unwritable:
+        print(f"[call] note: body not written ({type(unwritable).__name__})", file=sys.stderr)
+    else:
+        _write_call_payload(out, text)
+    print(f"[call] tool returned isError: {exc.excerpt}", file=sys.stderr)
+    return 1
 
 
 def _read_output(result: ReadResourceResult) -> bytes:

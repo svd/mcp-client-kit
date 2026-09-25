@@ -121,6 +121,21 @@ call that mutates may still have taken effect: check before re-issuing it. `code
 takes the same flag. In code, the same value is `call_timeout=` on `McpBridgeCaller`; its
 default, `None`, leaves generated wrappers unbounded.
 
+**A tool that reports failure.** A tool can answer with a result flagged `isError` — MCP's way
+of saying the tool ran and failed (a validation error, a missing entitlement), as opposed to a
+JSON-RPC error. All three commands below print `[<command>] tool returned isError: <text>`,
+where `<text>` is the first 300 characters of the result's text (text blocks and embedded
+text resources), whitespace collapsed and credential-shaped members such as `access_token`
+redacted, and exit `1`. `probe` records no shape for it and writes no part file, `--save-raw`
+file or skeleton. With several `--args`, the first such variant ends the probe like any other
+failure. `codegen --probe` writes no module or manifest. `call` still writes the error body to
+`--out`, unredacted and formatted as a successful payload would be, as evidence; a result with
+no content, or a body that the parse chain or JSON serialisation rejects, writes nothing and
+prints `[call] note: body not written (<exception type>)`. Generated wrappers are unchanged:
+`McpBridgeCaller.call` returns an `isError` result's parsed content like any other, and
+`McpBridgeCaller.call_tool_result` returns the SDK's unparsed `CallToolResult`, `isError`
+included.
+
 **Resources from the CLI.** `list --resources` prints each resource's `uri`, `name`,
 `title`, `description`, `mimeType`, and `size`, and each template's `uriTemplate`, `name`,
 `title`, `description`, and `mimeType`; other fields the server sends are dropped. Plain

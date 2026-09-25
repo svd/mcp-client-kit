@@ -488,3 +488,23 @@ def test_codegen_probe_failure_exits_1_and_writes_nothing(tmp_path, capsys, erro
     assert "Traceback" not in err
     assert not out.exists()
     assert not (tmp_path / "demo.mcpgen.json").exists()
+
+
+def test_codegen_probe_of_an_is_error_result_exits_1_and_writes_nothing(tmp_path, capsys):
+    out = tmp_path / "demo.py"
+    caller = AsyncMock()
+    caller.call_tool_result = AsyncMock(
+        return_value=mcp_types.CallToolResult(
+            content=[mcp_types.TextContent(type="text", text="Error executing tool greet: \n  name is required")],
+            isError=True,
+        )
+    )
+    with (
+        patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=FAKE_TOOLS),
+        patch("mcpgen.cli._bridge.McpBridgeCaller", return_value=caller),
+    ):
+        rc = main(["codegen", "demo", "--out", str(out), "--probe", "greet"])
+    assert rc == 1
+    assert "[codegen] tool returned isError: Error executing tool greet: name is required\n" in capsys.readouterr().err
+    assert not out.exists()
+    assert not (tmp_path / "demo.mcpgen.json").exists()

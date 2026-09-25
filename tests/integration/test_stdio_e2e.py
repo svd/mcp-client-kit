@@ -30,7 +30,7 @@ def test_codegen_produces_importable_module_and_manifest(tmp_path, stdio_cmd):
 
     payload = json.loads((tmp_path / "demo.mcpgen.json").read_text())
     assert payload["server"] == "demo"
-    assert set(payload["tools"]) == {"greet", "add", "list_records", "json_payload", "styled", "hang"}
+    assert set(payload["tools"]) == {"greet", "add", "list_records", "json_payload", "styled", "hang", "refuse"}
     assert "name" in payload["tools"]["greet"]["inputSchema"]["required"]
 
     assert "async def read_demo_config" in source
@@ -253,6 +253,36 @@ def test_probe_of_a_tool_that_never_answers_times_out(tmp_path, stdio_cmd, capsy
     assert not (tmp_path / "demo.shapes.json.parts").exists()
     # 1s of timeout plus server start-up and the SDK's stdio shutdown, with slack for CI.
     assert elapsed < 20
+
+
+def test_probe_of_a_tool_reporting_is_error_records_no_shape(tmp_path, stdio_cmd, capsys):
+    shapes_file = tmp_path / "demo.shapes.json"
+    rc = main(["probe", "demo", "refuse", "--stdio", stdio_cmd, "--emit-shape", str(shapes_file)])
+
+    assert rc == 1
+    assert (
+        '[probe] tool returned isError: Error executing tool refuse: {"code": "validation_error", '
+        '"message": "This feature requires a paid plan."}\n'
+    ) in capsys.readouterr().err
+    assert not (tmp_path / "demo.shapes.json.parts").exists()
+    assert not shapes_file.exists()
+
+
+def test_call_of_a_tool_reporting_is_error_writes_the_body_and_exits_1(tmp_path, stdio_cmd, capsys):
+    out = tmp_path / "demo.probe-raw.json"
+    rc = main(["call", "demo", "refuse", "--stdio", stdio_cmd, "--out", str(out)])
+
+    assert rc == 1
+    assert out.read_text() == (
+        'Error executing tool refuse: {"code": "validation_error", "message": "This feature requires a paid plan."}\n'
+    )
+    assert "[call] tool returned isError: Error executing tool refuse:" in capsys.readouterr().err
+
+
+def test_a_generated_wrapper_still_returns_an_is_error_body(stdio_cmd):
+    """The seam contract is unchanged: ``call()`` parses an isError result like an answer."""
+    text = asyncio.run(McpBridgeCaller(cmd=stdio_cmd).call("demo", "refuse", {}))
+    assert text.startswith("Error executing tool refuse:")
 
 
 def test_old_manifest_without_resource_sections_is_advised_then_tracked(tmp_path, stdio_cmd, capsys):

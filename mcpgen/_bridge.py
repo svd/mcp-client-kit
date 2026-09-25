@@ -66,6 +66,7 @@ from mcp.shared.exceptions import McpError
 from mcp.types import (
     METHOD_NOT_FOUND,
     BlobResourceContents,
+    CallToolResult,
     PaginatedRequestParams,
     ReadResourceResult,
     TextResourceContents,
@@ -2053,7 +2054,8 @@ class McpBridgeCaller:
 
     *call_timeout* bounds each ``tools/call`` round trip, in seconds, through the
     SDK's per-request read timeout. On expiry the SDK raises an ``McpError`` with
-    code 408: bare from ``call()`` inside ``connected()``, but wrapped as
+    code 408: bare from ``call()`` inside ``connected()`` and from
+    ``call_tool_result()``, but wrapped as
     ``ExceptionGroup(ExceptionGroup(McpError))`` from a one-shot ``call()``, since
     it leaves the session's task groups. The server is not told to cancel the
     call (no ``notifications/cancelled``), so the tool may still run to
@@ -2142,8 +2144,25 @@ class McpBridgeCaller:
 
     async def _invoke(self, s: Any, tool: str, arguments: dict) -> Any:
         result = await s.call_tool(tool, arguments, read_timeout_seconds=self._read_timeout)
-        content = [_summarize_content_item(item) for item in result.content]
-        return parse(content)
+        return _parse_tool_result(result)
+
+    async def call_tool_result(self, server: str, tool: str, arguments: dict) -> CallToolResult:
+        """Call *tool* and return the SDK's unparsed ``CallToolResult``, ``isError`` included.
+
+        For callers that must tell a tool's reported failure from its answer, which
+        ``call()`` cannot: it parses an ``isError`` result like any other. Session
+        handling and *call_timeout* are ``call()``'s, except that a call error raised
+        in a one-shot session is re-raised bare once the session has closed (see
+        ``_one_shot``). ``_parse_tool_result`` turns the result into ``call()``'s payload.
+        """
+
+        async def invoke(s: Any) -> CallToolResult:
+            return await s.call_tool(tool, arguments, read_timeout_seconds=self._read_timeout)
+
+        block = self._block
+        if block is None:
+            return await self._one_shot(server, invoke)
+        return await invoke(await block.session_for(server))
 
     async def read_resource(self, server: str, uri: str) -> Any:
         """Read the resource at *uri* and return its parsed contents (see ``parse_resource``)."""
@@ -2192,6 +2211,11 @@ class McpBridgeCaller:
             raise
         assert failure is not None  # the body either returned or captured
         raise failure
+
+
+def _parse_tool_result(result: CallToolResult) -> Any:
+    """The payload ``McpBridgeCaller.call`` returns for *result*, whatever its ``isError``."""
+    return parse([_summarize_content_item(item) for item in result.content])
 
 
 def _summarize_content_item(item: Any) -> dict:

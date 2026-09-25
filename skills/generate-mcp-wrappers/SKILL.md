@@ -515,10 +515,11 @@ barrier stays on main.
    never probe with `'{}'` — call the tool with minimal valid args on the first attempt. For a
    required arg that **references an existing object** (an id, key, or slug), use a real value
    from the recon catalog or a discovery tool: a server that validates existence answers an
-   invented id with an error, and you record an error shape instead of the record. Invent values
-   only for required string args that reference nothing (a free-text query, a label, a title). For
-   GitHub servers, prefer `owner: "microsoft", repo: "vscode"` — real, public, and carrying
-   releases, tags, and issues to observe.
+   invented id with an error, and you record an error shape instead of the record — or, if the
+   tool flags `isError`, the probe fails. Invent values only for required string args that
+   reference nothing (a free-text query, a label, a title). For GitHub servers, prefer
+   `owner: "microsoft", repo: "vscode"` — real, public, and carrying releases, tags, and issues
+   to observe.
 
    **Inspect `inputSchema` for enum constraints.** A param pins its values with an `enum` array,
    a `const`, or an `anyOf`/`oneOf` whose branches each carry a `const` or `enum` (Zod and
@@ -795,9 +796,10 @@ barrier stays on main.
   per-tool `<server>.<tool>.probe-raw.json` naming exists to stop exactly that — and the second
   overwrites the first, leaving only whichever call last succeeded, with nothing in the file to
   say which that was. A failing `call` writes nothing at all, which leaves that call's file
-  either missing or holding an earlier run's payload — and
-  a chain that exited 0 gives you no reason to look. If you must chain, give each call **both**
-  its own `--out` and a per-call status label. (Independent `probe` invocations still batch — see
+  either missing or holding an earlier run's payload — and a chain that exited 0 gives you no
+  reason to look. The one failure that does write is a result the tool flagged `isError`: its
+  body lands in `--out` and `call` still exits 1. If you must chain, give each call **both** its
+  own `--out` and a per-call status label. (Independent `probe` invocations still batch — see
   step 3.)
 
 - **Bound a slow `mcpgen` call with the harness's own timeout, never a `timeout` binary.**

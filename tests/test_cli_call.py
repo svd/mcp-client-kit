@@ -191,7 +191,9 @@ def test_call_timeout_rejects_invalid(tmp_path, bad, capsys):
 
 def test_call_helper_passes_call_timeout_to_the_bridge():
     caller = MagicMock()
-    caller.call = AsyncMock(return_value={"ok": True})
+    caller.call_tool_result = AsyncMock(
+        return_value=mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text='{"ok": true}')])
+    )
 
     with patch("mcpgen.cli._bridge.McpBridgeCaller", return_value=caller) as bridge:
         asyncio.run(_call("acme", "whoami", {}, call_timeout=7.0))
@@ -258,3 +260,116 @@ def test_call_server_sent_408_is_reported_as_an_error_not_a_timeout(tmp_path, ca
     err = capsys.readouterr().err
     assert "[call] error: McpError: upstream took too long" in err
     assert "timeout:" not in err
+
+
+# ── a result flagged isError ──────────────────────────────────────────────────
+
+
+def _bridge_returning(result: mcp_types.CallToolResult) -> MagicMock:
+    """A fake ``McpBridgeCaller`` class whose ``call_tool_result`` answers *result*."""
+    caller = MagicMock()
+    caller.call_tool_result = AsyncMock(return_value=result)
+    return MagicMock(return_value=caller)
+
+
+_ERROR_BODY = {
+    "code": "validation_error",
+    "message": "This feature requires Notion AI.",
+    "additional_data": {"tool_error_class": "entitlement_required"},
+}
+
+
+def test_call_is_error_writes_the_payload_and_exits_1(tmp_path, capsys):
+    """The error body is evidence, so it is written; the exit status says it is not an answer."""
+    out = tmp_path / "notion.probe-raw.json"
+    result = mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=json.dumps(_ERROR_BODY, indent=2))], isError=True
+    )
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(result)):
+        rc = main(["call", "notion", "search", "--out", str(out)])
+
+    assert rc == 1
+    assert json.loads(out.read_text()) == _ERROR_BODY
+    err = capsys.readouterr().err
+    assert (
+        '[call] tool returned isError: { "code": "validation_error", "message": "This feature requires Notion AI.",'
+        in err
+    )
+    assert "Traceback" not in err
+
+
+def test_call_is_error_excerpt_is_cut_at_300_characters(tmp_path, capsys):
+    out = tmp_path / "demo.probe-raw.json"
+    text = "quota\n  exceeded " * 40
+    result = mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=text)], isError=True)
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(result)):
+        rc = _cmd_call(_ns("demo", "search", str(out)))
+
+    assert rc == 1
+    assert out.read_text() == text + "\n"
+    line = next(ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("[call] tool returned isError: "))
+    assert line.removeprefix("[call] tool returned isError: ") == " ".join(text.split())[:300] + "…"
+
+
+def test_call_without_is_error_writes_the_payload_and_exits_0(tmp_path, capsys):
+    out = tmp_path / "acme.probe-raw.json"
+    result = mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=json.dumps(FAKE_DICT))])
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(result)):
+        rc = _cmd_call(_ns("acme", "whoami", str(out)))
+
+    assert rc == 0
+    assert out.read_text() == json.dumps(FAKE_DICT, indent=2) + "\n"
+    assert "isError" not in capsys.readouterr().err
+
+
+def test_call_is_error_without_content_writes_nothing_and_exits_1(tmp_path, capsys):
+    out = tmp_path / "demo.probe-raw.json"
+    result = mcp_types.CallToolResult(content=[], isError=True)
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(result)):
+        rc = _cmd_call(_ns("demo", "search", str(out)))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "[call] tool returned isError: (no text content)" in err
+    assert "[call] note: body not written (ValueError)" in err
+    assert not out.exists()
+
+
+def test_call_is_error_excerpt_redacts_credentials_but_the_file_keeps_the_body(tmp_path, capsys):
+    """stderr is redacted like every error line; --out is the raw payload, as for any call."""
+    out = tmp_path / "demo.probe-raw.json"
+    body = {"error": "bad grant", "access_token": "sk-live-SECRET"}
+    result = mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=json.dumps(body))], isError=True)
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(result)):
+        rc = _cmd_call(_ns("demo", "search", str(out)))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "SECRET" not in err
+    assert '[call] tool returned isError: {"error": "bad grant", "access_token": "<redacted>"}' in err
+    assert json.loads(out.read_text()) == body
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [("{[1]: 2}", "TypeError"), ("{1, 2}", "TypeError"), ("[" * 100_000 + "]" * 100_000, "RecursionError")],
+    ids=["unhashable-key", "set-not-json", "too-deep"],
+)
+def test_call_is_error_body_that_cannot_be_written_still_reports_and_exits_1(tmp_path, capsys, text, expected):
+    """A body the parse chain or json.dumps rejects: marker, exit 1, no --out file, no traceback."""
+    out = tmp_path / "demo.probe-raw.json"
+    result = mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=text)], isError=True)
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(result)):
+        rc = _cmd_call(_ns("demo", "search", str(out)))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "[call] tool returned isError: " in err
+    assert f"[call] note: body not written ({expected})" in err
+    assert not out.exists()

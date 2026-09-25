@@ -74,6 +74,12 @@
   `mutating-skipped`, and records a timed-out tool as unprobed with cause `timeout`;
   `generate-mcp-runner` leaves interactive tools out of `run.py`.
 
+- **`McpBridgeCaller.call_tool_result(server, tool, arguments)`** returns the SDK's unparsed
+  `CallToolResult`, `isError` included, for code that must tell a tool's reported failure
+  from its answer; `call()` parses both alike. Session handling and `call_timeout` are
+  `call()`'s, but a call error in a one-shot session reaches the caller as a bare `McpError`,
+  not an exception group.
+
 ### Changed
 
 - **Manifests gain resource sections on the next regenerate.** `codegen` defaults to
@@ -126,7 +132,27 @@
   now instruct `list --resources` and `probe --resource`, which 0.10.0 does not have, and
   generated runners call `McpBridgeCaller.read_resource`.
 
+- **`call` exits `1` on a result the tool flagged `isError`.** It still writes the error body
+  to `--out`, as evidence, then prints `[call] tool returned isError: <text>` (the first 300
+  characters of the error text, whitespace collapsed and credentials redacted) and exits `1`
+  where it exited `0`. A result with no content, or a body `call` cannot parse or serialise,
+  writes nothing. A script that read the `--out` file only after a zero exit now sees the
+  failure.
+
 ### Fixed
+
+- **`probe` no longer records a tool's error as its shape.** A tool reports its own failure
+  as a result flagged `isError` — Notion answers a tool its plan lacks with
+  `{"code": "validation_error", …, "additional_data": {"tool_error_class":
+  "entitlement_required"}}` — and `probe` parsed that body, recorded its keys as
+  `_observed_shape` and exited `0`, bait for a `TypedDict` of the error. `probe` and
+  `codegen --probe` now exit `1` with `[probe] tool returned isError: <text>` (`[codegen] …`),
+  the first 300 characters of the error text, whitespace collapsed and credentials redacted,
+  and write no part file, `--save-raw` file, module or manifest. A result with `isError`
+  false or absent is parsed as before. `McpBridgeCaller.call`, and so every generated
+  wrapper, still returns an `isError` result's content like any other. The
+  `generate-mcp-wrappers` skill records such a tool as unprobed, citing the printed text,
+  and keeps `return_model: null` shapes for error bodies a tool does not flag.
 
 - **`call` reports a tool error in one line.** A server-side `McpError`, or any failure that
   escaped the session as an exception group, printed a group traceback. `call` now handles it

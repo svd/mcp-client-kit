@@ -14,6 +14,7 @@ from typing import Literal
 
 import anyio
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 mcp = FastMCP("demo")
 
@@ -54,6 +55,12 @@ async def hang() -> str:
     """Never answer, like a tool waiting for a human; probes of it must time out."""
     await anyio.sleep_forever()
     return "unreachable"
+
+
+@mcp.tool()
+def refuse() -> str:
+    """Fail the way a tool reports failure: a result flagged isError, not a JSON-RPC error."""
+    raise ToolError('{"code": "validation_error", "message": "This feature requires a paid plan."}')
 
 
 # Eight arbitrary bytes, including ones that are not valid UTF-8, so the blob

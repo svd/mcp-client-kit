@@ -20,7 +20,7 @@ import pytest
 from mcp import types as mcp_types
 from mcp.shared.exceptions import McpError
 
-from mcpgen import _bridge
+from mcpgen import _bridge, codegen
 from mcpgen.cli import _cmd_probe, _part_filename, _probe, _probe_resource, main
 
 if sys.version_info < (3, 11):  # pragma: no cover - version-gated
@@ -224,7 +224,9 @@ def test_probe_size_measures_utf8_bytes_not_escaped_char_count():
     assert inflated_escaped_len > expected_len * 1.5, "fixture must actually exercise the escaping blowup"
 
     mock_session = MagicMock()
-    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[MagicMock(type="text", text=json.dumps(text))]))
+    mock_session.call_tool = AsyncMock(
+        return_value=mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=json.dumps(text))])
+    )
 
     @asynccontextmanager
     async def fake_session(server, **kwargs):
@@ -240,7 +242,9 @@ def test_probe_helper_returns_raw_payload():
     """_probe returns (shape, size, raw) — the raw payload is no longer discarded."""
     payload = {"items": [{"id": "abc", "name": "widget"}]}
     caller = MagicMock()
-    caller.call = AsyncMock(return_value=payload)
+    caller.call_tool_result = AsyncMock(
+        return_value=mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=json.dumps(payload))])
+    )
 
     with patch("mcpgen.cli._bridge.McpBridgeCaller", return_value=caller):
         shape, size, raw = asyncio.run(_probe("acme", "search", {"q": "x"}))
@@ -764,7 +768,9 @@ def test_probe_timeout_rejects_invalid(bad, capsys):
 
 def test_probe_helper_passes_call_timeout_to_the_bridge():
     caller = MagicMock()
-    caller.call = AsyncMock(return_value={"ok": True})
+    caller.call_tool_result = AsyncMock(
+        return_value=mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text='{"ok": true}')])
+    )
 
     with patch("mcpgen.cli._bridge.McpBridgeCaller", return_value=caller) as bridge:
         asyncio.run(_probe("demo", "greet", {}, call_timeout=7.0))
@@ -831,3 +837,185 @@ def test_probe_tool_with_explicit_timeout_prints_no_note(capsys):
 
     assert rc == 0
     assert "does not apply" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# A result flagged isError
+# ---------------------------------------------------------------------------
+
+# Notion's answer to a tool its plan does not include: valid JSON, isError true.
+_NOTION_ERROR = json.dumps(
+    {
+        "code": "validation_error",
+        "message": "This   feature  requires Notion AI. " + "Upgrade your plan to continue. " * 12,
+        "additional_data": {"tool_error_class": "entitlement_required"},
+    },
+    indent=2,
+)
+
+
+def _tool_result(text: str, *, is_error: bool = False) -> mcp_types.CallToolResult:
+    return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=text)], isError=is_error)
+
+
+def _bridge_returning(*results: mcp_types.CallToolResult) -> MagicMock:
+    """A fake ``McpBridgeCaller`` class whose ``call_tool_result`` answers *results* in turn."""
+    caller = MagicMock()
+    caller.call_tool_result = AsyncMock(side_effect=list(results))
+    return MagicMock(return_value=caller)
+
+
+def _excerpt_of(text: str) -> str:
+    collapsed = " ".join(text.split())
+    return collapsed[:300] + "…" if len(collapsed) > 300 else collapsed
+
+
+def test_probe_tool_is_error_exits_1_and_writes_nothing(tmp_path, capsys):
+    """An isError result is the tool's failure, not a shape: no part, no raw file, no skeleton."""
+    shapes_file = tmp_path / "notion.shapes.json"
+    raw_file = tmp_path / "notion.search.probe-raw.json"
+    bridge = _bridge_returning(_tool_result(_NOTION_ERROR, is_error=True))
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", bridge):
+        rc = main(["probe", "notion", "search", "--emit-shape", str(shapes_file), "--save-raw", str(raw_file)])
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"[probe] tool returned isError: {_excerpt_of(_NOTION_ERROR)}\n" in captured.err
+    assert not (tmp_path / "notion.shapes.json.parts").exists()
+    assert not shapes_file.exists()
+    assert not raw_file.exists()
+
+
+def test_probe_tool_error_excerpt_is_collapsed_and_cut_at_300_characters(capsys):
+    bridge = _bridge_returning(_tool_result(_NOTION_ERROR, is_error=True))
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", bridge):
+        _cmd_probe(_ns("notion", "search", None))
+
+    line = next(ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("[probe] tool returned isError: "))
+    excerpt = line.removeprefix("[probe] tool returned isError: ")
+    assert len(" ".join(_NOTION_ERROR.split())) > 300, "fixture must exceed the cut"
+    assert excerpt == " ".join(_NOTION_ERROR.split())[:300] + "…"
+    assert excerpt.startswith('{ "code": "validation_error", "message": "This feature requires Notion AI.')
+
+
+def test_probe_tool_error_excerpt_short_text_is_whole(capsys):
+    bridge = _bridge_returning(_tool_result("  Error executing tool search:\n\tquota   exceeded ", is_error=True))
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", bridge):
+        rc = _cmd_probe(_ns("demo", "search", None))
+
+    assert rc == 1
+    assert "[probe] tool returned isError: Error executing tool search: quota exceeded\n" in capsys.readouterr().err
+
+
+def test_probe_tool_error_without_text_content_says_so(capsys):
+    result = mcp_types.CallToolResult(content=[], isError=True)
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(result)):
+        rc = _cmd_probe(_ns("demo", "search", None))
+
+    assert rc == 1
+    assert "[probe] tool returned isError: (no text content)\n" in capsys.readouterr().err
+
+
+def test_probe_multi_variant_stops_at_the_first_is_error_and_writes_no_part(tmp_path, capsys):
+    """Like any other failed variant: exit 1 at once, later variants unprobed, nothing written."""
+    shapes_file = tmp_path / "demo.shapes.json"
+    bridge = _bridge_returning(
+        _tool_result('{"items": []}'), _tool_result("not allowed", is_error=True), _tool_result('{"items": []}')
+    )
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", bridge):
+        variants = [a for v in "abc" for a in ("--args", json.dumps({"type": v}))]
+        rc = main(["probe", "demo", "search", *variants, "--emit-shape", str(shapes_file)])
+
+    assert rc == 1
+    assert bridge.return_value.call_tool_result.await_count == 2
+    err = capsys.readouterr().err
+    assert "[probe] tool returned isError: not allowed" in err
+    assert not (tmp_path / "demo.shapes.json.parts").exists()
+
+
+def test_probe_result_without_is_error_is_parsed_as_before(capsys):
+    """isError false or absent: the skeleton is the one ``call()``'s payload yields."""
+    payload = {"results": [{"id": "p1", "title": None}], "has_more": False}
+    result = mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=json.dumps(payload))])
+    assert result.isError is False
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(result)):
+        rc = _cmd_probe(_ns("demo", "search", None))
+    via_bridge = capsys.readouterr().out
+
+    with patch(
+        "mcpgen.cli._probe",
+        new_callable=AsyncMock,
+        return_value=(
+            codegen.summarize_shape(payload),
+            len(json.dumps(payload, ensure_ascii=False).encode()),
+            payload,
+        ),
+    ):
+        _cmd_probe(_ns("demo", "search", None))
+
+    assert rc == 0
+    assert via_bridge == capsys.readouterr().out
+
+
+def test_probe_tool_error_excerpt_redacts_credentials(capsys):
+    """The server's text reaches stderr through the same redaction as every other error line."""
+    body = json.dumps({"error": "bad grant", "access_token": "sk-live-SECRET", "refresh_token": "r-SECRET"})
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(_tool_result(body, is_error=True))):
+        rc = _cmd_probe(_ns("demo", "search", None))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "SECRET" not in err
+    assert '"access_token": "<redacted>"' in err
+    assert '"error": "bad grant"' in err
+
+
+def test_probe_tool_error_excerpt_includes_embedded_resource_text(capsys):
+    result = mcp_types.CallToolResult(
+        content=[
+            mcp_types.TextContent(type="text", text="lookup failed:"),
+            mcp_types.EmbeddedResource(
+                type="resource",
+                resource=mcp_types.TextResourceContents(uri="demo://err", text="record  42\nnot found"),
+            ),
+        ],
+        isError=True,
+    )
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(result)):
+        _cmd_probe(_ns("demo", "search", None))
+
+    assert "[probe] tool returned isError: lookup failed: record 42 not found\n" in capsys.readouterr().err
+
+
+def test_probe_tool_error_excerpt_of_a_huge_body_is_still_cut(capsys):
+    body = "x " * 2_000_000
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(_tool_result(body, is_error=True))):
+        _cmd_probe(_ns("demo", "search", None))
+
+    line = next(ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("[probe] tool returned isError: "))
+    assert line.removeprefix("[probe] tool returned isError: ") == ("x " * 150)[:300] + "…"
+
+
+def test_probe_tool_error_excerpt_redacts_a_repr_member_cut_after_a_backslash(capsys):
+    """The excerpt's read limit can fall just after a backslash inside a quoted credential."""
+    member = "{'access_token': 'SECRET\\"
+    body = " " * (300 * 4 - len(member)) + member + "'more'}"
+    assert body[: 300 * 4].endswith("SECRET\\"), "fixture must put the backslash at the read limit"
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", _bridge_returning(_tool_result(body, is_error=True))):
+        rc = _cmd_probe(_ns("demo", "search", None))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "SECRET" not in err
+    assert "'access_token': '<redacted>'" in err

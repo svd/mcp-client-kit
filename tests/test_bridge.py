@@ -5762,6 +5762,104 @@ def test_read_resource_result_rejects_an_invalid_uri_before_opening_a_session():
     assert log == []
 
 
+# ---------------------------------------------------------------------------
+# call_tool_result / _parse_tool_result
+# ---------------------------------------------------------------------------
+
+
+def _tool_result(text: str, *, is_error: bool = False) -> mcp_types.CallToolResult:
+    return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=text)], isError=is_error)
+
+
+def _tool_session(result: mcp_types.CallToolResult | None = None, recorded: list | None = None) -> MagicMock:
+    s = MagicMock()
+
+    async def call_tool(tool, arguments, read_timeout_seconds=None):
+        if recorded is not None:
+            recorded.append((tool, arguments, read_timeout_seconds))
+        return result if result is not None else _tool_result('{"ok": true}')
+
+    s.call_tool = call_tool
+    return s
+
+
+@pytest.mark.parametrize("is_error", [False, True], ids=["ok", "isError"])
+def test_call_tool_result_returns_the_unparsed_result(is_error):
+    """One-shot and in-block alike, the SDK result comes back as is, ``isError`` included."""
+    result = _tool_result('{"code": "validation_error"}', is_error=is_error)
+    log: list = []
+    recorded: list = []
+    s = _tool_session(result, recorded)
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, log)):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            one_shot = await caller.call_tool_result("demo", "search", {"q": "x"})
+            async with caller.connected():
+                in_block = await caller.call_tool_result("demo", "search", {"q": "x"})
+            return one_shot, in_block
+
+    one_shot, in_block = asyncio.run(run())
+    assert one_shot is result
+    assert in_block is result
+    assert [r[:2] for r in recorded] == [("search", {"q": "x"})] * 2
+    assert log == [("enter", "demo"), ("exit", "demo")] * 2
+
+
+@pytest.mark.parametrize("block", [False, True], ids=["one-shot", "connected"])
+@pytest.mark.parametrize(("call_timeout", "expected"), [(2.5, 2.5), (None, None)])
+def test_call_tool_result_passes_the_call_timeout(block, call_timeout, expected):
+    from datetime import timedelta
+
+    recorded: list = []
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(_tool_session(recorded=recorded), [])):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py", call_timeout=call_timeout)
+            if block:
+                async with caller.connected():
+                    await caller.call_tool_result("demo", "greet", {})
+            else:
+                await caller.call_tool_result("demo", "greet", {})
+
+    asyncio.run(run())
+    assert [r[2] for r in recorded] == [None if expected is None else timedelta(seconds=expected)]
+
+
+def test_call_tool_result_one_shot_raises_a_call_error_bare():
+    """A failed call surfaces as itself, not inside the transport's nested ExceptionGroup."""
+    log: list = []
+    s = MagicMock()
+    s.call_tool = AsyncMock(side_effect=McpError(mcp_types.ErrorData(code=-32602, message="Unknown tool: nope")))
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, log)):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").call_tool_result("demo", "nope", {})
+
+    with pytest.raises(McpError, match="Unknown tool"):
+        asyncio.run(run())
+    assert log == [("enter", "demo"), ("exit", "demo")]
+
+
+@pytest.mark.parametrize("is_error", [False, True], ids=["ok", "isError"])
+def test_parse_tool_result_is_what_call_returns(is_error):
+    """``_parse_tool_result`` of the raw result equals ``call()``'s payload, error or not."""
+    result = mcp_types.CallToolResult(
+        content=[
+            mcp_types.TextContent(type="text", text='{"a": 1}'),
+            mcp_types.ImageContent(type="image", data="aGk=", mimeType="image/png"),
+        ],
+        isError=is_error,
+    )
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(_tool_session(result), [])):
+            return await _bridge.McpBridgeCaller(cmd="python srv.py").call("demo", "t", {})
+
+    assert _bridge._parse_tool_result(result) == asyncio.run(run())
+    assert _bridge._parse_tool_result(_tool_result('{"a": 1}')) == {"a": 1}
+
+
 def test_bridge_caller_satisfies_both_seam_protocols():
     caller = _bridge.McpBridgeCaller(cmd="python srv.py")
     assert isinstance(caller, McpCaller)

@@ -26,7 +26,10 @@ it before judging:
 
 A probe that wrote no part file has nothing to capture — whether it died with a traceback or
 exited on a single `[…] error:` line. `call` fails the same way and writes no `--out` file
-either. Classify those from the error text alone.
+either. Classify those from the error text alone. The exception is a result the tool
+flagged `isError` (`[probe] tool returned isError:` / `[call] tool returned isError:`): the
+tool did answer, and `call --out` writes that answer before exiting 1 — unless the result has
+no content or a body `call` cannot parse, when it writes nothing.
 
 ## Quota / rate-limit / auth — do not retry
 
@@ -40,12 +43,18 @@ response is the complaint — not a bare substring anywhere in a successful payl
 description containing the word "authentication" is not an auth error. Read the surrounding
 content before concluding a probe failed.
 
-Two outcomes, recorded differently:
+Three outcomes, recorded differently:
 
-- **The call returned, carrying an error payload.** Record the shape it actually has: a bare
-  error string observes as `"str"`, an error-shaped JSON object is parsed by the client and
-  observes as a dict. Either way leave `return_model: null` — the generated `-> Any` is
-  correct and callers handle the error at runtime.
+- **The call returned an error payload without flagging it** — `isError` false or absent, so
+  `probe` exited 0 and wrote a part. Record the shape it actually has: a bare error string
+  observes as `"str"`, an error-shaped JSON object is parsed by the client and observes as a
+  dict. Either way leave `return_model: null` — the generated `-> Any` is correct and callers
+  handle the error at runtime.
+- **The tool flagged its result `isError`.** `probe` rejects it: exit 1, no part file, and one
+  `[probe] tool returned isError: <text>` line carrying the first 300 characters of the error
+  text, whitespace collapsed and credentials redacted. Record
+  the tool as **unprobed**, citing that printed text. The phrases above classify that text as
+  well: a quota, rate-limit or auth complaint there is not retried either.
 - **The transport or protocol failed.** No payload, therefore no shape: record the tool as
   **unprobed** with the reason. Do not invent `_observed_shape: "str"` for a call that never
   returned.
