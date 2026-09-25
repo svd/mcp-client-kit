@@ -402,15 +402,22 @@ barrier stays on main.
    subagent's. Probing writes raw ids and PII into three artifacts, and `mcpgen` installs no
    ignore rules.
 
-   Two of the three paths follow `<shapes-path>`, not the CWD: `merge` writes the verify sidecar
-   beside the shapes file. Write `<shapes-stem>` for `<shapes-path>` with the `.shapes.json`
-   suffix removed (`github/github.shapes.json` → `github/github`). Only `probe-raw.json` is
-   CWD-relative. Raw payloads are named **per tool** — `<server>.<tool>.probe-raw.json` — so an
-   ignore rule covering them must be a `*.probe-raw.json` glob, not one literal path.
+   All three artifacts follow `<shapes-path>`, and none depends on the CWD. Write `<shapes-stem>`
+   for `<shapes-path>` with the `.shapes.json` suffix removed (`github/github.shapes.json` →
+   `github/github`), and `<shapes-dir>` for the directory holding it (`github`, or `.` for CWD
+   output):
+   - parts: `<shapes-path>.parts/` — written by `probe --emit-shape`
+   - verify sidecar: `<shapes-stem>.verify.json` — written by `merge`
+   - raw payloads: `<shapes-dir>/<server>.<tool>.probe-raw.json` — written by `probe --save-raw`,
+     `call --out` and `read --out`, whose paths you supply
+
+   Every raw-payload path below carries the `<shapes-dir>/` prefix. Raw payloads are named
+   **per tool** (per accessor for a resource), so an ignore rule covering them must be a
+   `*.probe-raw.json` glob, not one literal path.
 
    ```bash
    bad=0
-   for p in "<shapes-path>.parts/" "<shapes-stem>.verify.json" "<server>.<tool>.probe-raw.json"; do
+   for p in "<shapes-path>.parts/" "<shapes-stem>.verify.json" "<shapes-dir>/<server>.<tool>.probe-raw.json"; do
      git check-ignore -q "$p" || { echo "NOT IGNORED — add to .gitignore: $p"; bad=1; }
    done
    [ "$bad" -eq 0 ] || { echo "ignore preflight FAILED — do not probe"; exit 1; }
@@ -488,11 +495,13 @@ barrier stays on main.
      matches entries against the listed URIs and templates, so a template typed with a
      different variable name (`{id}` for `{record_id}`) applies to nothing — step 5 warns.
    - **Blobs.** A binary resource's shape is `"bytes"`; `--save-raw` writes its payload
-     base64-encoded. Name raw files `<server>.<accessor>.probe-raw.json`
-     (`<server>.read_risk_dictionary.probe-raw.json`) so the preflight's glob covers them.
+     base64-encoded. Name raw files `<shapes-dir>/<server>.<accessor>.probe-raw.json`
+     (`<shapes-dir>/<server>.read_risk_dictionary.probe-raw.json`) so the preflight's glob
+     covers them.
    - **Inspecting without a shape.** `<mcpgen> read <server> '<uri>' [--args '<json>'] --out
-     <server>.<accessor>.probe-raw.json` is the resource twin of `call --out`: one text
-     content is written verbatim, one blob as raw bytes, several contents as a JSON array.
+     <shapes-dir>/<server>.<accessor>.probe-raw.json` is the resource twin of `call --out`:
+     one text content is written verbatim, one blob as raw bytes, several contents as a JSON
+     array.
 
    **Pacing for hosted endpoints.** Against an HTTP/remote server, leave **≥ 2 s between live
    probes**. The multi-`--args` form fires its calls back-to-back inside a single invocation, so
@@ -577,7 +586,7 @@ barrier stays on main.
    ```python
    import json, pathlib
    try:
-       raw = pathlib.Path("<server>.<tool>.probe-raw.json").read_text()
+       raw = pathlib.Path("<shapes-dir>/<server>.<tool>.probe-raw.json").read_text()
        parsed = json.loads(raw)
        label = "JSON_UNWRAP" if isinstance(parsed, (dict, list)) else "NOT_JSON"
        print(label, type(parsed).__name__)
@@ -627,7 +636,7 @@ barrier stays on main.
    — there is no universal tool for this, infer from `mcpgen list` output. Capture its raw
    payload in the same invocation that probes it:
 
-   `<mcpgen> probe <server> <discovery-tool> --args '<args>' --save-raw <server>.<discovery-tool>.probe-raw.json`
+   `<mcpgen> probe <server> <discovery-tool> --args '<args>' --save-raw <shapes-dir>/<server>.<discovery-tool>.probe-raw.json`
 
    then read the ids from that file. `--save-raw` requires a `*.probe-raw.json` name (git-ignored)
    and saves the duplicate live round-trip that a separate `mcpgen call --out` costs. **No
@@ -821,8 +830,9 @@ barrier stays on main.
   `read`, bootstrap, inspect — goes through `mcpgen`. Never shell out to `curl`, `gh`,
   `httpie`, or raw `python` HTTP. mcpgen owns auth (browser OAuth + silent token refresh);
   any other client is unauthenticated, leaks the bearer token, or both. Need a raw payload?
-  That's `<mcpgen> call … --out *.probe-raw.json`, or `<mcpgen> read … --out
-  *.probe-raw.json` for a resource (both git-ignored).
+  That's `<mcpgen> call … --out <shapes-dir>/<server>.<tool>.probe-raw.json`, or
+  `<mcpgen> read … --out <shapes-dir>/<server>.<accessor>.probe-raw.json` for a resource (both
+  git-ignored).
 
 - **Never pipe any `mcpgen` command that talks to a server.** Stdout carries the artifact —
   `list` prints its JSON there, `codegen` the module whenever `--out` is absent — so a pipe over
@@ -835,14 +845,14 @@ barrier stays on main.
   separately.
 
 - **Run one `<mcpgen> call` per shell invocation.** Give two chained calls the same `--out` — the
-  per-tool `<server>.<tool>.probe-raw.json` naming exists to stop exactly that — and the second
-  overwrites the first, leaving only whichever call last succeeded, with nothing in the file to
-  say which that was. A failing `call` writes nothing at all, which leaves that call's file
-  either missing or holding an earlier run's payload — and a chain that exited 0 gives you no
-  reason to look. The one failure that does write is a result the tool flagged `isError`: its
-  body lands in `--out` and `call` still exits 1. If you must chain, give each call **both** its
-  own `--out` and a per-call status label. (Independent `probe` invocations still batch — see
-  step 3.)
+  per-tool `<shapes-dir>/<server>.<tool>.probe-raw.json` naming exists to stop exactly that — and
+  the second overwrites the first, leaving only whichever call last succeeded, with nothing in
+  the file to say which that was. A failing `call` writes nothing at all, which leaves that
+  call's file either missing or holding an earlier run's payload — and a chain that exited 0
+  gives you no reason to look. The one failure that does write is a result the tool flagged
+  `isError`: its body lands in `--out` and `call` still exits 1. If you must chain, give each
+  call **both** its own `--out` and a per-call status label. (Independent `probe` invocations
+  still batch — see step 3.)
 
 - **Bound a slow `mcpgen` call with the harness's own timeout, never a `timeout` binary.**
   `probe` and `call` bound each tool call with `--timeout` (default 60 s), but not the connect

@@ -26,7 +26,7 @@ and the words are gone, so the phrases below match against text `probe` never ke
 it before judging:
 
 ```bash
-<mcpgen> call <server> <tool> --args '<same args>' --out <server>.<tool>.probe-raw.json
+<mcpgen> call <server> <tool> --args '<same args>' --out <shapes-dir>/<server>.<tool>.probe-raw.json
 ```
 
 A probe that wrote no part file has nothing to capture — whether it died with a traceback or

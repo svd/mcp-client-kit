@@ -67,8 +67,8 @@ A container field carries an element/value type only where the evidence covers e
 Dict evidence is complete: the skeleton carries every key of that object, so one probe settles
 it. **List evidence is not** — `summarize_shape` records the first element and an `...xN`
 sentinel, so `list[str]` needs the raw payload
-(`mcpgen probe --save-raw <server>.<tool>.probe-raw.json`, git-ignored) with every element
-checked. More probes do not help: each one samples its own first element again, so
+(`mcpgen probe --save-raw <shapes-dir>/<server>.<tool>.probe-raw.json`, git-ignored) with every
+element checked. More probes do not help: each one samples its own first element again, so
 `['a', 7]` and `['b', {}]` both summarize as `['str', '...x2']`. Without the raw check, `list`.
 
 `dict[str, Any]` and `list[Any]` state exactly what `dict` and `list` state — never write them.
@@ -175,5 +175,5 @@ rewrote a value you need verbatim, restore it by hand from the gitignored
 that still has its `.parts/` — a default merge deletes them and re-merging without parts is a
 no-op, so reach for it via `mcpgen merge --keep-parts` at probe time, not afterwards.
 
-Keep raw responses, if you want them, in `<server>.<tool>.probe-raw.json` (git-ignored) — write
-one with `mcpgen probe --save-raw`, never in the shape-spec.
+Keep raw responses, if you want them, in `<shapes-dir>/<server>.<tool>.probe-raw.json`
+(git-ignored) — write one with `mcpgen probe --save-raw`, never in the shape-spec.
