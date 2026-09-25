@@ -1,10 +1,11 @@
 """Canonical tool- and resource-inventory snapshots for drift detection.
 
 Pure functions only — no I/O, no network, no clock. A manifest is a
-deterministic function of ``(server, tools, resources, resource_templates)`` so
-that regenerating an unchanged inventory produces byte-identical output and
-never dirties a git diff. That is why no timestamp and no generator version are
-recorded here; ``FORMAT_VERSION`` alone carries format migration.
+deterministic function of ``(server, tools, resources, resource_templates,
+resource_scope)`` so that regenerating an unchanged inventory produces
+byte-identical output and never dirties a git diff. That is why no timestamp
+and no generator version are recorded here; ``FORMAT_VERSION`` alone carries
+format migration.
 
 The unit consumed for tools is the tool dict emitted by ``cli._list_tools()``:
 ``{"name", "description", "inputSchema", "annotations"}``. Resources and
@@ -13,8 +14,16 @@ resource templates are MCP ``Resource`` / ``ResourceTemplate`` dicts, keyed by
 
 The ``resources`` and ``resource_templates`` sections are optional within
 format version 1. An absent section means the inventory was not collected and
-the section is untracked; a present one, even ``{}``, is tracked. Older mcpgen
-versions ignore the extra keys.
+the section is untracked; a present one, even ``{}``, is tracked.
+
+The optional top-level ``resource_scope`` records a ``codegen --resources``
+choice narrower than ``all`` (``templates`` or ``none``), so ``check`` lists
+what the module was generated from instead of inferring it from the sections;
+a manifest that tracks neither section is otherwise indistinguishable from one
+written before resource tracking. It is absent for ``all``, which keeps
+default-scope manifests byte-identical to those written before it existed.
+
+Older mcpgen versions ignore the extra keys.
 """
 
 from __future__ import annotations
@@ -24,6 +33,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 FORMAT_VERSION = 1
+
+# `--resources` scopes, widest first: `all` lists resources and templates,
+# `templates` only templates, `none` neither. `all` is the default and is never
+# written to a manifest.
+RESOURCE_SCOPES = ("all", "templates", "none")
 
 # JSON Schema keywords whose array value is a set, not a sequence. Reordering
 # them is not a semantic change, so they are sorted before comparison — this is
@@ -88,12 +102,18 @@ def build(
     tools: list[dict],
     resources: list[dict] | None = None,
     resource_templates: list[dict] | None = None,
+    *,
+    resource_scope: str = "all",
 ) -> dict:
     """Build a canonical manifest from ``tools/list`` and, when collected, the resource listings.
 
     ``resources`` / ``resource_templates`` of ``None`` mean "not collected" and
     leave the section out; an empty list writes an empty, tracked section.
+    ``resource_scope`` is recorded only when it is not ``all``. Raises
+    ``ValueError`` for a scope outside ``RESOURCE_SCOPES``.
     """
+    if resource_scope not in RESOURCE_SCOPES:
+        raise ValueError(f"unknown resource scope {resource_scope!r}; expected one of {', '.join(RESOURCE_SCOPES)}")
     entries: dict[str, dict] = {}
     for tool in _in_key_order(tools, "name"):
         entries[tool["name"]] = {
@@ -110,7 +130,26 @@ def build(
         manifest["resources"] = _resource_section(resources, "uri")
     if resource_templates is not None:
         manifest["resource_templates"] = _resource_section(resource_templates, "uriTemplate")
+    if resource_scope != "all":
+        manifest["resource_scope"] = resource_scope
     return manifest
+
+
+def stored_scope(m: Any) -> str | None:
+    """The ``resource_scope`` a manifest records, or ``None`` when it records none.
+
+    A non-object *m* records none; ``diff`` reports what is wrong with it.
+    Raises ``ValueError`` for a value outside ``RESOURCE_SCOPES``.
+    """
+    if not isinstance(m, dict) or "resource_scope" not in m:
+        return None
+    scope = m["resource_scope"]
+    if not isinstance(scope, str) or scope not in RESOURCE_SCOPES:
+        raise ValueError(
+            f"manifest has resource_scope {scope!r}, expected one of {', '.join(RESOURCE_SCOPES)}. "
+            "Fix or remove the key by hand, or regenerate the manifest with `mcpgen codegen`."
+        )
+    return scope
 
 
 def dumps(obj: dict) -> str:
@@ -180,6 +219,8 @@ class DriftReport:
     # Set by the caller when listing resources failed while the stored manifest
     # tracks none, so nothing was compared. Advisory only.
     resources_error: str | None = None
+    # The scope the live resources were listed in, set by the caller.
+    resource_scope: str = "all"
 
     @property
     def has_drift(self) -> bool:
@@ -216,6 +257,10 @@ def _validate(m: dict, label: str) -> None:
         )
     if not isinstance(m.get("tools"), dict):
         raise ValueError(f"{label} manifest has no 'tools' object")
+    try:
+        stored_scope(m)
+    except ValueError as exc:
+        raise ValueError(f"{label} {exc}") from None
     sections = ["tools"]
     for section, _kind in _RESOURCE_SECTIONS:
         if section in m:
@@ -366,6 +411,20 @@ _KIND_LABEL = {"resource": "resource", "resource_template": "resource template"}
 _UNTRACKED_LABEL = {"resource": "resources", "resource_template": "resource templates"}
 
 
+def _untracked_opt_out(report: DriftReport) -> str:
+    """The advisory's second hint: the narrowest scope that stops listing what is untracked.
+
+    Untracked statics beside compared (hence tracked) templates call for
+    `templates`, which keeps the templates; `none` would drop them too. No scope
+    lists statics without templates, so untracked templates alone get no hint.
+    """
+    untracked = set(report.resources_untracked)
+    if "resource" not in untracked:
+        return ""
+    scope = "templates" if report.resources_compared and "resource_template" not in untracked else "none"
+    return f", or with `--resources {scope} --update` to stop listing them"
+
+
 def render_text(report: DriftReport) -> str:
     """Human-readable drift report. Advisories print but never imply drift."""
     lines: list[str] = []
@@ -389,10 +448,11 @@ def render_text(report: DriftReport) -> str:
         lines.append(f"ADVISORY  {report.server} {_KIND_LABEL[rchange.kind]} {rchange.key}: {rchange.detail}")
         lines.append(f"            - {rchange.old!r}")
         lines.append(f"            + {rchange.new!r}")
+    opt_out = _untracked_opt_out(report)
     for kind in report.resources_untracked:
         lines.append(
             f"ADVISORY  {report.server}: live {_UNTRACKED_LABEL[kind]} are not tracked by the stored manifest; "
-            "re-run with `--update` to track them, or pass `--resources none` to skip them"
+            f"re-run with `--update` to track them{opt_out}"
         )
     if report.resources_error:
         lines.append(
@@ -443,6 +503,7 @@ def to_json(report: DriftReport) -> dict:
     The ``"resources"`` block appears only when a resource section was compared
     or is untracked, or listing resources failed, so tool-only reports keep
     their original shape. Its ``"error"`` key is present only for a failure.
+    ``"resource_scope"`` is present only for a scope other than ``all``.
     """
     payload: dict[str, Any] = {
         "server": report.server,
@@ -452,6 +513,8 @@ def to_json(report: DriftReport) -> dict:
         "changed": [_change_to_json(c) for c in report.changed],
         "advisory": [_change_to_json(c) for c in report.advisory],
     }
+    if report.resource_scope != "all":
+        payload["resource_scope"] = report.resource_scope
     if report.resources_compared or report.resources_untracked or report.resources_error:
         payload["resources"] = {
             "compared": report.resources_compared,

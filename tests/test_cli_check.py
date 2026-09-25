@@ -51,9 +51,9 @@ TOOLS = [
 ]
 
 
-def _write_manifest(tmp_path: Path, tools=TOOLS, resources=None, templates=None) -> Path:
+def _write_manifest(tmp_path: Path, tools=TOOLS, resources=None, templates=None, scope="all") -> Path:
     path = tmp_path / "demo.mcpgen.json"
-    path.write_text(manifest.dumps(manifest.build("demo", tools, resources, templates)))
+    path.write_text(manifest.dumps(manifest.build("demo", tools, resources, templates, resource_scope=scope)))
     return path
 
 
@@ -424,7 +424,7 @@ def test_check_old_manifest_with_live_resources_is_advisory_exit_zero(tmp_path, 
     out = capsys.readouterr().out
     assert "live resources are not tracked by the stored manifest" in out
     assert "live resource templates are not tracked" in out
-    assert "re-run with `--update` to track them, or pass `--resources none` to skip them" in out
+    assert "re-run with `--update` to track them, or with `--resources none --update` to stop listing them" in out
     assert "No drift. (2 advisory)" in out
     assert path.read_bytes() == before
 
@@ -566,13 +566,17 @@ def test_check_update_with_resources_is_byte_identical_on_rerun(tmp_path):
 
 
 def test_check_templates_only_manifest_skips_static_listing(tmp_path, capsys):
-    """A manifest from `codegen --resources templates` is checked without resources/list."""
+    """A templates-only manifest that records no scope is checked without resources/list."""
     path = _write_manifest(tmp_path, templates=TEMPLATES)
+    before = path.read_bytes()
     lister = AsyncMock(return_value=([], TEMPLATES))
     with _with_inventory(lister=lister):
         assert _cmd_check(_ns(path, update=True)) == 0
     assert lister.await_args.kwargs == {"statics": False}
+    # An inferred scope is never recorded, so the file is unchanged.
+    assert path.read_bytes() == before
     written = json.loads(path.read_text())
+    assert "resource_scope" not in written
     assert "resources" not in written
     assert set(written["resource_templates"]) == set(
         manifest.build("demo", TOOLS, None, TEMPLATES)["resource_templates"]
@@ -612,28 +616,221 @@ def test_check_untracked_update_lists_strictly(tmp_path):
     assert lister.await_args.kwargs == {"statics": True}
 
 
-def test_check_explicit_scope_none_overrides_and_update_keeps_sections(tmp_path, capsys):
+def test_check_explicit_scope_none_update_drops_sections(tmp_path, capsys):
+    """Narrowing writes what `codegen --resources none` would: no resource section."""
     path = _write_manifest(tmp_path, resources=RESOURCES, templates=TEMPLATES)
-    before = json.loads(path.read_text())
     lister = AsyncMock(return_value=([STATUS], []))
     with _with_inventory(lister=lister):
         assert _cmd_check(_ns(path, resource_scope="none", update=True)) == 0
+        out = capsys.readouterr().out
+        first = path.read_bytes()
+        assert _cmd_check(_ns(path, update=True)) == 0
     lister.assert_not_awaited()
-    written = json.loads(path.read_text())
-    assert written["resources"] == before["resources"]
-    assert written["resource_templates"] == before["resource_templates"]
+    assert first.decode() == manifest.dumps(manifest.build("demo", TOOLS, resource_scope="none"))
+    assert path.read_bytes() == first
+    assert (
+        "(accepted 0 change(s); recorded resource_scope none; stopped tracking resources and resource templates)"
+    ) in out
 
 
-def test_check_explicit_scope_templates_keeps_stored_statics(tmp_path):
+def test_check_explicit_scope_templates_update_drops_statics(tmp_path, capsys):
     path = _write_manifest(tmp_path, resources=RESOURCES, templates=TEMPLATES)
-    before = json.loads(path.read_text())
     lister = AsyncMock(return_value=([], []))
     with _with_inventory(lister=lister):
         assert _cmd_check(_ns(path, resource_scope="templates", update=True)) == 0
     assert lister.await_args.kwargs == {"statics": False}
+    assert path.read_text() == manifest.dumps(manifest.build("demo", TOOLS, None, [], resource_scope="templates"))
+    assert "; recorded resource_scope templates; stopped tracking resources)" in capsys.readouterr().out
+
+
+def test_check_explicit_scope_without_update_changes_nothing(tmp_path, capsys):
+    """Without --update a narrower --resources skips the listing for this run only."""
+    path = _write_manifest(tmp_path, resources=RESOURCES, templates=TEMPLATES)
+    before = path.read_bytes()
+    with _with_inventory():
+        assert _cmd_check(_ns(path, resource_scope="none")) == 0
+    assert path.read_bytes() == before
+    assert capsys.readouterr().out == "No drift.\n"
+
+
+def test_check_update_json_reports_scope_change(tmp_path, capsys):
+    path = _write_manifest(tmp_path, resources=RESOURCES, templates=TEMPLATES)
+    with _with_inventory():
+        assert _cmd_check(_ns(path, resource_scope="templates", update=True, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["updated"] is True
+    assert payload["resource_scope"] == "templates"
     written = json.loads(path.read_text())
-    assert written["resources"] == before["resources"]
-    assert written["resource_templates"] == {}
+    assert written["resource_scope"] == "templates"
+    assert "resources" not in written
+
+
+def test_check_json_reports_scope_only_when_narrowed(tmp_path, capsys):
+    path = _write_manifest(tmp_path, resources=RESOURCES, templates=TEMPLATES)
+    with _with_inventory():
+        assert _cmd_check(_ns(path, json=True)) == 0
+    assert "resource_scope" not in json.loads(capsys.readouterr().out)
+    path = _write_manifest(tmp_path, scope="none")
+    with _with_inventory():
+        assert _cmd_check(_ns(path, json=True)) == 0
+    assert json.loads(capsys.readouterr().out)["resource_scope"] == "none"
+
+
+# ── resource scope: recorded in the manifest ──────────────────────────────────
+
+
+def test_check_stored_scope_none_lists_no_resources(tmp_path, capsys):
+    """A manifest from `codegen --resources none` is checked without any resource request."""
+    path = _write_manifest(tmp_path, scope="none")
+    before = path.read_bytes()
+    lister = AsyncMock(return_value=(RESOURCES, TEMPLATES))
+    preview = AsyncMock(return_value=(RESOURCES, False, TEMPLATES, False))
+    with _with_inventory(lister=lister, preview=preview):
+        assert _cmd_check(_ns(path)) == 0
+    lister.assert_not_awaited()
+    preview.assert_not_awaited()
+    out = capsys.readouterr().out
+    assert "not tracked" not in out
+    assert out == "No drift.\n"
+    assert path.read_bytes() == before
+
+
+def test_check_stored_scope_none_json_has_no_resources_block(tmp_path, capsys):
+    path = _write_manifest(tmp_path, scope="none")
+    with _with_inventory():
+        assert _cmd_check(_ns(path, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["drift"] is False
+    assert "resources" not in payload
+
+
+def test_check_stored_scope_none_update_keeps_scope(tmp_path, capsys):
+    path = _write_manifest(tmp_path, scope="none")
+    before = path.read_bytes()
+    lister = AsyncMock(return_value=(RESOURCES, TEMPLATES))
+    with _with_inventory(lister=lister):
+        assert _cmd_check(_ns(path, update=True)) == 0
+        assert path.read_bytes() == before
+        assert _cmd_check(_ns(path, update=True)) == 0
+    lister.assert_not_awaited()
+    assert path.read_bytes() == before
+    written = json.loads(before)
+    assert written["resource_scope"] == "none"
+    assert "resources" not in written
+    assert "resource_templates" not in written
+    assert "now tracking" not in capsys.readouterr().out
+
+
+def test_check_stored_scope_none_update_accepts_tool_drift(tmp_path):
+    path = _write_manifest(tmp_path, scope="none")
+    live = [*TOOLS, {"name": "subtract", "description": "", "inputSchema": {}, "annotations": None}]
+    with patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=live):
+        assert _cmd_check(_ns(path, update=True)) == 0
+    assert path.read_text() == manifest.dumps(manifest.build("demo", live, resource_scope="none"))
+
+
+def test_check_explicit_all_overrides_stored_none(tmp_path, capsys):
+    path = _write_manifest(tmp_path, scope="none")
+    before = path.read_bytes()
+    lister = AsyncMock(return_value=(RESOURCES, TEMPLATES))
+    with _with_inventory(lister=lister):
+        assert _cmd_check(_ns(path, resource_scope="all")) == 0
+    assert lister.await_args.kwargs == {"statics": True}
+    assert "live resources are not tracked by the stored manifest" in capsys.readouterr().out
+    assert path.read_bytes() == before
+
+
+def test_check_explicit_all_update_opts_back_in(tmp_path, capsys):
+    """`--resources all --update` adds the sections and drops the recorded scope."""
+    path = _write_manifest(tmp_path, scope="none")
+    with _with_inventory():
+        assert _cmd_check(_ns(path, resource_scope="all", update=True)) == 0
+        assert "now tracking resources and resource templates" in capsys.readouterr().out
+        first = path.read_bytes()
+        assert first.decode() == manifest.dumps(manifest.build("demo", TOOLS, RESOURCES, TEMPLATES))
+        assert _cmd_check(_ns(path, update=True)) == 0
+    assert path.read_bytes() == first
+
+
+def test_check_explicit_none_update_records_scope_on_old_manifest(tmp_path, capsys):
+    """A manifest from before the key existed opts out once, and later runs stop advising."""
+    path = _write_manifest(tmp_path)
+    with _with_inventory():
+        assert _cmd_check(_ns(path, resource_scope="none", update=True)) == 0
+    assert path.read_text() == manifest.dumps(manifest.build("demo", TOOLS, resource_scope="none"))
+    capsys.readouterr()
+    preview = AsyncMock(return_value=(RESOURCES, False, TEMPLATES, False))
+    with _with_inventory(preview=preview):
+        assert _cmd_check(_ns(path)) == 0
+    preview.assert_not_awaited()
+    assert capsys.readouterr().out == "No drift.\n"
+
+
+def test_check_update_reports_removing_a_written_all_scope(tmp_path, capsys):
+    """A hand-written `"all"` is never written back; the update line says it went."""
+    path = tmp_path / "demo.mcpgen.json"
+    path.write_text(manifest.dumps({**manifest.build("demo", TOOLS, RESOURCES, TEMPLATES), "resource_scope": "all"}))
+    with _with_inventory():
+        assert _cmd_check(_ns(path, update=True)) == 0
+    assert path.read_text() == manifest.dumps(manifest.build("demo", TOOLS, RESOURCES, TEMPLATES))
+    assert "(accepted 0 change(s); removed resource_scope)" in capsys.readouterr().out
+
+
+def test_check_explicit_templates_update_replaces_stored_none(tmp_path):
+    path = _write_manifest(tmp_path, scope="none")
+    lister = AsyncMock(return_value=([], TEMPLATES))
+    with _with_inventory(lister=lister):
+        assert _cmd_check(_ns(path, resource_scope="templates", update=True)) == 0
+    assert lister.await_args.kwargs == {"statics": False}
+    assert path.read_text() == manifest.dumps(
+        manifest.build("demo", TOOLS, None, TEMPLATES, resource_scope="templates")
+    )
+
+
+def test_check_stored_scope_templates_lists_templates_only(tmp_path):
+    """The recorded scope wins over the tracked sections.
+
+    `codegen` never writes a `resources` section beside `templates`; a hand-made
+    one is left as stored and uncompared, and plain --update keeps it.
+    """
+    path = _write_manifest(tmp_path, resources=RESOURCES, templates=TEMPLATES, scope="templates")
+    before = path.read_bytes()
+    lister = AsyncMock(return_value=([STATUS], TEMPLATES))
+    with _with_inventory(lister=lister):
+        assert _cmd_check(_ns(path)) == 0
+        assert _cmd_check(_ns(path, update=True)) == 0
+    assert lister.await_args.kwargs == {"statics": False}
+    assert path.read_bytes() == before
+
+
+def test_check_stored_scope_templates_with_explicit_all_hints_templates(tmp_path, capsys):
+    """The opt-out hint keeps the tracked templates: `none` would drop them too."""
+    path = _write_manifest(tmp_path, templates=TEMPLATES, scope="templates")
+    with _with_inventory():
+        assert _cmd_check(_ns(path, resource_scope="all")) == 0
+    out = capsys.readouterr().out
+    assert "live resources are not tracked" in out
+    assert "or with `--resources templates --update` to stop listing them" in out
+    assert "--resources none" not in out
+
+
+@pytest.mark.parametrize("value", ["some", None])
+def test_check_invalid_stored_scope_exits_two(tmp_path, capsys, value):
+    path = tmp_path / "demo.mcpgen.json"
+    path.write_text(json.dumps({**manifest.build("demo", TOOLS), "resource_scope": value}))
+    before = path.read_bytes()
+    list_tools = AsyncMock(return_value=TOOLS)
+    with patch("mcpgen.cli._list_tools", list_tools):
+        rc = _cmd_check(_ns(path, update=True))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "resource_scope" in err
+    # `check` rejects the manifest before any flag applies, so it cannot be the fix.
+    assert "mcpgen check" not in err
+    assert "by hand" in err
+    assert "mcpgen codegen" in err
+    list_tools.assert_not_awaited()
+    assert path.read_bytes() == before
 
 
 def test_check_untracked_listing_failure_is_advisory(tmp_path, capsys):

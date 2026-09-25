@@ -578,6 +578,10 @@ class FakeCaller:
 | `templates` | templates only; static resources are not even listed | templates |
 | `none` | none — a tools-only module | neither |
 
+A scope other than `all` is also recorded in the manifest, so `mcpgen check` lists the same
+resources without a flag. `codegen` does not read it back: pass the same `--resources` when
+you regenerate.
+
 Above 50 static resources `codegen` warns: a server that lists its data as resources gets an
 accessor per record, and `--resources templates` or `none` is usually what you want. A shapes
 entry that matches no listed resource or template, or has an unknown `kind`, is not applied and
@@ -669,7 +673,7 @@ mcpgen codegen demo --stdio 'python server.py' --out gen/demo.py
 | *(none)* | Write `<out-stem>.mcpgen.json` next to `--out` |
 | `--manifest PATH` | Write it to `PATH` instead |
 | `--no-manifest` | Do not write one |
-| `--resources {all,templates,none}` | Which resource sections it tracks — the same scope that picks the accessors |
+| `--resources {all,templates,none}` | Which resource sections it tracks — the same scope that picks the accessors. `templates` and `none` are recorded as `resource_scope` |
 
 Stdout mode (no `--out`) writes no manifest.
 
@@ -677,10 +681,12 @@ The file holds `format_version`, `server`, and `tools` (each tool's `description
 `inputSchema`, and `annotations`), plus up to two resource sections: `resources`, keyed by
 normalized URI, and `resource_templates`, keyed by template string, each entry holding
 `name`, `description`, and `mimeType`. A section is written only when `codegen` collected
-it: absent means untracked, and `{}` means tracked with nothing listed. `format_version` is
-`1`; mcpgen versions before 0.11.0 ignore the extra keys. There is **no timestamp and no
-generator version**, so the manifest is a pure function of the inventory: regenerating
-against an unchanged server produces a byte-identical file and never dirties a git diff.
+it: absent means untracked, and `{}` means tracked with nothing listed. A top-level
+`resource_scope` (`"templates"` or `"none"`) records a `--resources` narrower than `all`; it
+is absent for `all`. `format_version` is `1`; mcpgen versions before 0.11.0 ignore the extra
+keys. There is **no timestamp and no generator version**, so the manifest is a pure function
+of the inventory and the scope: regenerating against an unchanged server produces a
+byte-identical file and never dirties a git diff.
 Object keys are sorted and set-like schema arrays (`required`, `enum`) are normalized, so a
 server that merely re-orders them does not read as a change. It contains no credentials —
 commit it alongside the generated module.
@@ -696,7 +702,7 @@ mcpgen check <server> [--manifest PATH] [--json] [--update] [--resources SCOPE] 
 | `--manifest PATH` | Manifest to compare against (default: `<server>.mcpgen.json`) |
 | `--json` | Emit a structured report on stdout instead of human text |
 | `--update` | Accept the live inventory: rewrite the manifest and exit 0 |
-| `--resources {all,templates,none}` | Resources to list and compare (default: what the stored manifest tracks — see [§ Resources in the manifest](#resources-in-the-manifest)) |
+| `--resources {all,templates,none}` | Resources to list and compare (default: the scope the stored manifest records, else what it tracks — see [§ Resources in the manifest](#resources-in-the-manifest)) |
 | `--stdio CMD` | stdio transport, e.g. `'python server.py'` |
 
 Plus the same connection flags as `codegen`: `--url`, `--bearer`, `--client-name`,
@@ -723,35 +729,52 @@ Resource drift prints as `ADDED     demo resource demo://status`,
 `CHANGED   demo resource demo://config: mimeType changed: …`. With `--json`, a `resources`
 block (`compared`, `untracked`, `added`, `removed`, `changed`, `advisory`, and `error` on a
 failed listing) appears only when resources were compared, are untracked, or failed to
-list; otherwise the report has no `resources` key.
+list; otherwise the report has no `resources` key. A top-level `resource_scope` names the
+scope `check` listed with when it is not `all`.
 
 ### Resources in the manifest
 
 `check` compares the resource sections the stored manifest tracks, and lists the live
-resources in the matching scope:
+resources in the scope the manifest records or, failing that, the one its sections imply:
 
 | Stored manifest | Default scope |
 |---|---|
-| only `resource_templates` (from `codegen --resources templates`) | `templates` — static resources are not listed |
-| `resources`, or both sections | `all` |
-| neither section (from before 0.11.0, or `codegen --resources none`) | `all`, as a first-page preview — see below |
+| `resource_scope: "none"` (from `codegen --resources none`) | `none` — no resource request is sent |
+| `resource_scope: "templates"` (from `codegen --resources templates`) | `templates` — static resources are not listed |
+| no `resource_scope`, only `resource_templates` | `templates` |
+| no `resource_scope`, `resources` or both sections | `all` |
+| no `resource_scope` and neither section (from before 0.11.0) | `all`, as a first-page preview — see below |
 
-`--resources` overrides the default.
+`--resources` overrides the default. With `--update`, an explicit `--resources` is recorded:
+`templates` or `none` writes `resource_scope` and drops the sections outside it (`templates`
+drops `resources`, `none` drops both), and `all` removes the key. Without the flag a recorded
+scope is kept, and an inferred one is never written. A `resource_scope` other than `all`,
+`templates` or `none` exits `2`, whatever the flags: fix or remove the key by hand, or
+regenerate the manifest with `codegen`.
 
-**Untracked manifests.** With no resource section, no `--resources`, and no `--update`,
-`check` reads only the first page of each resource list (10 s timeout), to decide on one
-advisory: *live resources are not tracked by the stored manifest; re-run with `--update` to
-track them, or pass `--resources none` to skip them*. It exits `0`. A failed or timed-out
-listing there is an advisory too, still exit `0`: with nothing stored, nothing would be
-compared. Anywhere else — a tracked manifest, an explicit `--resources`, or `--update` — the
-listing is complete and strict, and a failure exits `2`.
+`codegen` never writes a section outside its scope. In a hand-edited manifest that does, such
+as a `resources` section beside `resource_scope: "templates"`, the section is neither listed
+nor compared, and `--update` without `--resources` keeps it as stored.
 
-**`--resources none` manifests.** A manifest from `codegen --resources none` has no resource
-section, exactly like one from before 0.11.0, and `check` cannot tell them apart. If you
-generated with `--resources none`, run `check --resources none` as well, with or without
-`--update`: otherwise the advisory fires on every run, and `--update` starts tracking
-resources you chose to leave out. A templates-only manifest needs no flag, since its
-`resource_templates` section is detected.
+**Untracked manifests.** With no resource section, no recorded scope, no `--resources`, and
+no `--update`, `check` reads only the first page of each resource list (10 s timeout), to
+decide on one advisory: *live resources are not tracked by the stored manifest; re-run with
+`--update` to track them, or with `--resources none --update` to stop listing them*. It exits
+`0`. A failed or timed-out listing there is an advisory too, still exit `0`: with nothing
+stored, nothing would be compared. Anywhere else — a tracked manifest, a recorded scope, an
+explicit `--resources`, or `--update` — the listing is complete and strict, and a failure
+exits `2`.
+
+The same advisory names `--resources templates --update` instead when resource templates are
+tracked and only static resources are not (after an explicit `--resources all`), since that
+scope keeps the templates.
+
+**`--resources none` manifests.** A manifest from `codegen --resources none` records
+`"resource_scope": "none"`, so `check` sends no resource request and prints no advisory, and
+`--update` keeps it tools-only. To start tracking resources, regenerate with `codegen` (whose
+default is `all`) or run `check --resources all --update`, which writes both sections and
+removes the key. A manifest from before 0.11.0 records no scope; `check --resources none
+--update` records the opt-out for it.
 
 ### Accepting a change
 
@@ -764,8 +787,12 @@ mcpgen check demo --stdio 'python server.py' --manifest gen/demo.mcpgen.json --u
 
 `--update` writes the live inventory and exits `0`. It also bootstraps a manifest for an
 existing wrapper that predates one. On an operational error (exit `2`) it writes nothing.
-It writes the resource sections it listed, keeps a stored section the scope did not list,
-and says when it starts tracking one (`now tracking resources and resource templates`).
+It writes the resource sections it listed. A stored section the scope did not list is kept
+as stored, unless an explicit `--resources` leaves it out: then it is dropped along with the
+recorded scope change (see [§ Resources in the manifest](#resources-in-the-manifest)). The
+closing line says what changed beyond the accepted drift: `now tracking resources and
+resource templates`, `recorded resource_scope templates`, `removed resource_scope`, or
+`stopped tracking resources`.
 After an `--update`, regenerate the wrapper if the change affects tools you call or
 resources you read.
 

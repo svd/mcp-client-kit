@@ -193,16 +193,29 @@ def test_codegen_resources_templates_skips_statics(tmp_path):
     payload = json.loads((tmp_path / "demo.mcpgen.json").read_text())
     assert "resources" not in payload
     assert set(payload["resource_templates"]) == {"demo://records/{record_id}"}
+    assert payload["resource_scope"] == "templates"
 
 
-def test_codegen_resources_none_is_byte_identical_to_tools_only(tmp_path):
+def test_codegen_resources_none_writes_tools_only_module_and_records_scope(tmp_path):
+    """The module is tools-only; the manifest records `none` so `check` does not list resources."""
     lister = AsyncMock(return_value=(RESOURCES, TEMPLATES))
     with _with_inventory(lister=lister):
         rc = _cmd_codegen(_ns(tmp_path, resource_scope="none"))
     assert rc == 0
     lister.assert_not_awaited()
     assert (tmp_path / "demo.py").read_text() == codegen.render_module("demo", FAKE_TOOLS)
-    assert (tmp_path / "demo.mcpgen.json").read_text() == manifest.dumps(manifest.build("demo", FAKE_TOOLS))
+    written = (tmp_path / "demo.mcpgen.json").read_text()
+    assert written == manifest.dumps(manifest.build("demo", FAKE_TOOLS, resource_scope="none"))
+    payload = json.loads(written)
+    assert payload["resource_scope"] == "none"
+    assert "resources" not in payload
+    assert "resource_templates" not in payload
+
+
+def test_codegen_resources_all_records_no_scope(tmp_path):
+    with _with_inventory():
+        assert _cmd_codegen(_ns(tmp_path, resource_scope="all")) == 0
+    assert "resource_scope" not in json.loads((tmp_path / "demo.mcpgen.json").read_text())
 
 
 def test_codegen_applies_resource_shapes(tmp_path):

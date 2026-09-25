@@ -45,8 +45,11 @@
 - **`mcpgen check` detects resource drift.** Manifests gain optional `resources` and
   `resource_templates` sections. An added or removed resource or template, or a `mimeType`
   change, exits `1`; a `name` or `description` change is an advisory. `check --resources
-  {all,templates,none}` overrides the scope, which otherwise follows what the stored manifest
-  tracks. `--update` writes the sections it listed and keeps the ones it did not.
+  {all,templates,none}` overrides the scope, which otherwise follows the manifest's
+  `resource_scope` — written by `codegen --resources templates` or `none` — or, without one,
+  the sections it tracks. `--update` writes the sections it listed. An explicit `--resources`
+  is recorded — `templates` or `none` writes `resource_scope` and drops the sections outside
+  it, `all` removes the key; without it a recorded scope and the stored sections are kept.
 
 - **Both skills handle resources.** `generate-mcp-wrappers` lists them in step 2a, selects
   templates and API-like statics while logging data-like lists as skipped, probes with real
@@ -63,16 +66,17 @@
   written as `{}`: tracked and empty. Against a server with resources the module also gains
   `read_*` accessors; for one without, the module is byte-identical. `format_version` stays
   `1` and earlier mcpgen versions ignore the new keys, so a pinned CI job does not break.
-  `--resources none` keeps both the module and the manifest byte-identical.
+  `--resources none` keeps the module byte-identical; its manifest adds only
+  `"resource_scope": "none"`.
 
-- **`check` against a manifest with no resource section** prints an advisory ("live resources
-  are not tracked by the stored manifest; re-run with `--update` to track them, or pass
-  `--resources none` to skip them") and exits `0`. It reads only the first page of each
-  resource list for this, with a 10 s timeout, and a failure there is an advisory too. Any
-  other resource listing — a tracked manifest, an explicit `--resources`, or `--update` — is
-  strict, and a failure exits `2`. A manifest from `codegen --resources none` cannot be told
-  from a pre-0.11.0 one: check it with `--resources none`, or `--update` starts tracking
-  resources.
+- **`check` against a manifest with no resource section and no recorded scope** prints an
+  advisory ("live resources are not tracked by the stored manifest; re-run with `--update` to
+  track them, or with `--resources none --update` to stop listing them") and exits `0`. It
+  reads only the first page of each resource list for this, with a 10 s timeout, and a
+  failure there is an advisory too. Any other resource listing — a tracked manifest, a
+  recorded scope, an explicit `--resources`, or `--update` — is strict, and a failure exits
+  `2`. A manifest from `codegen --resources none` records the scope, so `check` lists no
+  resources for it and prints no advisory.
 
 - **Plain `mcpgen list` also asks for resources.** When the server declares the resources
   capability, `list` reads the first page of each resource list in the same session, bounded

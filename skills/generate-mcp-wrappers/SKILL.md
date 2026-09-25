@@ -707,10 +707,7 @@ barrier stays on main.
    unwrapping via `_dig` / `_dig_list`.
 
    Add `--resources templates` or `--resources none` when step 2b narrowed the resource scope;
-   the manifest `codegen` writes tracks the same scope. `mcpgen check` detects a templates-only
-   manifest by itself, but a `none` manifest looks like one from before 0.11.0: record in
-   `session-overview.md` that `check` must run with `--resources none`, or its `--update`
-   starts tracking resources.
+   the manifest `codegen` writes records the scope, so `mcpgen check` needs no flag.
 
    Read `codegen`'s stderr for two resource warnings. `shapes entry '<key>' matches no listed
    resource template — not applied` means the key differs from the listed URI or template:

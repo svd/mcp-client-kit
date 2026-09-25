@@ -548,6 +548,56 @@ def test_diff_rejects_non_dict_resource_section():
         manifest.diff(_rm(), bad)
 
 
+# ── resource scope ────────────────────────────────────────────────────────────
+
+
+def test_build_default_scope_writes_no_key():
+    """A default-scope manifest is byte-identical to one written before the key existed."""
+    assert "resource_scope" not in _rm()
+    assert manifest.build("demo", TOOLS, RESOURCES, TEMPLATES, resource_scope="all") == _rm()
+
+
+@pytest.mark.parametrize("scope", ["templates", "none"])
+def test_build_records_a_narrowed_scope(scope):
+    m = manifest.build("demo", TOOLS, resource_scope=scope)
+    assert m["resource_scope"] == scope
+    assert m["format_version"] == manifest.FORMAT_VERSION
+
+
+def test_build_rejects_unknown_scope():
+    with pytest.raises(ValueError, match="resource scope"):
+        manifest.build("demo", TOOLS, resource_scope="some")
+
+
+def test_stored_scope():
+    assert manifest.stored_scope(_rm()) is None
+    assert manifest.stored_scope(manifest.build("demo", TOOLS, resource_scope="none")) == "none"
+    assert manifest.stored_scope({**_rm(), "resource_scope": "all"}) == "all"
+    assert manifest.stored_scope(["not", "a", "manifest"]) is None
+
+
+@pytest.mark.parametrize("value", ["some", None, 1, ["none"]])
+def test_stored_scope_rejects_unknown_value(value):
+    with pytest.raises(ValueError, match="resource_scope") as info:
+        manifest.stored_scope({**_rm(), "resource_scope": value})
+    assert "by hand" in str(info.value)
+    assert "mcpgen check" not in str(info.value)
+
+
+@pytest.mark.parametrize("value", ["some", None])
+def test_diff_rejects_unknown_resource_scope(value):
+    bad = {**manifest.build("demo", TOOLS), "resource_scope": value}
+    with pytest.raises(ValueError, match="resource_scope"):
+        manifest.diff(bad, manifest.build("demo", TOOLS))
+
+
+def test_diff_ignores_scope_difference():
+    """The scope says what was collected; it is not part of the server's contract."""
+    report = manifest.diff(manifest.build("demo", TOOLS, resource_scope="none"), manifest.build("demo", TOOLS))
+    assert not report.has_drift
+    assert report.advisory_count == 0
+
+
 @pytest.mark.parametrize("section", ["tools", "resources", "resource_templates"])
 def test_diff_rejects_non_dict_entry(section):
     """A hand-edited entry must fail as ValueError, never an AttributeError traceback."""
@@ -583,8 +633,32 @@ def test_render_text_untracked_advisory():
     stored = manifest.build("demo", TOOLS)
     text = manifest.render_text(manifest.diff(stored, _rm(templates=[])))
     assert "ADVISORY  demo: live resources are not tracked by the stored manifest" in text
-    assert "re-run with `--update` to track them, or pass `--resources none` to skip them" in text
+    assert "re-run with `--update` to track them, or with `--resources none --update` to stop listing them" in text
     assert text.endswith("No drift. (1 advisory)")
+
+
+def test_render_text_untracked_hint_keeps_tracked_templates():
+    """With templates tracked, the opt-out for statics is `templates`, which keeps them."""
+    stored = manifest.build("demo", TOOLS, None, TEMPLATES)
+    text = manifest.render_text(manifest.diff(stored, _rm()))
+    assert "or with `--resources templates --update` to stop listing them" in text
+    assert "--resources none" not in text
+
+
+def test_render_text_untracked_templates_beside_tracked_statics_has_no_opt_out():
+    """No scope lists resources without templates, so there is no opt-out to offer."""
+    stored = manifest.build("demo", TOOLS, RESOURCES, None)
+    text = manifest.render_text(manifest.diff(stored, _rm()))
+    assert (
+        "live resource templates are not tracked by the stored manifest; re-run with `--update` to track them\n" in text
+    )
+
+
+def test_to_json_reports_scope_when_narrowed():
+    report = manifest.diff(BASE, _m(TOOLS))
+    assert "resource_scope" not in manifest.to_json(report)
+    narrowed = dataclasses.replace(report, resource_scope="none")
+    assert manifest.to_json(narrowed)["resource_scope"] == "none"
 
 
 def test_resources_error_is_an_advisory():

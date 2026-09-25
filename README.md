@@ -238,9 +238,10 @@ changed tool contract. `--json` emits a structured report. `check` never calls a
 never reads a resource, and never touches `<server>.shapes.json`.
 
 A manifest written before 0.11.0 tracks no resources. Against a server that has some,
-`check` prints an advisory and exits 0; `--update` starts tracking them. A manifest from
-`codegen --resources none` looks the same, so check it with `--resources none` to keep it
-tools-only. Details in [`doc/USAGE.md`](doc/USAGE.md#drift-detection-mcpgen-check).
+`check` prints an advisory and exits 0; `--update` starts tracking them, and
+`--resources none --update` records that you leave them out. A manifest from
+`codegen --resources templates` or `--resources none` records that scope, and `check` lists
+only what it covers. Details in [`doc/USAGE.md`](doc/USAGE.md#drift-detection-mcpgen-check).
 
 To accept the new inventory, ask for it explicitly — `check` never writes on its own:
 
