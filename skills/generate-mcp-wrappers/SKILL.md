@@ -159,6 +159,22 @@ barrier stays on main.
    the human-readable log for everything the shape-spec cannot hold: skipped mutating and
    interactive tools, unprobed tools and why, and discriminator verdicts.
 
+   List each tool whose record shape no probe observed under a `## unprobed` heading, one line
+   apiece — tool, cause, detail — with the first cause below that fits:
+
+   - `id-gated` — a required argument takes an id no read-only tool supplied. Name the argument
+     and, when known, the producer tool that would mint it. Never run a mutating producer to
+     get one: it stays skipped without step 2c's explicit human yes.
+   - `entitlement-gated` — the server says the plan or account lacks the tool. Quote its
+     machine-readable class (`tool_error_class: entitlement_required`), else its message.
+   - `empty store` — the listing tool returned no items, so no record shape was observed.
+   - `tool error` — `probe` printed `[probe] tool returned isError: …`; cite that line.
+   - `timeout` — `probe` printed `[probe] timeout: …`; cite that line.
+   - `interactive`, `mutating` — skipped by policy and logged under `## mutating-skipped`
+     (`references/mutating-tools.md`), not repeated here.
+   - `inconclusive` — the residue: the probe ran but told nothing usable. Say what came back,
+     plus any note `references/probe-failures.md` asks for.
+
    a. Run `<mcpgen> list <server> --schema` → `[{name, description, inputSchema}]` for every
       tool, plus `annotations` on the tools whose server supplies it (the key is absent when it
       does not). **Probe only tools that appear in this output.** Do not add tools from
@@ -578,7 +594,8 @@ barrier stays on main.
    **Empty-store probes produce under-typed list fields.** A read tool returning `[]` leaves the
    element shape unobservable and the skeleton omits the field; add `"<field>": "list"` by hand to
    keep it visible, never a guessed element type. Note in `session-overview.md` that it is
-   unobservable at probe time, and recommend re-probing once the server holds representative data.
+   unobservable at probe time — when the empty list is the records themselves, as an `empty
+   store` line (step 2) — and recommend re-probing once the server holds representative data.
 
    **Bootstrapping sample args.** Some tools need a real id first (e.g. before probing
    `get_entity`). Find a no-arg / discovery tool on *this* server that returns user or entity ids

@@ -81,6 +81,6 @@ catalog of bootstrap ids and discriminator enum values, never a raw payload.
 
 Where it finds nothing, main falls back to `AskUserQuestion` for sample ids if step 2d's
 condition holds. Where it does not, probe only the tools whose required args reference nothing
-and record the rest as unprobed, naming the id you lacked.
+and record the rest unprobed with cause `id-gated` (SKILL.md step 2), naming the id you lacked.
 
 For dispatch mechanics see `superpowers:dispatching-parallel-agents`.

@@ -14,6 +14,11 @@ differently and only one of them is worth retrying:
 Misclassifying an auth failure as a challenge burns two backoffs and loses the actionable
 half — which credential to set.
 
+"Unprobed" means a line under `## unprobed` in `session-overview.md` with a cause from SKILL.md
+step 2: `tool error` for an `isError` result, `entitlement-gated` when its text says the plan
+or account lacks the tool, `timeout` when no answer came in time, and `inconclusive` for the
+rest here.
+
 ## First: read the raw payload
 
 `probe` records structure, not content. A text payload collapses to the bare shape `"str"`
@@ -52,9 +57,10 @@ Three outcomes, recorded differently:
   handle the error at runtime.
 - **The tool flagged its result `isError`.** `probe` rejects it: exit 1, no part file, and one
   `[probe] tool returned isError: <text>` line carrying the first 300 characters of the error
-  text, whitespace collapsed and credentials redacted. Record
-  the tool as **unprobed**, citing that printed text. The phrases above classify that text as
-  well: a quota, rate-limit or auth complaint there is not retried either.
+  text, whitespace collapsed and credentials redacted. Record the tool as **unprobed** with
+  cause `tool error` — `entitlement-gated` when the text names an entitlement — citing that
+  printed text. The phrases above classify that text as well: a quota, rate-limit or auth
+  complaint there is not retried either.
 - **The transport or protocol failed.** No payload, therefore no shape: record the tool as
   **unprobed** with the reason. Do not invent `_observed_shape: "str"` for a call that never
   returned.
@@ -125,7 +131,7 @@ backoff is not a challenge: a 403 that does is a real permission denial; a 5xx,
 
 Keep probing the other tools — entitlement is usually per tool, so most answer through a
 persistent 403 — and record any *further* tool hitting that marker as unprobed, naming both
-candidate causes and saying in `session-overview.md` which credential would have to be set.
+candidate explanations and saying in `session-overview.md` which credential would have to be set.
 That is the actionable half if the cause is entitlement, and it is lost if the failure is
 filed as a challenge.
 
@@ -150,8 +156,9 @@ When the tool sends no answer in time, the command exits 1 on `[probe] timeout: 
 within 60s (raise with --timeout)` (or `[call] timeout: …`) and writes nothing. The usual
 cause is a tool that waits for a human — one step 2b should have skipped as interactive
 (`references/mutating-tools.md`). Record the tool unprobed with cause `timeout` in
-`session-overview.md`. Do not retry at the same bound; re-issue once with a larger `--timeout`
-only when the description promises slow work, such as a report or an export.
+`session-overview.md`, citing the printed line. Do not retry at the same bound; re-issue once
+with a larger `--timeout` only when the description promises slow work, such as a report or an
+export.
 
 A timeout does not cancel the tool on the server: no `notifications/cancelled` is sent, so the
 call may still be running, or finish, after the command exits. A timed-out mutating call may

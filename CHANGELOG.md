@@ -139,6 +139,14 @@
   writes nothing. A script that read the `--out` file only after a zero exit now sees the
   failure.
 
+- **`generate-mcp-wrappers` records why each tool went unprobed.** `session-overview.md` lists
+  them under `## unprobed` as tool, cause and detail, the cause one of `id-gated` (with the
+  blocking argument and the producer tool that would mint it), `entitlement-gated` (quoting
+  the server's class, such as `tool_error_class: entitlement_required`), `empty store`,
+  `tool error`, `timeout`, or the residue `inconclusive`; interactive and mutating skips stay
+  under `## mutating-skipped`. Tools that needed an id, a plan the account lacks, or data the
+  store did not hold were all logged alike as inconclusive.
+
 ### Fixed
 
 - **`probe` no longer records a tool's error as its shape.** A tool reports its own failure
