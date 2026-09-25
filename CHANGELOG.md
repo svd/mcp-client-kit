@@ -152,6 +152,14 @@
   with `_observed_shape: "str"` and an `-> Any` wrapper, noted as deprecated in
   `session-overview.md`, not an unprobed or inconclusive tool.
 
+- **Both skills resolve `mcpgen` to one absolute path.** Step 0 turns each candidate —
+  `mcpgen` on `PATH`, `uv run mcpgen`, `.venv/bin/mcpgen`, and the runner's handed-over value —
+  into the path of the executable it would run before checking the version, and later blocks
+  paste that path in for `<mcpgen>`. Agents that kept `uv run mcpgen` in a shell variable ran
+  every probe of a batch wrong under `zsh`, where an unquoted `$c` does not word-split.
+  `session-overview.md` now also records a failed batch or command, with its error, when a
+  retry succeeded.
+
 ### Fixed
 
 - **`probe` no longer records a tool's error as its shape.** A tool reports its own failure

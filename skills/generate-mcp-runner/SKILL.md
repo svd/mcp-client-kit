@@ -78,22 +78,25 @@ block** — replace it with the actual tool call sequence you derive in steps 4�
 
 ### 0. Read the hand-off, then resolve the CLI
 
-Start from whatever the caller passed in — the **resolved `mcpgen` invocation**, server
-name, output dir, connection source (config path or direct transport params), and
-transport+auth kind. Any caller (the user, `generate-mcp-wrappers` step 7, or another
-skill/agent) may hand these off. For whatever was not passed, determine it from context
-(how the wrappers were generated, any `servers.json` entry, or the original `codegen`
-invocation). The invocation comes first because the check below runs on it.
+Start from whatever the caller passed in — the **resolved `mcpgen` path**, server name,
+output dir, connection source (config path or direct transport params), and transport+auth
+kind. Any caller (the user, `generate-mcp-wrappers` step 7, or another skill/agent) may hand
+these off. For whatever was not passed, determine it from context (how the wrappers were
+generated, any `servers.json` entry, or the original `codegen` invocation). The path comes
+first because the check below runs on it.
 
-`$MCPGEN` does not survive between tool invocations. State the invocation you settle on
-once in your report, then substitute that literal string wherever a block below writes
-`<mcpgen>`.
+`<mcpgen>` is the absolute path the check below prints, pasted in literally. `$MCPGEN` does
+not survive between tool invocations, and `uv run mcpgen` held in a variable or shell function
+of your own does not word-split in `zsh`, so a bare `$c` runs the wrong command. State the
+path once in your report, then substitute it wherever a block below writes `<mcpgen>`.
 
 Requires `mcpgen >= 0.11.0.dev1` (install: see README). Do not proceed on an older one.
 
 The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
 Try each candidate in turn and keep the first that both answers **and** meets the floor —
-an outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
+an outdated `mcpgen` on `PATH` must not shadow a current one in the venv. Each candidate is
+first resolved to the absolute path of the executable it would run, and the floor check runs
+on that path, so what the loop settles on is always one word:
 
 ```bash
 min=0.11.0.dev1; MCPGEN=
@@ -112,15 +115,23 @@ vkey() {  # PEP 440 version -> dotted key that sort -V orders correctly
   printf '%s.%s\n' "$r" "$s" | grep -E '^[0-9]+(\.[0-9]+)+$'
 }
 mkey=$(vkey "$min")
-# First candidate is the caller's invocation — drop it when none was handed over.
+# First candidate is the caller's path — drop it when none was handed over.
 for c in "<handed-over>" "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
   [ -n "$c" ] || continue
-  out=$(eval "$c --version" 2>/dev/null) || continue
+  case $c in
+    "uv run mcpgen")
+      p=$(uv run python -c 'import shutil; print(shutil.which("mcpgen") or "")' 2>/dev/null) ;;
+    /*)  p=$c ;;
+    */*) p=$PWD/$c ;;
+    *)   p=$(command -v "$c") ;;
+  esac
+  case $p in /*) [ -x "$p" ] || continue ;; *) continue ;; esac
+  out=$("$p" --version 2>/dev/null) || continue
   ver=$(printf '%s\n' "$out" | awk '{print $2}')
-  key=$(vkey "$ver") || { echo "skipping $c (unparsable version '$ver')"; continue; }
+  key=$(vkey "$ver") || { echo "skipping $p (unparsable version '$ver')"; continue; }
   [ "$(printf '%s\n%s\n' "$mkey" "$key" | sort -V | head -n 1)" = "$mkey" ] || \
-    { echo "skipping $c ($ver < $min)"; continue; }
-  MCPGEN="$c"; break
+    { echo "skipping $p ($ver < $min)"; continue; }
+  MCPGEN=$p; break
 done
 [ -n "$MCPGEN" ] || { echo "no mcpgen >= $min found on any invocation"; exit 1; }
 echo "resolved: $MCPGEN ($ver)"
@@ -134,8 +145,12 @@ Three things the loop depends on:
   gated nothing — a user who names an invocation by hand, or a skill with no floor of its
   own — for whom an unchecked string would skip the floor. A candidate that fails the floor
   falls through to the probe rather than aborting.
-- **`eval` for two-word invocations.** A bare `$c` does not word-split in `zsh`, so the
-  `uv run mcpgen` form never matches without it.
+- **Every candidate becomes one absolute path before it runs.** An absolute path is taken
+  as is and a relative one is anchored to `$PWD`; `uv run mcpgen` becomes the path `uv run`
+  would execute, found by `shutil.which` inside the project environment; a bare name goes
+  through `command -v`, which prints nothing usable for an alias or a shell function. Anything
+  that is not then an absolute path to an executable file is skipped, so a hand-off in any
+  other form — `uvx mcpgen`, say — falls through to the probe.
 - **`vkey` orders versions the PEP 440 way.** `sort -V` alone puts `0.11.0.dev1` above
   `0.11.0`. `vkey` splits the release part from the suffix and appends a rank, so `.devN` <
   `aN` < `bN` < `rcN` < final < `.postN`. The `$`-anchored `grep` rejects any suffix the ranks

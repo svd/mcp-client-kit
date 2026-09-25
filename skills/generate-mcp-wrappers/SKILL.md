@@ -33,11 +33,12 @@ These bite in every step, so they are stated once here rather than repeated per 
 - **Quote every substituted value.** A server name is a config key or a URL, so it can hold
   spaces, `?`, `&`, or glob characters — `"my server"`, `"my server/my server.py"`. Unquoted,
   it word-splits or globs in `sh`/`bash`, and globs in `zsh`.
-- **`eval` for two-word invocations.** A bare `$c` does not word-split in `zsh`, so a
-  `uv run mcpgen` form never matches without it.
-- **Shell variables do not survive between invocations.** `$MCPGEN` is not available to later
-  steps: state the resolved invocation once in your report, then substitute that literal
-  string wherever a block below writes `<mcpgen>`.
+- **`<mcpgen>` is the absolute path step 0 prints, pasted in literally.** Shell variables and
+  functions do not survive between invocations, so `$MCPGEN` is gone by step 1. Do not wrap
+  the command in a variable or function of your own either: a `c="uv run mcpgen"` run as a
+  bare `$c` does not word-split in `zsh`, so every line of the batch runs the wrong command.
+  State the path once in your report, then substitute it wherever a block below writes
+  `<mcpgen>`.
 - **An env prefix must be in the same invocation as the command.** `MCPGEN_SERVERS=servers.json
   <mcpgen> …` — it does not persist across calls.
 - **Never `|| echo` a failure.** It returns 0 and hides the error, including from `set -e`.
@@ -65,7 +66,9 @@ barrier stays on main.
 
    The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
    Probe the three forms and keep the first that both answers **and** meets the floor — an
-   outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
+   outdated `mcpgen` on `PATH` must not shadow a current one in the venv. Each form is first
+   resolved to the absolute path of the executable it would run, and the floor check runs on
+   that path, so what the loop settles on is always one word:
 
    ```bash
    min=0.11.0.dev1; MCPGEN=
@@ -85,16 +88,29 @@ barrier stays on main.
    }
    mkey=$(vkey "$min")
    for c in "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
-     out=$(eval "$c --version" 2>/dev/null) || continue
+     case $c in
+       "uv run mcpgen")
+         p=$(uv run python -c 'import shutil; print(shutil.which("mcpgen") or "")' 2>/dev/null) ;;
+       */*) p=$PWD/$c ;;
+       *)   p=$(command -v "$c") ;;
+     esac
+     case $p in /*) [ -x "$p" ] || continue ;; *) continue ;; esac
+     out=$("$p" --version 2>/dev/null) || continue
      ver=$(printf '%s\n' "$out" | awk '{print $2}')
-     key=$(vkey "$ver") || { echo "skipping $c (unparsable version '$ver')"; continue; }
+     key=$(vkey "$ver") || { echo "skipping $p (unparsable version '$ver')"; continue; }
      [ "$(printf '%s\n%s\n' "$mkey" "$key" | sort -V | head -n 1)" = "$mkey" ] || \
-       { echo "skipping $c ($ver < $min)"; continue; }
-     MCPGEN="$c"; break
+       { echo "skipping $p ($ver < $min)"; continue; }
+     MCPGEN=$p; break
    done
    [ -n "$MCPGEN" ] || { echo "no mcpgen >= $min found on any invocation"; exit 1; }
    echo "resolved: $MCPGEN ($ver)"
    ```
+
+   `uv run mcpgen` becomes the path `uv run` would execute, found by `shutil.which` inside the
+   project environment; `.venv/bin/mcpgen` is anchored to `$PWD`; a bare name goes through
+   `command -v`, which prints nothing usable for an alias or a shell function, so those are
+   skipped. Anything that is not an absolute path to an executable file is skipped the same
+   way.
 
    `sort -V` alone misorders PEP 440: it puts `0.11.0.dev1` above `0.11.0`. `vkey` fixes that
    by splitting the release part from the suffix and appending a rank for the suffix, so
@@ -157,7 +173,7 @@ barrier stays on main.
 
    Keep a running `session-overview.md` beside the generated module (the `--out` dir). It is
    the human-readable log for everything the shape-spec cannot hold: skipped mutating and
-   interactive tools, unprobed tools and why, and discriminator verdicts.
+   interactive tools, unprobed tools and why, failed commands, and discriminator verdicts.
 
    List each tool whose record shape no probe observed under a `## unprobed` heading, one line
    apiece — tool, cause, detail — with the first cause below that fits:
@@ -174,6 +190,11 @@ barrier stays on main.
      (`references/mutating-tools.md`), not repeated here.
    - `inconclusive` — the residue: the probe ran but told nothing usable. Say what came back,
      plus any note `references/probe-failures.md` asks for.
+
+   A probe batch or command that failed stays in the log with the error it printed, even when
+   a re-issue succeeded: say what failed, why, and what the retry changed. Write "no errors"
+   only for a session in which nothing failed — a clean retry is the fix, not evidence that
+   the first run was clean.
 
    a. Run `<mcpgen> list <server> --schema` → `[{name, description, inputSchema}]` for every
       tool, plus `annotations` on the tools whose server supplies it (the key is absent when it
@@ -778,9 +799,9 @@ barrier stays on main.
      read-only, so the runner includes them by default; name the data-like statics step 2b
      skipped so it leaves their accessors out. Name any tool whose description says to read
      a resource first, so the runner orders that accessor ahead of it.
-   - **Resolved `mcpgen` invocation** — the literal string step 0 settled on. Pass it
-     explicitly: the runner tries it as its first candidate, so one `--version` call settles
-     its check instead of a fresh probe down the same three forms.
+   - **Resolved `mcpgen` path** — the absolute path step 0 printed. Pass it explicitly: the
+     runner tries it as its first candidate, so one `--version` call settles its check instead
+     of a fresh probe down the same three forms.
    - **Server name** — `<server>`.
    - **Output folder** — the dir from `--out` (e.g. `<server>/`), holding `<server>.py`,
      `<shapes-path>`, and `<shapes-stem>.verify.json`.
