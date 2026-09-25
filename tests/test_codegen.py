@@ -1524,6 +1524,304 @@ def test_render_tool_enum_param_uses_literal():
     ast.parse(module_src)
 
 
+# ---------------------------------------------------------------------------
+# anyOf/oneOf of closed branches (const/enum, optionally null) → Literal[...]
+# ---------------------------------------------------------------------------
+
+
+def test_py_type_anyof_consts_literal():
+    assert codegen.py_type({"anyOf": [{"const": "a"}, {"const": "b"}]}) == "Literal['a', 'b']"
+
+
+def test_py_type_oneof_consts_literal():
+    assert codegen.py_type({"oneOf": [{"const": "a"}, {"const": "b"}]}) == "Literal['a', 'b']"
+
+
+def test_py_type_anyof_const_null_branch_is_optional():
+    assert codegen.py_type({"anyOf": [{"const": "a"}, {"type": "null"}]}) == "Literal['a'] | None"
+
+
+def test_py_type_anyof_const_none_value_is_optional():
+    assert codegen.py_type({"anyOf": [{"const": "a"}, {"const": None}]}) == "Literal['a'] | None"
+
+
+def test_py_type_anyof_sibling_nullable_type_is_optional():
+    schema = {"type": ["string", "null"], "anyOf": [{"const": "a"}, {"const": "b"}]}
+    assert codegen.py_type(schema) == "Literal['a', 'b'] | None"
+
+
+def test_py_type_anyof_const_branches_with_extra_keys():
+    # Zod / pydantic branches carry type, title and description beside the const.
+    schema = {
+        "anyOf": [
+            {"type": "string", "const": "x", "description": "The x mode"},
+            {"type": "string", "const": "y", "title": "Y"},
+        ]
+    }
+    assert codegen.py_type(schema) == "Literal['x', 'y']"
+
+
+def test_py_type_pydantic_optional_enum():
+    # Pydantic's Optional[Literal['a', 'b']].
+    schema = {"anyOf": [{"type": "string", "enum": ["a", "b"]}, {"type": "null"}], "default": None}
+    assert codegen.py_type(schema) == "Literal['a', 'b'] | None"
+
+
+def test_py_type_anyof_const_and_open_branch_is_any():
+    assert codegen.py_type({"anyOf": [{"const": "a"}, {"type": "string"}]}) == "Any"
+
+
+def test_py_type_anyof_float_const_is_any():
+    assert codegen.py_type({"anyOf": [{"const": 1.5}, {"const": "a"}]}) == "Any"
+
+
+def test_py_type_anyof_consts_dedupe_keeps_int_and_bool_apart():
+    # 1 == True in Python, but they are distinct Literal members.
+    assert codegen.py_type({"anyOf": [{"const": 1}, {"const": True}, {"const": 1}]}) == "Literal[1, True]"
+
+
+def test_py_type_anyof_quotes_render_via_repr():
+    schema = {"anyOf": [{"const": "it's"}, {"const": 'b"q'}]}
+    assert codegen.py_type(schema) == "Literal[\"it's\", 'b\"q']"
+
+
+def test_py_type_anyof_null_only_or_empty_is_any():
+    assert codegen.py_type({"anyOf": [{"type": "null"}]}) == "Any"
+    assert codegen.py_type({"anyOf": []}) == "Any"
+
+
+def test_py_type_allof_consts_stay_any():
+    assert codegen.py_type({"allOf": [{"const": "a"}]}) == "Any"
+    assert codegen.py_type({"anyOf": [{"const": "a"}], "allOf": [{"const": "a"}]}) == "Any"
+
+
+def test_py_type_lone_const_literal():
+    assert codegen.py_type({"const": "x"}) == "Literal['x']"
+    assert codegen.py_type({"type": "string", "const": "x"}) == "Literal['x']"
+    assert codegen.py_type({"type": "integer", "const": 3}) == "Literal[3]"
+
+
+def test_py_type_lone_const_unsafe_falls_through():
+    assert codegen.py_type({"type": "number", "const": 1.5}) == "float"
+    assert codegen.py_type({"const": None}) == "Any"
+
+
+def test_py_type_array_of_anyof_consts():
+    schema = {"type": "array", "items": {"anyOf": [{"const": "a"}, {"const": "b"}]}}
+    assert codegen.py_type(schema) == "list[Literal['a', 'b']]"
+
+
+def test_render_module_anyof_const_optional_param_imports_literal():
+    tools = [
+        {
+            "name": "set_policy",
+            "description": "Set the policy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"policy": {"anyOf": [{"const": "a"}, {"type": "null"}]}},
+            },
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert "from typing import Any, Literal" in src
+    assert "policy: Literal['a'] | None = None" in src
+    assert "| None | None" not in src
+    ast.parse(src)
+
+
+def test_render_module_nested_list_enum_imports_literal():
+    tools = [
+        {
+            "name": "grid",
+            "description": "Grid.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cells": {
+                        "type": "array",
+                        "items": {"type": "array", "items": {"type": "string", "enum": ["x", "o"]}},
+                    }
+                },
+                "required": ["cells"],
+            },
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert "cells: list[list[Literal['x', 'o']]]" in src
+    assert "from typing import Any, Literal" in src
+
+
+def test_render_module_literal_override_imports_literal():
+    tools = [
+        {
+            "name": "sort_items",
+            "description": "Sort items.",
+            "inputSchema": {"type": "object", "properties": {"direction": {"type": "string"}}},
+        }
+    ]
+    shapes = {"sort_items": {"input_overrides": {"direction": "Literal['asc', 'desc']"}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert "direction: Literal['asc', 'desc'] | None = None" in src
+    assert "Literal" in src.split("from typing import ", 1)[1].splitlines()[0]
+
+
+def test_render_module_without_literal_params_skips_literal_import():
+    tools = [
+        {
+            "name": "echo",
+            "description": "Mentions Literal[ in prose only.",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}},
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert "from typing import Any\n" in src
+
+
+def _typing_import(src: str) -> str:
+    return next(line for line in src.splitlines() if line.startswith("from typing import "))
+
+
+def test_render_module_template_override_literal_imports_literal():
+    templates = [{"uriTemplate": "res://items/{kind}", "name": "items"}]
+    shapes = {"res://items/{kind}": {"kind": "resource_template", "input_overrides": {"kind": "Literal['a', 'b']"}}}
+    src = codegen.render_module("demo", [], shapes, resource_templates=templates)
+    assert "kind: Literal['a', 'b']" in src
+    assert _typing_import(src) == "from typing import Any, Literal"
+
+
+def test_render_module_model_field_literal_imports_literal():
+    tools = [{"name": "get", "description": "Get.", "inputSchema": {"type": "object", "properties": {}}}]
+    shapes = {"get": {"return_model": "Item", "fields": {"status": "Literal['open', 'closed']"}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert "status: Literal['open', 'closed']" in src
+    assert _typing_import(src) == "from typing import Any, Literal, TypedDict, cast"
+
+
+def test_render_module_typing_literal_override_needs_no_literal_import():
+    tools = [
+        {
+            "name": "sort_items",
+            "description": "Sort items.",
+            "inputSchema": {"type": "object", "properties": {"direction": {"type": "string"}}},
+        }
+    ]
+    shapes = {"sort_items": {"input_overrides": {"direction": "typing.Literal['asc']"}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert _typing_import(src) == "from typing import Any"
+
+
+def test_render_module_float_enum_skips_literal_import():
+    tools = [
+        {
+            "name": "scale",
+            "description": "Scale.",
+            "inputSchema": {"type": "object", "properties": {"factor": {"type": "number", "enum": [0.5, 1.5]}}},
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert "factor: float | None = None" in src
+    assert _typing_import(src) == "from typing import Any"
+
+
+def test_render_module_discriminator_without_overloads_imports_only_used_names():
+    tools = [
+        {
+            "name": "get",
+            "description": "Get.",
+            "inputSchema": {"type": "object", "properties": {"kind": {"type": "string"}}, "required": ["kind"]},
+        }
+    ]
+    # No variant carries a return_model, so no @overload stub is emitted.
+    shapes = {"get": {"discriminator": "kind", "variants": {"a": {}, "b": {}}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert "@overload" not in src
+    assert _typing_import(src) == "from typing import Any, cast"
+    ast.parse(src)
+
+
+def test_render_module_discriminator_for_unlisted_tool_imports_nothing_extra():
+    tools = [{"name": "echo", "description": "Echo.", "inputSchema": {"type": "object", "properties": {}}}]
+    shapes = {"other": {"discriminator": "kind", "variants": {"a": {"return_model": "A", "fields": {"x": "int"}}}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert _typing_import(src) == "from typing import Any"
+
+
+def test_render_module_unparsable_override_still_imports_named_typing():
+    # A malformed hand-edited annotation leaves nothing to walk; fall back to a
+    # whole-word match so the import errs on the side of being present.
+    tools = [
+        {
+            "name": "sort_items",
+            "description": "Sort items.",
+            "inputSchema": {"type": "object", "properties": {"direction": {"type": "string"}}},
+        }
+    ]
+    shapes = {"sort_items": {"input_overrides": {"direction": "Literal['asc'"}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert _typing_import(src) == "from typing import Any, Literal"
+
+
+def test_render_module_lone_surrogate_description_falls_back():
+    # ast.parse cannot encode a lone surrogate; render_module must still return source.
+    tools = [{"name": "echo", "description": "bad \ud800 text", "inputSchema": {"type": "object", "properties": {}}}]
+    src = codegen.render_module("demo", tools)
+    assert _typing_import(src) == "from typing import Any"
+    assert "async def echo(" in src
+
+
+def test_render_module_params_named_like_typing_names_skip_import():
+    tools = [
+        {
+            "name": "tag",
+            "description": "Tag.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"cast": {"type": "string"}, "Literal": {"type": "string"}},
+                "required": ["cast"],
+            },
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert 'args: dict[str, Any] = {"cast": cast}' in src
+    assert _typing_import(src) == "from typing import Any"
+
+
+def test_render_module_param_named_cast_does_not_hide_cast_used_elsewhere():
+    tools = [
+        {
+            "name": "tag",
+            "description": "Tag.",
+            "inputSchema": {"type": "object", "properties": {"cast": {"type": "string"}}},
+        },
+        {"name": "get", "description": "Get.", "inputSchema": {"type": "object", "properties": {}}},
+    ]
+    shapes = {"get": {"return_model": "Item", "fields": {"x": "int"}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert _typing_import(src) == "from typing import Any, TypedDict, cast"
+
+
+def test_render_module_overloaded_anyof_const_param_parses():
+    tools = [
+        {
+            "name": "get",
+            "description": "Get.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string"},
+                    "mode": {"anyOf": [{"const": "fast"}, {"const": "slow"}, {"type": "null"}]},
+                },
+                "required": ["kind"],
+            },
+        }
+    ]
+    shapes = {"get": {"discriminator": "kind", "variants": {"a": {"return_model": "R", "fields": {"x": "int"}}}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert "mode: Literal['fast', 'slow'] | None = None" in src
+    assert "| None | None" not in src
+    ast.parse(src)
+
+
 # ── --embed-schema tests ──────────────────────────────────────────────────────
 
 _EMBED_TOOL = {

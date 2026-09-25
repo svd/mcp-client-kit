@@ -97,6 +97,11 @@
   silently. It now exits `1` before any live call and says to merge first. Keys too long for
   a filename are cut short and end in a sha256 suffix; tool part names are unchanged.
 
+- **A lone `const` parameter is typed as a `Literal`.** `{"type": "string", "const": "x"}`,
+  which rendered as `str`, and `{"const": "x"}`, which rendered as `Any`, both become
+  `Literal['x']` on the next regenerate, so a caller passing any other value now fails type
+  checking. A `null` or float `const` keeps the old type.
+
 - **The plugin's engine floor rises to `mcpgen >= 0.11.0`** in both skills' step 0. The skills
   now instruct `list --resources` and `probe --resource`, which 0.10.0 does not have, and
   generated runners call `McpBridgeCaller.read_resource`.
@@ -119,6 +124,25 @@
   fields match an existing `_N` model reuses it instead of emitting another. The collision
   warning names the tool, variant or URI involved. Resources made this easier to hit: a tool
   and a resource serving the same entity often pick the same name.
+
+- **A closed `anyOf`/`oneOf` parameter is typed as a `Literal`, not `Any`.** Zod and pydantic
+  express a value set as a union of `const` branches, or as pydantic's
+  `Optional[Literal[...]]`: `anyOf: [{"type": "string", "enum": ["a", "b"]}, {"type":
+  "null"}]`. `codegen` punted every union to `Any`, so such a parameter rendered as `policy:
+  Any | None = None`. A union whose branches each carry a `const` or a non-empty `enum`
+  (whatever other keys sit beside it) or are `{"type": "null"}` now renders as
+  `Literal['a', 'b']`, plus `| None` when a branch allows null. A union with an open branch,
+  a float value, or any `allOf` stays `Any`.
+
+- **Generated modules import exactly the `typing` names they use.** The `Literal` import was
+  gated on a top-level `enum` or one inside `items`, so `list[list[Literal[...]]]` and a
+  `Literal` written into a tool's or resource template's `input_overrides` or a model's
+  `fields` referenced `Literal` without importing it, while a float-only `enum`, which renders
+  as `float`, imported it unused. A discriminator entry imported `Literal`, `TypedDict`,
+  `cast` and `overload` even when no `@overload` was emitted. `codegen` now reads the names
+  off the rendered code: `Literal`, `TypedDict`, `cast` and `overload` are imported only when
+  used as bare names, so a docstring, `typing.Literal[...]` or a tool parameter named `cast`
+  does not count. `Any` is always imported.
 
 ## [0.10.0] — 2026-09-09
 

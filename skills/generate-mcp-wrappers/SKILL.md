@@ -501,11 +501,12 @@ barrier stays on main.
    > 20 the sweep proceeds without asking — the threshold is what the interactive gate guards,
    > not the sweep itself.
 
-   Enumerate discriminator values from: (a) the param's `enum` in `inputSchema`; (b) discovery
-   tools / glossary / tool descriptions (e.g. `get_filters` / `get_entity_fields` per
-   `entityType`); (c) `AskUserQuestion` if not discoverable from available tools — and where 2d's
-   condition is not met there is no (c): probe the values you did discover, and record the
-   candidate as unconfirmed with the values you could not enumerate.
+   Enumerate discriminator values from: (a) the param's `enum`, `const`, or `anyOf`/`oneOf` of
+   `const`/`enum` branches in `inputSchema`; (b) discovery tools / glossary / tool descriptions
+   (e.g. `get_filters` / `get_entity_fields` per `entityType`); (c) `AskUserQuestion` if not
+   discoverable from available tools — and where 2d's condition is not met there is no (c):
+   probe the values you did discover, and record the candidate as unconfirmed with the values
+   you could not enumerate.
 
    **Check `inputSchema.required` before constructing probe args.** If the array is non-empty,
    never probe with `'{}'` — call the tool with minimal valid args on the first attempt. For a
@@ -516,12 +517,14 @@ barrier stays on main.
    GitHub servers, prefer `owner: "microsoft", repo: "vscode"` — real, public, and carrying
    releases, tags, and issues to observe.
 
-   **Inspect `inputSchema` for enum constraints** (`inputSchema.properties[param].enum`). If an
-   `enum` array is present, use its **first listed value** rather than inventing one — a
-   validating server rejects invented values, and mcpgen itself does not check. Record the chosen
-   value in `probed_args`. Codegen maps scalar enum members to `Literal[...]` automatically
-   (float and object members fall back to `float` / `dict`), so the generated signature already
-   encodes the allowed values.
+   **Inspect `inputSchema` for enum constraints.** A param pins its values with an `enum` array,
+   a `const`, or an `anyOf`/`oneOf` whose branches each carry a `const` or `enum` (Zod and
+   pydantic emit this, often with a `{"type": "null"}` branch). If any of these is present, use
+   the **first listed non-null value** rather than inventing one — a validating server rejects
+   invented values, and mcpgen itself does not check. Record the chosen value in `probed_args`.
+   Codegen maps all three forms to `Literal[...]` automatically when the values are scalars (a
+   float falls back to the declared type in an `enum`/`const` and to `Any` in a union), so the
+   generated signature already encodes the allowed values.
 
    **JSON-in-string detection.** Some servers double-encode: the record arrives as a JSON *string*
    inside the MCP envelope (e.g. `directory_tree`), so the client parses the envelope and still
@@ -825,9 +828,11 @@ barrier stays on main.
   from one `entityType` value misdescribes every response the other values return.
 
 - **Scalar enum params render as `Literal[...]` automatically** — do not hand-widen them to `str`.
-  A param whose `inputSchema` carries an `enum` of scalars gets one with no flag required; float
-  and object members fall back to `float` / `dict`. Widen to `str` only if the server actually
-  accepts values outside the declared enum.
+  A param whose `inputSchema` pins scalar values — an `enum`, a `const`, or an `anyOf`/`oneOf`
+  of `const`/`enum` branches plus an optional null branch — gets one with no flag required. A
+  float in an `enum`/`const` falls back to the declared type; a union with a float or an open
+  branch falls back to `Any`. Widen to `str` only if the server actually accepts values
+  outside the declared set.
 
 - **Review `probed_args` before committing.** `mcpgen merge` scrubs the committed
   `<shapes-path>` automatically; step 4 is where you catch what its patterns cannot recognise.

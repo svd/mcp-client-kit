@@ -7,6 +7,7 @@ depend only on the seam Protocols (mcpgen.seam), never on a concrete client.
 
 from __future__ import annotations
 
+import ast
 import keyword
 import re
 import sys
@@ -25,25 +26,94 @@ _SCALARS = {
 }
 
 
+# PEP 586 admits these as Literal parameters; floats, lists and dicts are not.
+_LITERAL_SAFE = (str, bool, int, bytes, type(None))
+
+
+def _literal_safe(vals: list) -> bool:
+    return all(type(v) in _LITERAL_SAFE for v in vals)
+
+
+def _literal(vals: list) -> str:
+    return "Literal[" + ", ".join(repr(v) for v in vals) + "]"
+
+
+def _closed_values(branch: dict) -> list | None:
+    """The values a union branch pins via `const` or a non-empty `enum`, or None if open."""
+    if "const" in branch:
+        return [branch["const"]]
+    vals = branch.get("enum")
+    return vals if isinstance(vals, list) and vals else None
+
+
+def _union_literal(schema: dict) -> str | None:
+    """`Literal[...]` for an anyOf/oneOf whose branches are all const/enum or null.
+
+    A branch with a `const` or a non-empty `enum` is closed whatever other keys
+    it carries; one with neither is a null branch if its `type` is "null", and
+    open otherwise. A null branch, a `None` value or a sibling `type` containing
+    "null" adds `| None`. Values keep their first-seen order and dedupe by
+    (type, value), so `1` and `True` stay apart. Returns None for any open
+    branch, an unsafe value, or no values.
+    """
+    if "anyOf" in schema and "oneOf" in schema:
+        return None
+    branches = schema.get("anyOf", schema.get("oneOf"))
+    if not isinstance(branches, list):
+        return None
+    t = schema.get("type")
+    nullable = t == "null" or (isinstance(t, list) and "null" in t)
+    vals: list = []
+    seen: set = set()
+    for b in branches:
+        if not isinstance(b, dict):
+            return None
+        pinned = _closed_values(b)
+        if pinned is None:
+            if b.get("type") == "null":
+                nullable = True
+                continue
+            return None
+        if not _literal_safe(pinned):
+            return None
+        for v in pinned:
+            if v is None:
+                nullable = True
+            elif (type(v), v) not in seen:
+                seen.add((type(v), v))
+                vals.append(v)
+    if not vals:
+        return None
+    return f"{_literal(vals)} | None" if nullable else _literal(vals)
+
+
 def py_type(schema: dict | None) -> str:
     """Map a JSON Schema fragment to a Python type annotation string."""
     if not schema or not isinstance(schema, dict):
         return "Any"
 
-    # Union-ish constructs: punt to Any rather than guess wrong.
+    # Unions: an anyOf/oneOf of const/enum (and null) branches is a closed value
+    # set and becomes Literal[...]; anything else, and every allOf, punts to Any
+    # rather than guess wrong.
+    if "allOf" not in schema and ("anyOf" in schema or "oneOf" in schema):
+        lit = _union_literal(schema)
+        if lit is not None:
+            return lit
     if any(k in schema for k in ("anyOf", "oneOf", "allOf")):
         return "Any"
 
+    # A lone non-null const pins one value, whatever `type` says.
+    if "const" in schema and schema["const"] is not None and _literal_safe([schema["const"]]):
+        return _literal([schema["const"]])
+
     # Enum: emit Literal[...] only when every member is a PEP 586-safe scalar.
-    # Floats, lists, and dicts are not valid Literal parameters; fall through to
-    # the type-based path so we emit the declared type (or Any) instead.
+    # Otherwise fall through to the type-based path so we emit the declared
+    # type (or Any) instead.
     enum_vals = schema.get("enum")
-    if isinstance(enum_vals, list) and enum_vals:
-        if all(type(v) in (str, bool, int, bytes, type(None)) for v in enum_vals):
-            t = schema.get("type")
-            nullable = isinstance(t, list) and "null" in t
-            inner = "Literal[" + ", ".join(repr(v) for v in enum_vals) + "]"
-            return f"{inner} | None" if nullable else inner
+    if isinstance(enum_vals, list) and enum_vals and _literal_safe(enum_vals):
+        t = schema.get("type")
+        nullable = isinstance(t, list) and "null" in t
+        return f"{_literal(enum_vals)} | None" if nullable else _literal(enum_vals)
 
     t = schema.get("type")
     if isinstance(t, list):  # e.g. ["string", "null"]
@@ -1008,6 +1078,53 @@ def _valid_templates(templates: list[dict]) -> list[dict]:
     return [out[k] for k in sorted(out)]
 
 
+# `typing` names a module body may reference. `Any` is always imported; the
+# rest only when the rendered code uses them.
+_TYPING_OPTIONAL = ("Literal", "TypedDict", "cast", "overload")
+
+
+def _names(node: ast.AST, skip: frozenset[str] = frozenset()) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and n.id not in skip}
+
+
+def _module_names(tree: ast.Module) -> set[str]:
+    """Bare names *tree* reads from module scope.
+
+    A function body's reference to one of its own parameters is local: a tool
+    param named `cast` renders `args["cast"] = cast`, which needs no import.
+    Decorators, annotations and defaults resolve in module scope and always
+    count. A body that shadows a name it also calls (a `cast` param on a
+    wrapper that returns `cast(...)`) is broken either way and not handled.
+    """
+    used: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            params = frozenset(a.arg for a in ast.walk(node.args) if isinstance(a, ast.arg))
+            for h in [*node.decorator_list, node.args, *([node.returns] if node.returns else [])]:
+                used |= _names(h)
+            for stmt in node.body:
+                used |= _names(stmt, params)
+        else:
+            used |= _names(node)
+    return used
+
+
+def _typing_imports(body: str) -> str:
+    """The `from typing import ...` line for a rendered module *body*.
+
+    A name counts when the body reads it from module scope as a bare name
+    (see `_module_names`), so docstrings and `typing.Literal[...]` do not.
+    Hand-edited annotations can make the body unparsable, and a lone surrogate
+    in a description makes it unencodable; a whole-word match then errs on
+    importing.
+    """
+    try:
+        used = _module_names(ast.parse(body))
+    except (SyntaxError, ValueError):  # UnicodeEncodeError is a ValueError
+        used = {n for n in _TYPING_OPTIONAL if re.search(rf"\b{n}\b", body)}
+    return "from typing import " + ", ".join(["Any", *(n for n in _TYPING_OPTIONAL if n in used)])
+
+
 def render_module(
     server: str,
     tools: list[dict],
@@ -1038,48 +1155,14 @@ def render_module(
     static_specs = [_resource_shape(shapes, "resource", r["uri"]) for r in static_list]
     template_specs = [_resource_shape(shapes, "resource_template", t["uriTemplate"]) for t in template_list]
     resource_specs = static_specs + template_specs
-    # Tool-level flags ignore resource entries: those only count when rendered,
-    # via resource_specs.
     tool_names = {t["name"] for t in tools}
     _warn_unmatched_resource_entries(shapes, tool_names, resources, resource_templates)
-    tool_shapes = [s for k, s in shapes.items() if not _is_resource_entry(k, s, tool_names)]
-    has_disc = any(s.get("discriminator") and s.get("variants") for s in tool_shapes)
+    # A resource entry only counts when rendered, via resource_specs.
     needs_json = bool(shapes) and any(
         s.get("unwrap") for s in [*(shapes.get(t["name"]) or {} for t in tools), *resource_specs]
     )
-    has_typed_return = has_disc or any(s.get("return_model") for s in [*tool_shapes, *resource_specs])
-
-    def _schema_has_enum(s: dict | None) -> bool:
-        if not isinstance(s, dict):
-            return False
-        if s.get("enum"):
-            return True
-        # recurse into array items (py_type can emit Literal for nested enums)
-        items = s.get("items")
-        return isinstance(items, dict) and bool(items.get("enum"))
-
-    has_enum = any(
-        any(_schema_has_enum(pschema) for pschema in (((t.get("inputSchema") or {}).get("properties") or {}).values()))
-        for t in tools
-    )
-    if has_disc:
-        type_imports = "from typing import Any, Literal, TypedDict, cast, overload"
-    elif has_typed_return and has_enum:
-        type_imports = "from typing import Any, Literal, TypedDict, cast"
-    elif has_typed_return:
-        type_imports = "from typing import Any, TypedDict, cast"
-    elif has_enum:
-        type_imports = "from typing import Any, Literal"
-    else:
-        type_imports = "from typing import Any"
-    imports = ("import json\n" + type_imports) if needs_json else type_imports
-    if not resource_names:
-        seam, about = "McpCaller", _ABOUT_TOOLS
-    elif tools:
-        seam, about = "McpCaller, McpResourceReader", _ABOUT_TOOLS_AND_RESOURCES
-    else:
-        seam, about = "McpResourceReader", _ABOUT_RESOURCES
-    parts = [_HEADER.format(server=server, about=about, probe_note=note, imports=imports, seam=seam)]
+    # Everything below the header; the header's typing import is derived from it.
+    parts: list[str] = []
 
     # Specs whose return_model was renamed by a collision; the renderers read
     # return_model from the spec they are handed, so they get these copies.
@@ -1162,7 +1245,18 @@ def render_module(
         parts.append(render_resource(r, resource_names["resource", r["uri"]], spec))
     for t, spec in zip(template_list, template_specs, strict=True):
         parts.append(render_resource_template(t, resource_names["resource_template", t["uriTemplate"]], spec))
-    return "\n\n\n".join(parts) + "\n"
+
+    body = "\n\n\n".join(parts)
+    type_imports = _typing_imports(body)
+    imports = ("import json\n" + type_imports) if needs_json else type_imports
+    if not resource_names:
+        seam, about = "McpCaller", _ABOUT_TOOLS
+    elif tools:
+        seam, about = "McpCaller, McpResourceReader", _ABOUT_TOOLS_AND_RESOURCES
+    else:
+        seam, about = "McpResourceReader", _ABOUT_RESOURCES
+    header = _HEADER.format(server=server, about=about, probe_note=note, imports=imports, seam=seam)
+    return "\n\n\n".join([header, *parts]) + "\n"
 
 
 # ── Response-shape summary (for the empirical probe) ─────────────────────────

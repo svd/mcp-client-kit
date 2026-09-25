@@ -830,12 +830,15 @@ union — it never raises.
 
 ### Enum params → `Literal[...]`
 
-Any input param whose `inputSchema` carries an `enum` array is automatically typed as
-`Literal[<v1>, <v2>, ...]` — no flag required. This applies to all scalar enums
-(string, int, …). Use `mcpgen list <server> --schema` to inspect the raw `enum` arrays
-before generating. Do not widen enum params to `str` in your calling code; if the server
-accepts values outside the declared enum, the appropriate fix is to update the shape-spec
-`input_overrides` for that param rather than loosening the call site.
+Any input param whose `inputSchema` pins its values is automatically typed as
+`Literal[<v1>, <v2>, ...]` — no flag required. That covers an `enum` array, a lone `const`,
+and an `anyOf`/`oneOf` whose branches are all `const`s, `enum`s or `{"type": "null"}` (the
+form Zod and pydantic emit; a null branch adds `| None`). Values must be scalars (string,
+int, bool): a float in an `enum` or `const` falls back to the declared type, while a float
+or any open branch in a union leaves the param `Any`. Use `mcpgen list <server> --schema` to inspect the raw schemas before generating. Do
+not widen these params to `str` in your calling code; if the server accepts values outside
+the declared set, the appropriate fix is to update the shape-spec `input_overrides` for that
+param rather than loosening the call site.
 
 ---
 
