@@ -62,7 +62,7 @@ barrier stays on main.
 
 ## Procedure
 
-0. **Resolve the CLI.** Requires `mcpgen >= 0.11.0.dev1`. Do not proceed on an older one.
+0. **Resolve the CLI.** Requires `mcpgen >= 0.11.0.dev2`. Do not proceed on an older one.
 
    The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
    Probe the three forms and keep the first that both answers **and** meets the floor — an
@@ -71,7 +71,7 @@ barrier stays on main.
    that path, so what the loop settles on is always one word:
 
    ```bash
-   min=0.11.0.dev1; MCPGEN=
+   min=0.11.0.dev2; MCPGEN=
    vkey() {  # PEP 440 version -> dotted key that sort -V orders correctly
      local r s
      r=${1%%[!0-9.]*}; r=${r%.}; s=${1#"$r"}; s=${s#.}
