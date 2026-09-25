@@ -580,7 +580,11 @@ barrier stays on main.
 
    Record `"_json_unwrap": true` as a note for the next reader. `NOT_JSON` is an **expected
    outcome**, not a probe failure: the payload is prose or a bare scalar, `_observed_shape: "str"`
-   stands, and nothing is recorded as an error.
+   stands, and nothing is recorded as an error. That includes a fixed notice a tool returns
+   whatever the args — a deprecation, "moved to …" — often flagged `[DEPRECATED]` in its title
+   or description: the tool answered, deterministically, so it is observed, not unprobed and not
+   `inconclusive`. Keep the wrapper `-> Any` and say in `session-overview.md` that it is
+   deprecated, quoting the notice.
 
    **Image / binary / media tools.** `image`, `resource`, and `resource_link` blocks surface as
    small metadata dicts — `{"type", "mimeType", "has_data"}` and friends — never the base64

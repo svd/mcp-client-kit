@@ -147,6 +147,11 @@
   under `## mutating-skipped`. Tools that needed an id, a plan the account lacks, or data the
   store did not hold were all logged alike as inconclusive.
 
+- **A deprecated tool's fixed notice counts as observed.** A tool that returns the same prose
+  whatever the args, such as a deprecation or "moved to …" notice, is a `NOT_JSON` observation
+  with `_observed_shape: "str"` and an `-> Any` wrapper, noted as deprecated in
+  `session-overview.md`, not an unprobed or inconclusive tool.
+
 ### Fixed
 
 - **`probe` no longer records a tool's error as its shape.** A tool reports its own failure
