@@ -58,6 +58,22 @@
   variables from `verify.json`, and places one before any tool whose description says to
   read it first.
 
+- **`probe` and `call` time out a tool that never answers.** A tool that waits for a human,
+  such as Playwright's `browser_annotate`, hung `probe` forever. Both commands now bound each
+  tool call with `--timeout SECONDS` (default 60; `0` waits forever); on expiry they exit `1`
+  with `[probe] timeout: no answer within 60s (raise with --timeout)` (or `[call] timeout: …`)
+  and write no part file or `--out` file. `codegen --probe` takes the same flag. The bound is
+  the SDK's per-request read timeout, so the session still closes normally and a stdio
+  server's process tree is still terminated; the server is not told to cancel the call. It
+  does not cover connecting or the `initialize` handshake, nor a `probe --resource` read,
+  which notes on stderr that an explicit `--timeout` does not apply. `codegen --probe` also
+  reports a tool error in one line instead of a traceback. In code it is
+  `McpBridgeCaller(call_timeout=...)`; the default `None` leaves generated wrappers unbounded.
+  The `generate-mcp-wrappers` skill skips tools whose description says they wait for user
+  input, confirmation or a pick in the browser as **interactive**, logged under
+  `mutating-skipped`, and records a timed-out tool as unprobed with cause `timeout`;
+  `generate-mcp-runner` leaves interactive tools out of `run.py`.
+
 ### Changed
 
 - **Manifests gain resource sections on the next regenerate.** `codegen` defaults to
@@ -111,6 +127,11 @@
   generated runners call `McpBridgeCaller.read_resource`.
 
 ### Fixed
+
+- **`call` reports a tool error in one line.** A server-side `McpError`, or any failure that
+  escaped the session as an exception group, printed a group traceback. `call` now handles it
+  as `probe` does: `[call] error: <cause>` and exit `1`, auth failures through the usual
+  re-login hint, and still no `--out` file.
 
 - **A second probe no longer counts as evidence for `list[T]`.** Plugin 0.5.0's
   `generate-mcp-wrappers` skill let a `fields` entry claim `list[str]` on the strength of the

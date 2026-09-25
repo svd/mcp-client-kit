@@ -5050,7 +5050,7 @@ def test_connected_reuses_session_across_calls_and_returns_results():
     async def fake_session(server, **kwargs):
         s = MagicMock()
 
-        async def call_tool(tool, arguments):
+        async def call_tool(tool, arguments, read_timeout_seconds=None):
             calls.append(tool)
             return MagicMock(content=[SimpleNamespace(type="text", text=json.dumps({"tool": tool}))])
 
@@ -5127,7 +5127,7 @@ def test_connected_concurrent_calls_are_not_serialized():
     async def fake_session(server, **kwargs):
         s = MagicMock()
 
-        async def call_tool(tool, arguments):
+        async def call_tool(tool, arguments, read_timeout_seconds=None):
             nonlocal in_flight, peak
             in_flight += 1
             peak = max(peak, in_flight)
@@ -5151,6 +5151,60 @@ def test_connected_concurrent_calls_are_not_serialized():
 
     asyncio.run(run())
     assert peak >= 2
+
+
+def _timeout_recording_session(recorded: list):
+    """A fake ``session()`` whose call_tool records its ``read_timeout_seconds``."""
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        s = MagicMock()
+
+        async def call_tool(tool, arguments, read_timeout_seconds=None):
+            recorded.append(read_timeout_seconds)
+            return MagicMock(content=[SimpleNamespace(type="text", text="{}")])
+
+        s.call_tool = call_tool
+        yield s
+
+    return fake_session
+
+
+@pytest.mark.parametrize("block", [False, True], ids=["one-shot", "connected"])
+def test_call_timeout_reaches_call_tool_as_a_timedelta(block):
+    from datetime import timedelta
+
+    recorded: list = []
+
+    async def run():
+        with patch("mcpgen._bridge.session", _timeout_recording_session(recorded)):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py", call_timeout=2.5)
+            if block:
+                async with caller.connected():
+                    await caller.call("demo", "greet", {})
+            else:
+                await caller.call("demo", "greet", {})
+
+    asyncio.run(run())
+    assert recorded == [timedelta(seconds=2.5)]
+
+
+@pytest.mark.parametrize("block", [False, True], ids=["one-shot", "connected"])
+def test_call_without_call_timeout_leaves_the_sdk_unbounded(block):
+    """The default, which generated wrappers get through the seam, sets no read timeout."""
+    recorded: list = []
+
+    async def run():
+        with patch("mcpgen._bridge.session", _timeout_recording_session(recorded)):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            if block:
+                async with caller.connected():
+                    await caller.call("demo", "greet", {})
+            else:
+                await caller.call("demo", "greet", {})
+
+    asyncio.run(run())
+    assert recorded == [None]
 
 
 def test_connected_open_failure_propagates_to_the_caller():

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import pytest
 from mcp.shared.exceptions import McpError
@@ -29,7 +30,7 @@ def test_codegen_produces_importable_module_and_manifest(tmp_path, stdio_cmd):
 
     payload = json.loads((tmp_path / "demo.mcpgen.json").read_text())
     assert payload["server"] == "demo"
-    assert set(payload["tools"]) == {"greet", "add", "list_records", "json_payload", "styled"}
+    assert set(payload["tools"]) == {"greet", "add", "list_records", "json_payload", "styled", "hang"}
     assert "name" in payload["tools"]["greet"]["inputSchema"]["required"]
 
     assert "async def read_demo_config" in source
@@ -238,6 +239,20 @@ def test_unknown_resource_error_escapes_a_one_shot_session_bare(stdio_cmd):
     caller = McpBridgeCaller(cmd=stdio_cmd)
     with pytest.raises(McpError, match="demo://nope"):
         asyncio.run(caller.read_resource("demo", "demo://nope"))
+
+
+def test_probe_of_a_tool_that_never_answers_times_out(tmp_path, stdio_cmd, capsys):
+    """--timeout bounds the tool call; the session still closes and reaps the server."""
+    shapes_file = tmp_path / "demo.shapes.json"
+    started = time.monotonic()
+    rc = main(["probe", "demo", "hang", "--stdio", stdio_cmd, "--timeout", "1", "--emit-shape", str(shapes_file)])
+    elapsed = time.monotonic() - started
+
+    assert rc == 1
+    assert "[probe] timeout: no answer within 1s (raise with --timeout)" in capsys.readouterr().err
+    assert not (tmp_path / "demo.shapes.json.parts").exists()
+    # 1s of timeout plus server start-up and the SDK's stdio shutdown, with slack for CI.
+    assert elapsed < 20
 
 
 def test_old_manifest_without_resource_sections_is_advised_then_tracked(tmp_path, stdio_cmd, capsys):

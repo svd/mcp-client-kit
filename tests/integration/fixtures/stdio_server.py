@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from typing import Literal
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("demo")
@@ -46,6 +47,13 @@ def json_payload() -> str:
 def styled(name: str, style: Literal["formal", "casual"] = "casual") -> str:
     """Greet with a named style — exercises an enum input schema."""
     return f"Good day, {name}." if style == "formal" else f"hey {name}"
+
+
+@mcp.tool()
+async def hang() -> str:
+    """Never answer, like a tool waiting for a human; probes of it must time out."""
+    await anyio.sleep_forever()
+    return "unreachable"
 
 
 # Eight arbitrary bytes, including ones that are not valid UTF-8, so the blob

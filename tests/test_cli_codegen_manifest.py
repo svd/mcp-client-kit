@@ -434,3 +434,57 @@ def test_codegen_resources_flag_passes_scope(tmp_path):
         assert inv.await_args.kwargs["scope"] == "all"
     with pytest.raises(SystemExit):
         main(["codegen", "demo", "--resources", "some"])
+
+
+# ── codegen --probe --timeout ─────────────────────────────────────────────────
+
+
+def _grouped(exc: BaseException) -> ExceptionGroup:
+    """*exc* as it escapes a one-shot session: wrapped by two anyio task groups."""
+    return ExceptionGroup("unhandled errors in a TaskGroup", [ExceptionGroup("unhandled errors in a TaskGroup", [exc])])
+
+
+def _sdk_timeout() -> McpError:
+    return McpError(
+        mcp_types.ErrorData(
+            code=408, message="Timed out while waiting for response to ClientRequest. Waited 5.0 seconds."
+        )
+    )
+
+
+@pytest.mark.parametrize(("argv_flag", "expected"), [(["--timeout", "5"], 5.0), (["--timeout", "0"], None), ([], 60.0)])
+def test_codegen_probe_timeout_reaches_probe(tmp_path, argv_flag, expected):
+    probe = AsyncMock(return_value=({"k": "str"}, 10, {"k": "v"}))
+    with (
+        patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=FAKE_TOOLS),
+        patch("mcpgen.cli._probe", probe),
+    ):
+        rc = main(["codegen", "demo", "--out", str(tmp_path / "demo.py"), "--probe", "greet", *argv_flag])
+    assert rc == 0
+    assert probe.await_args.kwargs["call_timeout"] == expected
+
+
+@pytest.mark.parametrize(
+    ("error", "marker"),
+    [
+        (_sdk_timeout(), "[codegen] timeout: no answer within 5s (raise with --timeout)"),
+        (
+            McpError(mcp_types.ErrorData(code=-32602, message="Unknown tool: greet")),
+            "[codegen] error: McpError: Unknown tool: greet",
+        ),
+    ],
+    ids=["timeout", "tool-error"],
+)
+def test_codegen_probe_failure_exits_1_and_writes_nothing(tmp_path, capsys, error, marker):
+    out = tmp_path / "demo.py"
+    with (
+        patch("mcpgen.cli._list_tools", new_callable=AsyncMock, return_value=FAKE_TOOLS),
+        patch("mcpgen.cli._probe", new_callable=AsyncMock, side_effect=_grouped(error)),
+    ):
+        rc = main(["codegen", "demo", "--out", str(out), "--probe", "greet", "--timeout", "5"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert marker in err
+    assert "Traceback" not in err
+    assert not out.exists()
+    assert not (tmp_path / "demo.mcpgen.json").exists()

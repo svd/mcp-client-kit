@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from typing import Literal
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("demo")
@@ -45,6 +46,13 @@ def styled(name: str, style: Literal["formal", "casual", "shouty"] = "casual") -
     if style == "formal":
         return f"Good day, {name}."
     return f"HEY {name.upper()}" if style == "shouty" else f"hey {name}"
+
+
+@mcp.tool()
+async def hang() -> str:
+    """Never answer, like a tool waiting for a human; probes of it must time out."""
+    await anyio.sleep_forever()
+    return "unreachable"
 
 
 @mcp.resource("demo://config", mime_type="text/plain", description="Server configuration.")

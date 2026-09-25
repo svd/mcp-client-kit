@@ -83,11 +83,11 @@ uv add mcp-client-kit            # or: pip install mcp-client-kit
 
 | Command | Purpose | Key flags |
 |---------|---------|-----------|
-| `codegen <server>` | Emit wrappers (typed inputs; typed returns once `--shapes` is supplied), resource accessors, and an inventory manifest | `--out`, `--shapes <path>`, `--probe <tool>` / `--probe-args`, `--embed-schema`, `--manifest <path>`, `--no-manifest`, `--resources {all,templates,none}` |
+| `codegen <server>` | Emit wrappers (typed inputs; typed returns once `--shapes` is supplied), resource accessors, and an inventory manifest | `--out`, `--shapes <path>`, `--probe <tool>` / `--probe-args` / `--timeout <seconds>`, `--embed-schema`, `--manifest <path>`, `--no-manifest`, `--resources {all,templates,none}` |
 | `check <server>` | Compare the live tool and resource inventory against a stored manifest | `--manifest <path>`, `--json`, `--update`, `--resources {all,templates,none}`, `--stdio` |
 | `list <server>` | Tools as JSON `[{name, description}]` (add `--schema` for `inputSchema` per tool); discriminator advisory and resource-count hint on stderr. `--resources` prints `{"resources": [...], "resourceTemplates": [...]}` instead | `--schema`, `--resources` |
-| `probe <server> <tool>` | Live call(s) → shape skeleton; with `--resource`, reads a resource URI or template instead | `--args` (repeatable), `--emit-shape <path>` (writes `.parts/`), `--save-raw <path>`, `--resource` |
-| `call <server> <tool>` | One live call, raw payload to disk — bootstrap ids / inspect output | `--out <path>` (required) |
+| `probe <server> <tool>` | Live call(s) → shape skeleton; with `--resource`, reads a resource URI or template instead | `--args` (repeatable), `--emit-shape <path>` (writes `.parts/`), `--save-raw <path>`, `--resource`, `--timeout <seconds>` |
+| `call <server> <tool>` | One live call, raw payload to disk — bootstrap ids / inspect output | `--out <path>` (required), `--args <json>`, `--timeout <seconds>` |
 | `read <server> <uri>` | Read one resource, contents to disk — the resource twin of `call` | `--out <path>` (required), `--args <json>` (template variables) |
 | `merge <server>` | Consolidate `.parts/` → `<server>.shapes.json`; emit gitignored `verify.json` | `--out <path>`, `--keep-parts`, `--no-scrub`, `--manifest <path>` |
 | `login <server>` | Browser OAuth login | `--headless` / `--no-headless`, `--callback-timeout <seconds>`, connection flags below |
@@ -109,6 +109,17 @@ command that reads or writes it.
 
 > **PII:** `call` and `read` write the raw, unscrubbed payload. Name the file
 > `*.probe-raw.json` (gitignored) and never commit it.
+
+**Tool-call timeout.** `probe` and `call` give each tool call `--timeout` seconds to answer
+(default 60; `0` waits forever). A tool that waits for a human — an annotation, a
+confirmation, a pick in the browser — never answers on its own. On expiry the command exits
+`1` with `[probe] timeout: no answer within 60s (raise with --timeout)` (or `[call] timeout:
+…`) and writes no part file or `--out` file. Only the `tools/call` request is bounded:
+connecting, the `initialize` handshake and a `probe --resource` read are not. A timeout does
+not cancel the tool on the server — no `notifications/cancelled` is sent — so a timed-out
+call that mutates may still have taken effect: check before re-issuing it. `codegen --probe`
+takes the same flag. In code, the same value is `call_timeout=` on `McpBridgeCaller`; its
+default, `None`, leaves generated wrappers unbounded.
 
 **Resources from the CLI.** `list --resources` prints each resource's `uri`, `name`,
 `title`, `description`, `mimeType`, and `size`, and each template's `uriTemplate`, `name`,

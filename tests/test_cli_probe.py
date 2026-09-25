@@ -730,3 +730,104 @@ def test_probe_grouped_bug_still_propagates():
             _cmd_probe(_ns("demo", "search", None))
 
     assert excinfo.group_contains(KeyError)
+
+
+# ---------------------------------------------------------------------------
+# --timeout
+# ---------------------------------------------------------------------------
+
+
+def _timeout_error() -> McpError:
+    """The error the SDK raises when a request's read timeout expires."""
+    return McpError(
+        mcp_types.ErrorData(
+            code=408, message="Timed out while waiting for response to ClientRequest. Waited 60.0 seconds."
+        )
+    )
+
+
+@pytest.mark.parametrize(("argv_flag", "expected"), [(["--timeout", "5"], 5.0), (["--timeout", "0"], None), ([], 60.0)])
+def test_probe_timeout_flag_reaches_probe(argv_flag, expected):
+    """--timeout reaches _probe as call_timeout; 0 means no limit (None); absent is 60s."""
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT) as probe:
+        assert main(["probe", "demo", "greet", *argv_flag]) == 0
+    assert probe.await_args.kwargs["call_timeout"] == expected
+
+
+@pytest.mark.parametrize("bad", ["-1", "abc", "nan", "inf", "1e14"])
+def test_probe_timeout_rejects_invalid(bad, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["probe", "demo", "greet", "--timeout", bad])
+    assert exc.value.code == 2
+    assert "argument --timeout" in capsys.readouterr().err
+
+
+def test_probe_helper_passes_call_timeout_to_the_bridge():
+    caller = MagicMock()
+    caller.call = AsyncMock(return_value={"ok": True})
+
+    with patch("mcpgen.cli._bridge.McpBridgeCaller", return_value=caller) as bridge:
+        asyncio.run(_probe("demo", "greet", {}, call_timeout=7.0))
+
+    assert bridge.call_args.kwargs["call_timeout"] == 7.0
+
+
+@pytest.mark.parametrize("wrap", [False, True], ids=["bare", "grouped"])
+def test_probe_timeout_exits_1_with_a_marker_and_writes_no_part(tmp_path, capsys, wrap):
+    shapes_file = tmp_path / "demo.shapes.json"
+    error = _grouped(_timeout_error()) if wrap else _timeout_error()
+
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, side_effect=error):
+        rc = main(["probe", "demo", "annotate", "--timeout", "5", "--emit-shape", str(shapes_file)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "[probe] timeout: no answer within 5s (raise with --timeout)" in err
+    assert "[probe] error" not in err
+    assert not (tmp_path / "demo.shapes.json.parts").exists()
+    assert not shapes_file.exists()
+
+
+def test_probe_timeout_marker_names_the_default(capsys):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, side_effect=_grouped(_timeout_error())):
+        rc = _cmd_probe(_ns("demo", "annotate", None))
+
+    assert rc == 1
+    assert "[probe] timeout: no answer within 60s (raise with --timeout)" in capsys.readouterr().err
+
+
+def test_probe_server_sent_408_is_reported_as_an_error_not_a_timeout(capsys):
+    """Only the SDK's own read timeout is a timeout; a server's JSON-RPC 408 is its error."""
+    server_408 = McpError(mcp_types.ErrorData(code=408, message="upstream took too long"))
+
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, side_effect=_grouped(server_408)):
+        rc = _cmd_probe(_ns("demo", "slow", None))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "[probe] error: McpError: upstream took too long" in err
+    assert "timeout:" not in err
+
+
+def test_probe_resource_with_explicit_timeout_notes_it_does_not_apply(capsys):
+    with patch("mcpgen.cli._probe_resource", new_callable=AsyncMock, return_value=_RESOURCE_RESULT):
+        rc = main(["probe", "demo", "demo://config", "--resource", "--timeout", "5"])
+
+    assert rc == 0
+    assert "[probe] note: --timeout does not apply to resource reads" in capsys.readouterr().err
+
+
+def test_probe_resource_without_timeout_prints_no_note(capsys):
+    with patch("mcpgen.cli._probe_resource", new_callable=AsyncMock, return_value=_RESOURCE_RESULT):
+        rc = main(["probe", "demo", "demo://config", "--resource"])
+
+    assert rc == 0
+    assert "--timeout" not in capsys.readouterr().err
+
+
+def test_probe_tool_with_explicit_timeout_prints_no_note(capsys):
+    with patch("mcpgen.cli._probe", new_callable=AsyncMock, return_value=_FAKE_PROBE_RESULT):
+        rc = main(["probe", "demo", "greet", "--timeout", "5"])
+
+    assert rc == 0
+    assert "does not apply" not in capsys.readouterr().err

@@ -45,6 +45,7 @@ import warnings
 import webbrowser
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
+from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, TypeVar
@@ -2048,7 +2049,20 @@ class _SessionBlock:
 
 
 class McpBridgeCaller:
-    """McpCaller implementation backed by the standalone MCP client."""
+    """McpCaller implementation backed by the standalone MCP client.
+
+    *call_timeout* bounds each ``tools/call`` round trip, in seconds, through the
+    SDK's per-request read timeout. On expiry the SDK raises an ``McpError`` with
+    code 408: bare from ``call()`` inside ``connected()``, but wrapped as
+    ``ExceptionGroup(ExceptionGroup(McpError))`` from a one-shot ``call()``, since
+    it leaves the session's task groups. The server is not told to cancel the
+    call (no ``notifications/cancelled``), so the tool may still run to
+    completion. The timeout does not cover opening the session (the
+    ``initialize`` handshake, OAuth) or closing it. The bound is the SDK's rather
+    than an outer cancel scope so the session still unwinds normally: an outer
+    cancellation would also cut short the stdio transport's shutdown, which is
+    what terminates the server's process tree. None (the default) waits forever.
+    """
 
     def __init__(
         self,
@@ -2061,6 +2075,7 @@ class McpBridgeCaller:
         cred_backend: str | None = None,
         creds_path: Path | None = None,
         env: dict[str, str] | None = None,
+        call_timeout: float | None = None,
     ) -> None:
         self._cmd = cmd
         self._url = url
@@ -2070,6 +2085,7 @@ class McpBridgeCaller:
         self._cred_backend = cred_backend
         self._creds_path = creds_path
         self._env = env
+        self._read_timeout = None if call_timeout is None else timedelta(seconds=call_timeout)
         self._block: _SessionBlock | None = None
 
     def _session_cm(self, server: str):
@@ -2124,9 +2140,8 @@ class McpBridgeCaller:
                 return await self._invoke(s, tool, arguments)
         return await self._invoke(await block.session_for(server), tool, arguments)
 
-    @staticmethod
-    async def _invoke(s: Any, tool: str, arguments: dict) -> Any:
-        result = await s.call_tool(tool, arguments)
+    async def _invoke(self, s: Any, tool: str, arguments: dict) -> Any:
+        result = await s.call_tool(tool, arguments, read_timeout_seconds=self._read_timeout)
         content = [_summarize_content_item(item) for item in result.content]
         return parse(content)
 

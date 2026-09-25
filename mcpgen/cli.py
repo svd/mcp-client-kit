@@ -21,7 +21,7 @@ import shutil
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote as _url_quote
@@ -159,6 +159,60 @@ def _check_reportable(group: BaseExceptionGroup) -> None:
         raise group
 
 
+CALL_TIMEOUT = 60.0
+"""Default seconds ``probe``, ``call`` and ``codegen --probe`` wait for a tool's answer (``--timeout``).
+
+Bounds the ``tools/call`` round trip only (see ``McpBridgeCaller``): opening
+the session, its ``initialize`` handshake and closing it are outside it, as is
+a ``probe --resource`` read.
+"""
+
+_REQUEST_TIMEOUT = 408
+_REQUEST_TIMEOUT_PREFIX = "Timed out while waiting for response to "
+"""How the SDK's read-timeout ``McpError`` reads: this code and a message with this prefix.
+
+A server can send a JSON-RPC error with code 408 too, so the code alone would report a
+server's own error as our timeout. Both come from ``BaseSession.send_request`` in mcp 1.27.2
+and are not part of its API: re-check them when the SDK is upgraded.
+"""
+
+
+def _timed_out(exc: BaseException) -> bool:
+    """True when *exc*, or any leaf of it, is the SDK's read-timeout ``McpError``."""
+    return any(
+        isinstance(leaf, McpError)
+        and leaf.error.code == _REQUEST_TIMEOUT
+        and leaf.error.message.startswith(_REQUEST_TIMEOUT_PREFIX)
+        for leaf in _leaves(exc)
+    )
+
+
+def _call_timeout_of(ns: argparse.Namespace) -> float | None:
+    """The tool-call timeout *ns* asks for: ``CALL_TIMEOUT`` when unset, None for ``0``."""
+    seconds = getattr(ns, "timeout", None)
+    if seconds is None:
+        return CALL_TIMEOUT
+    return seconds or None
+
+
+def _report_call_failure(command: str, exc: BaseException, timeout: float | None) -> int:
+    """Print why a live call or read for *command* (``probe``, ``call``, ``codegen``) failed; return exit status 1.
+
+    *exc* is an ``McpError``, bare or in the group escaping a one-shot session. A
+    group goes through ``_check_reportable`` first, so interrupts, auth failures
+    and bugs raise instead of printing. *timeout* is the read timeout the call
+    ran under (None for none); when it expired the line names ``--timeout``,
+    otherwise it is ``_bridge._describe(exc)``.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        _check_reportable(exc)
+    if timeout is not None and _timed_out(exc):
+        print(f"[{command}] timeout: no answer within {timeout:g}s (raise with --timeout)", file=sys.stderr)
+    else:
+        print(f"[{command}] error: {_bridge._describe(exc)}", file=sys.stderr)
+    return 1
+
+
 async def _list_inventory(server: str, *, scope: str, strict: bool = True, **conn: Any) -> Inventory:
     """List tools and, per *scope*, resources/templates over one session.
 
@@ -261,11 +315,13 @@ async def _probe(
     cred_backend: str | None = None,
     creds_path: Path | None = None,
     env: dict[str, str] | None = None,
+    call_timeout: float | None = None,
 ) -> tuple[Any, int, Any]:
     """Return `(observed_shape, observed_byte_size, raw_payload)` for one live probe call.
 
     The raw payload is kept so `probe --save-raw` can persist it without a
     second live call against a rate-limited server (see cli `_cmd_probe`).
+    *call_timeout* is ``McpBridgeCaller``'s.
     """
     caller = _bridge.McpBridgeCaller(
         cmd=cmd,
@@ -276,6 +332,7 @@ async def _probe(
         cred_backend=cred_backend,
         creds_path=creds_path,
         env=env,
+        call_timeout=call_timeout,
     )
     raw = await caller.call(server, tool, args)
     size = len(json.dumps(raw, default=str, ensure_ascii=False).encode("utf-8"))
@@ -339,6 +396,7 @@ async def _call(
     cred_backend: str | None = None,
     creds_path: Path | None = None,
     env: dict[str, str] | None = None,
+    call_timeout: float | None = None,
 ) -> Any:
     caller = _bridge.McpBridgeCaller(
         cmd=cmd,
@@ -349,6 +407,7 @@ async def _call(
         cred_backend=cred_backend,
         creds_path=creds_path,
         env=env,
+        call_timeout=call_timeout,
     )
     return await caller.call(server, tool, args)
 
@@ -802,11 +861,14 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
     if ns.probe:
         args = json.loads(ns.probe_args) if ns.probe_args else {}
         print(f"[codegen] probing {ns.probe}({args}) …", file=sys.stderr)
+        timeout = _call_timeout_of(ns)
         try:
-            shape, _size, _raw = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, **conn))
+            shape, _size, _raw = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, call_timeout=timeout, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[codegen] error: {exc}", file=sys.stderr)
             return 1
+        except (McpError, BaseExceptionGroup) as exc:
+            return _report_call_failure("codegen", exc, timeout)
         shape_json = json.dumps(shape, indent=2)
         probe_note = f"\nObserved response shape of {ns.probe!r} (keys/types/nesting only):\n" + shape_json
 
@@ -943,6 +1005,9 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
 
     label = f"{ns.server}.{ns.tool}" if kind is None else f"{ns.server} {key}"
     print(f"[probe] {label} ({n} probe(s)) …", file=sys.stderr)
+    timeout = _call_timeout_of(ns)
+    if kind is not None and getattr(ns, "timeout", None) is not None:
+        print("[probe] note: --timeout does not apply to resource reads, which are not bounded", file=sys.stderr)
 
     conn = dict(
         url=ns.url,
@@ -964,19 +1029,14 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         # one session per probe (prototype); pooling is out of scope
         try:
             if kind is None:
-                shape, size, raw = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
+                shape, size, raw = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, call_timeout=timeout, **conn))
             else:
                 shape, size, raw = asyncio.run(_probe_resource(ns.server, uris[i], cmd=cmd, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[probe] error: {exc}", file=sys.stderr)
             return 1
-        except McpError as exc:
-            print(f"[probe] error: {_bridge._describe(exc)}", file=sys.stderr)
-            return 1
-        except BaseExceptionGroup as exc:
-            _check_reportable(exc)
-            print(f"[probe] error: {_bridge._describe(exc)}", file=sys.stderr)
-            return 1
+        except (McpError, BaseExceptionGroup) as exc:
+            return _report_call_failure("probe", exc, timeout if kind is None else None)
         shapes.append(shape)
         sizes.append(size)
         raws.append(raw)
@@ -1063,12 +1123,15 @@ def _cmd_call(ns: argparse.Namespace) -> int:
         env=_parse_env(ns),
     )
 
+    timeout = _call_timeout_of(ns)
     print(f"[call] {ns.server}.{ns.tool} (live) …", file=sys.stderr)
     try:
-        raw = asyncio.run(_call(ns.server, ns.tool, args, cmd=cmd, **conn))
+        raw = asyncio.run(_call(ns.server, ns.tool, args, cmd=cmd, call_timeout=timeout, **conn))
     except (FileNotFoundError, ValueError) as exc:
         print(f"[call] error: {exc}", file=sys.stderr)
         return 1
+    except (McpError, BaseExceptionGroup) as exc:
+        return _report_call_failure("call", exc, timeout)
 
     text = raw if isinstance(raw, str) else json.dumps(raw, indent=2)
     out = Path(ns.out)
@@ -1800,6 +1863,34 @@ def _callback_timeout(value: str) -> float:
     return seconds
 
 
+_MAX_CALL_TIMEOUT = timedelta.max.days * 86400.0
+"""The largest --timeout the SDK's ``timedelta`` read timeout can hold."""
+
+
+def _call_timeout(value: str) -> float:
+    """argparse type for --timeout: non-negative seconds a ``timedelta`` can hold; 0 waits forever.
+
+    The value stays as given; ``_call_timeout_of`` maps 0 to None and an absent flag to
+    ``CALL_TIMEOUT``, so a flag the user did not pass stays distinguishable.
+    """
+    seconds = _callback_timeout(value)
+    if seconds > _MAX_CALL_TIMEOUT:
+        raise argparse.ArgumentTypeError(f"too large for a timeout (0 waits forever), got {value!r}")
+    return seconds
+
+
+def _add_timeout_arg(p: argparse.ArgumentParser) -> None:
+    """The --timeout flag of the commands that make a live tool call (``codegen`` with ``--probe``)."""
+    p.add_argument(
+        "--timeout",
+        type=_call_timeout,
+        metavar="SECONDS",
+        help=f"how long to wait for the tool's answer before giving up (default: {CALL_TIMEOUT:g}). "
+        "0 waits forever. Bounds tool calls only: not connecting, the initialize handshake "
+        "or a resource read. codegen uses it only with --probe",
+    )
+
+
 def _add_conn_args(p: argparse.ArgumentParser) -> None:
     """Inline server-connection args shared by all commands (override config)."""
     p.add_argument("--url", help="server URL inline; enables OAuth without a config entry")
@@ -1848,6 +1939,7 @@ def main(argv: list[str] | None = None) -> int:
     cg.add_argument("--shapes", help="shape-spec JSON sidecar (default: <server>.shapes.json beside --out)")
     cg.add_argument("--probe", help="tool to call live and record response shape (docstring note only)")
     cg.add_argument("--probe-args", help="JSON args for --probe (default: {})")
+    _add_timeout_arg(cg)
     cg.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     cg.add_argument(
         "--embed-schema",
@@ -1908,6 +2000,7 @@ def main(argv: list[str] | None = None) -> int:
         "bytes are base64-encoded",
     )
     pr.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    _add_timeout_arg(pr)
     _add_conn_args(pr)
     pr.set_defaults(func=_cmd_probe)
 
@@ -1919,6 +2012,7 @@ def main(argv: list[str] | None = None) -> int:
         "--out", required=True, metavar="FILE", help="write raw payload here; use a *.probe-raw.json name — git-ignored"
     )
     cl.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    _add_timeout_arg(cl)
     _add_conn_args(cl)
     cl.set_defaults(func=_cmd_call)
 

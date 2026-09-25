@@ -156,8 +156,8 @@ barrier stays on main.
 2. **Select tools and resources to probe.**
 
    Keep a running `session-overview.md` beside the generated module (the `--out` dir). It is
-   the human-readable log for everything the shape-spec cannot hold: skipped mutating tools,
-   unprobed tools and why, and discriminator verdicts.
+   the human-readable log for everything the shape-spec cannot hold: skipped mutating and
+   interactive tools, unprobed tools and why, and discriminator verdicts.
 
    a. Run `<mcpgen> list <server> --schema` → `[{name, description, inputSchema}]` for every
       tool, plus `annotations` on the tools whose server supplies it (the key is absent when it
@@ -178,7 +178,9 @@ barrier stays on main.
 
    b. **Classify and report.** Decide safe-to-probe per `references/mutating-tools.md` —
       `annotations.readOnlyHint` first, keyword test plus semantic read as fallback, and record
-      every verdict that isn't a clean `readOnlyHint`. Then print:
+      every verdict that isn't a clean `readOnlyHint`. A tool that waits for a human (input,
+      confirmation, a pick in the browser) is interactive and skipped like a mutating one. Then
+      print:
 
       ```
       Tools on <server>:
@@ -186,6 +188,7 @@ barrier stays on main.
         query_acme      — Search entities matching criteria
         whoami          — Return the calling user's profile
         ⚠ create_entity — Create a new entity [MUTATING]
+        ⚠ pick_entity   — Wait for the user to pick an entity in the browser [INTERACTIVE]
         ...
       ```
 
@@ -461,8 +464,8 @@ barrier stays on main.
 
    **When a probe fails, hangs, or returns `"str"`** — read `references/probe-failures.md`
    before recording anything. It separates quota/auth (never retry), challenge/transport
-   (bounded backoff), and settled facts, and it covers the `uvx`/`npx` cold-start tracebacks
-   that are noise on a successful probe.
+   (bounded backoff), settled facts, and `--timeout` expiries, and it covers the `uvx`/`npx`
+   cold-start tracebacks that are noise on a successful probe.
 
    **Part files.** They land at `<shapes-path>.parts/<key>.json` (git-ignored), where `<key>`
    is the URL-quoted tool name, URI, or template; a key too long for a filename is cut short
@@ -798,9 +801,15 @@ barrier stays on main.
   step 3.)
 
 - **Bound a slow `mcpgen` call with the harness's own timeout, never a `timeout` binary.**
-  Nothing guarantees one is installed: macOS ships none by default, and there the wrapped command
-  never runs at all — the whole line dies with `command not found` and status 127, which reads as
-  the command having failed rather than never having started.
+  `probe` and `call` bound each tool call with `--timeout` (default 60 s), but not the connect
+  and `initialize` handshake, which an interstitial page served with HTTP 200 stalls
+  indefinitely; that case still needs the harness's timeout. The bound is per call, so a batch
+  of N probes, or one probe with several `--args`, can run N × `--timeout`: set the harness's
+  command timeout to at least the sum of the `--timeout` values in the command, or lower
+  `--timeout` for the batch. Nothing guarantees a `timeout` binary is installed: macOS ships
+  none by default, and there the wrapped command never runs at all — the whole line dies with
+  `command not found` and status 127, which reads as the command having failed rather than
+  never having started.
 
 - **Probing is a live call — mutating tools mutate.** Probing a mutating tool executes it for real
   against the server. Classify per `references/mutating-tools.md`, keep flagged tools out of the

@@ -72,6 +72,21 @@ exists to prevent.
 changes", "switches branches", "writes a memo"). The keyword test is a last resort, not a
 sufficient safety net on its own — when in doubt, treat as mutating.
 
+## Interactive tools — skip like mutating
+
+A tool is **interactive** when its description says it waits for a user or a human: for input,
+an annotation, a confirmation, or a pick in the browser (Playwright's `browser_annotate` is one).
+It changes nothing, yet a probe of it never returns on its own — `probe` gives up at
+`--timeout` (default 60 s) and records nothing. Read the description, not the name, and do so
+whatever `readOnlyHint` says: a read-only tool can still wait for a human.
+
+Treat an interactive tool as a mutating one: flag it `⚠ ... [INTERACTIVE]` in the step-2b
+report, skip it, and record it under the `## mutating-skipped` heading in `session-overview.md`
+with the reason `interactive: waits for <what the description names>` — that heading holds
+both mutating and interactive skips, and keeps its name so existing overviews still match. It
+becomes probeable only on an explicit user yes, in a session where someone is there to answer
+it, and with `--timeout 0` or a bound long enough for the human.
+
 ## Record the verdict, do not resolve it silently
 
 This applies to any tool flagged as mutating without a `readOnlyHint: false` to say so —

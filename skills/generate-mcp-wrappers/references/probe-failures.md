@@ -1,7 +1,7 @@
 # Probe failures — classify before you record
 
 Read this when a probe returns `"str"`, an error-shaped object, a traceback, or nothing at
-all. Everything here is about telling three classes apart, because they are recorded
+all. Everything here is about telling four classes apart, because they are recorded
 differently and only one of them is worth retrying:
 
 | Class | Retry? | Recorded as |
@@ -9,6 +9,7 @@ differently and only one of them is worth retrying:
 | Quota / rate-limit / auth | no | unprobed, or an error shape |
 | Challenge / interstitial / transport blip | yes, bounded | unprobed after backoff |
 | Settled fact about this call | no | unprobed with the message |
+| Timeout — the tool never answered | not at the same bound | unprobed, cause `timeout` |
 
 Misclassifying an auth failure as a challenge burns two backoffs and loses the actionable
 half — which credential to set.
@@ -96,8 +97,9 @@ Read it as a challenge when any of these lands on a host that answered moments e
   an `Unexpected content type: text/html` line from the SDK. An interstitial served at HTTP
   200 stalls the handshake indefinitely: the SDK pushes that error onto a stream nothing
   reads, so the probe hangs instead of exiting non-zero. Log line and stall are one marker,
-  not two. `probe` has no timeout of its own — bound hosted probes with the harness's own
-  timeout (never a `timeout` binary — see the Guards).
+  not two. `probe --timeout` (default 60 s) bounds the tool call only, not the handshake, so it
+  does not end this stall — bound hosted probes with the harness's own timeout (never a
+  `timeout` binary — see the Guards).
 
 Any other transport-level exception — `httpx.ConnectError`, `ConnectTimeout`, `ReadTimeout`,
 `RemoteProtocolError` — or an `HTTPStatusError` on a status no rule above claims, belongs here
@@ -131,6 +133,20 @@ A `[probe] error:` or `[call] error:` line that names no credential:
 `MCP tool result has empty content`, `Unknown server …`, `config not found: …` and their like.
 These are facts about this call, not a host under load. Record the tool unprobed with the
 message. No backoff changes any of them.
+
+## Timeout — the tool never answered
+
+`probe` and `call` bound each tool call with `--timeout` (default 60 s; `0` waits forever).
+When the tool sends no answer in time, the command exits 1 on `[probe] timeout: no answer
+within 60s (raise with --timeout)` (or `[call] timeout: …`) and writes nothing. The usual
+cause is a tool that waits for a human — one step 2b should have skipped as interactive
+(`references/mutating-tools.md`). Record the tool unprobed with cause `timeout` in
+`session-overview.md`. Do not retry at the same bound; re-issue once with a larger `--timeout`
+only when the description promises slow work, such as a report or an export.
+
+A timeout does not cancel the tool on the server: no `notifications/cancelled` is sent, so the
+call may still be running, or finish, after the command exits. A timed-out mutating call may
+have taken effect; check the server's state before re-issuing it.
 
 ## Cold-start noise on `uvx` / `npx` stdio servers — usually not a failure
 

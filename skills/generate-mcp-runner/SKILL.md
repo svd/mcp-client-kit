@@ -182,12 +182,17 @@ create, update, delete, remove, send, set, write, post, patch, put,
 cancel, approve, submit, assign
 ```
 
+A tool whose description says it waits for a user — for input, a confirmation, a pick in the
+browser — is **interactive**: skip it like a mutating tool. `run.py`'s calls have no timeout,
+so it would wait forever.
+
 Resource accessors are never mutating: reading a resource cannot change the server. Include
 every accessor by default, except those the hand-off names as skipped data resources.
 
-**Default: emit only read-only tools.** Mutating tools are skipped by default. List the
-skipped tools in a `# Skipped mutating tools: ...` comment at the top of `main()`. They
-are opt-in via explicit extra instruction (e.g. "include the export tools", "add create_entity").
+**Default: emit only read-only tools.** Mutating and interactive tools are skipped by default.
+List both in the `# Skipped mutating tools: ...` comment at the top of `main()` (the comment
+keeps that name). They are opt-in via explicit extra instruction (e.g. "include the export
+tools", "add create_entity").
 
 ### 4. Choose args per tool
 

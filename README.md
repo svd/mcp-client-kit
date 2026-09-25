@@ -194,11 +194,11 @@ A companion skill, `generate-mcp-runner`, writes a standalone smoke-test `run.py
 
 | Command | What it does |
 |---------|--------------|
-| `codegen <server>` | Emit wrappers and resource accessors; `--shapes` applies the shape-spec, `--probe` records a response shape inline, `--embed-schema` embeds `fn.__schema__` + Args docstring per function, `--resources {all,templates,none}` picks which resources get accessors. Also writes `<out-stem>.mcpgen.json` for `check`. |
+| `codegen <server>` | Emit wrappers and resource accessors; `--shapes` applies the shape-spec, `--probe` records a response shape inline (bounded by `--timeout`, default 60 s), `--embed-schema` embeds `fn.__schema__` + Args docstring per function, `--resources {all,templates,none}` picks which resources get accessors. Also writes `<out-stem>.mcpgen.json` for `check`. |
 | `check <server>` | Compare the server's live tool and resource inventory against the stored manifest. Exit `0` no drift, `1` drift, `2` operational error. |
 | `list <server>` | Print a server's tools as JSON; `--schema` adds raw `inputSchema` per tool; `--resources` prints its resources and resource templates instead. |
-| `probe <server> <tool>` | Live call(s) → response-shape skeleton; `--resource` reads a resource URI or template instead. |
-| `call <server> <tool> --out <p>` | One live call, raw payload to disk — bootstrap ids or inspect output. |
+| `probe <server> <tool>` | Live call(s) → response-shape skeleton; `--resource` reads a resource URI or template instead. `--timeout` bounds each tool call (default 60 s). |
+| `call <server> <tool> --out <p>` | One live call, raw payload to disk — bootstrap ids or inspect output. `--timeout` as for `probe`. |
 | `read <server> <uri> --out <p>` | Read one resource, contents to disk; `--args` fills a URI template's variables. |
 | `merge <server>` | Consolidate probe parts into `<server>.shapes.json`. |
 | `login <server>` | Browser OAuth login; tokens stored at `~/.mcpgen/credentials.json`. |
