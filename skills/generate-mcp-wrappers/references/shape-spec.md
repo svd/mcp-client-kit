@@ -49,7 +49,10 @@ for id/type fields → `{"entityType": "int"}`.
 ## `fields`
 
 Top-level entries only, carrying the types the probe actually saw. Mark observed-`None` fields
-nullable (`"benchDurationCurrent": "float | None"`).
+nullable (`"benchDurationCurrent": "float | None"`). A field seen only as null (`"NoneType"` in
+a single-probe `_observed_shape`) is `"Any | None"` — never `"None"`, and never a guessed
+`T | None` unless the tool description states the type. List such fields in
+`session-overview.md`.
 
 A container field carries an element/value type only where the evidence covers every member:
 

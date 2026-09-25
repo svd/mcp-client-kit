@@ -144,6 +144,18 @@
   used as bare names, so a docstring, `typing.Literal[...]` or a tool parameter named `cast`
   does not count. `Any` is always imported.
 
+- **A field seen only as null is typed `Any | None`, not `None`.** A single probe records a
+  null as `"NoneType"` in `_observed_shape`, and for a tool with an `unwrap` path the `fields`
+  are written by hand from it, so `"NoneType"`, `"None"` or `"null"` reached `codegen`, which
+  rendered `x: NoneType` (an undefined name) or `x: None` (a key that rejects every real
+  value). `codegen` now rewrites a `fields` value that admits only None (`None | None` and
+  `Optional[None]` too, and JSON null) to `Any | None` and lists it among the normalized type
+  strings on stderr; `T | None` is left alone. `NoneType` inside an annotation, as in
+  `list[NoneType]`, becomes `None`. A discriminator variant's `fields` and `return_model` are
+  now normalized too; they were skipped. So a variant model that differed from another model
+  only in these spellings now shares its name instead of being emitted again with a `_2`
+  suffix.
+
 ## [0.10.0] — 2026-09-09
 
 ### Added

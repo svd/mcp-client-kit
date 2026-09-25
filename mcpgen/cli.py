@@ -16,6 +16,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 from collections.abc import Awaitable, Callable
@@ -615,35 +616,69 @@ def _stale_entries(carried: list[str], merged: dict, manifest_doc: Any) -> tuple
     return stale, unchecked
 
 
+_OPTIONAL_RE = re.compile(r"Optional\[(.*)\]")
+
+
+def _is_null_only(annotation: str) -> bool:
+    """True when *annotation* admits nothing but None: ``None``, ``None | None``, ``Optional[None]``."""
+    m = _OPTIONAL_RE.fullmatch(annotation.strip())
+    inner = m.group(1) if m else annotation
+    return all(member.strip() == "None" for member in inner.split("|"))
+
+
 def _normalize_shapes(shapes: dict) -> list[str]:
     """Normalize type-annotation strings in *shapes* in-place.
 
     Rewrites JSON/TS-cased tokens (``any``→``Any``, ``null``→``None``, etc.)
-    found in ``fields``, ``input_overrides``, and ``return_model`` values.
-    Returns a list of change descriptions suitable for a stderr report.
+    found in an entry's ``fields``, ``input_overrides``, and ``return_model``
+    values, and in each discriminator variant's ``fields`` and ``return_model``
+    (codegen reads ``input_overrides`` from the entry only). A ``fields`` value
+    that admits only None (``None``, ``null``, ``NoneType | None``,
+    ``Optional[None]``, or JSON null) becomes ``Any | None``: it records a field
+    seen only as null, and a TypedDict field annotated ``None`` would reject
+    every real value. A ``fields``, ``input_overrides`` or ``variants`` value
+    that is not an object is skipped, left for codegen to use or reject.
+    ``_observed_shape`` is left as recorded. Returns a list of change
+    descriptions suitable for a stderr report.
     """
     changes: list[str] = []
-    for spec in shapes.values():
-        if not isinstance(spec, dict):
-            continue
-        for fname, ftype in list((spec.get("fields") or {}).items()):
-            if isinstance(ftype, str):
-                new = codegen.normalize_annotation(ftype)
-                if new != ftype:
-                    spec["fields"][fname] = new
-                    changes.append(f"'{ftype}'→'{new}'")
-        for pname, ptype in list((spec.get("input_overrides") or {}).items()):
-            if isinstance(ptype, str):
-                new = codegen.normalize_annotation(ptype)
-                if new != ptype:
-                    spec["input_overrides"][pname] = new
-                    changes.append(f"'{ptype}'→'{new}'")
+
+    def _entry(spec: dict, *, overrides: bool) -> None:
+        fields = spec.get("fields")
+        if isinstance(fields, dict):
+            for fname, ftype in list(fields.items()):
+                if ftype is None or isinstance(ftype, str):
+                    new = "None" if ftype is None else codegen.normalize_annotation(ftype)
+                    if _is_null_only(new):
+                        new = "Any | None"
+                    if new != ftype:
+                        fields[fname] = new
+                        shown = "null" if ftype is None else f"'{ftype}'"
+                        changes.append(f"{shown}→'{new}'")
+        input_overrides = spec.get("input_overrides")
+        if overrides and isinstance(input_overrides, dict):
+            for pname, ptype in list(input_overrides.items()):
+                if isinstance(ptype, str):
+                    new = codegen.normalize_annotation(ptype)
+                    if new != ptype:
+                        input_overrides[pname] = new
+                        changes.append(f"'{ptype}'→'{new}'")
         rm = spec.get("return_model")
         if isinstance(rm, str):
             new = codegen.normalize_annotation(rm)
             if new != rm:
                 spec["return_model"] = new
                 changes.append(f"'{rm}'→'{new}'")
+
+    for spec in shapes.values():
+        if not isinstance(spec, dict):
+            continue
+        _entry(spec, overrides=True)
+        variants = spec.get("variants")
+        if isinstance(variants, dict):
+            for variant in variants.values():
+                if isinstance(variant, dict):
+                    _entry(variant, overrides=False)
     return changes
 
 

@@ -547,6 +547,212 @@ def test_normalize_shapes_clean_shapes_no_changes():
     assert changes == []
 
 
+def test_normalize_shapes_null_only_field_becomes_any_or_none():
+    shapes = {
+        "get_entity": {
+            "unwrap": ["data"],
+            "fields": {
+                "a": "None",
+                "b": "null",
+                "c": "NoneType",
+                "d": "none",
+                "e": None,  # JSON null
+                "f": "str | None",
+                "g": "list[NoneType]",
+            },
+            "input_overrides": {"cursor": "None", "limit": "null"},
+            "return_model": "Entity",
+            "_observed_shape": {"a": "NoneType", "c": "NoneType"},
+        },
+    }
+    changes = _normalize_shapes(shapes)
+
+    fields = shapes["get_entity"]["fields"]
+    assert fields["a"] == "Any | None"
+    assert fields["b"] == "Any | None"
+    assert fields["c"] == "Any | None"
+    assert fields["d"] == "Any | None"
+    assert fields["e"] == "Any | None"
+    assert fields["f"] == "str | None"  # hand-written T | None left alone
+    assert fields["g"] == "list[None]"  # nested: normalised only, not widened
+    # Only `fields` get the null-only widening.
+    assert shapes["get_entity"]["input_overrides"] == {"cursor": "None", "limit": "None"}
+    assert shapes["get_entity"]["return_model"] == "Entity"
+    assert shapes["get_entity"]["_observed_shape"] == {"a": "NoneType", "c": "NoneType"}
+
+    assert sorted(changes) == sorted(
+        [
+            "'None'→'Any | None'",
+            "'null'→'Any | None'",
+            "'NoneType'→'Any | None'",
+            "'none'→'Any | None'",
+            "null→'Any | None'",  # JSON null, unquoted
+            "'list[NoneType]'→'list[None]'",
+            "'null'→'None'",  # input_overrides.limit
+        ]
+    )
+
+
+def test_normalize_shapes_composite_null_only_field_becomes_any_or_none():
+    shapes = {
+        "t": {
+            "fields": {
+                "a": "NoneType | None",
+                "b": "null|none",
+                "c": "Optional[None]",
+                "d": "Optional[NoneType]",
+                "e": "Any | None",
+                "f": "list[None] | None",
+                "g": "Optional[str]",
+            }
+        }
+    }
+    changes = _normalize_shapes(shapes)
+
+    assert shapes["t"]["fields"] == {
+        "a": "Any | None",
+        "b": "Any | None",
+        "c": "Any | None",
+        "d": "Any | None",
+        "e": "Any | None",
+        "f": "list[None] | None",
+        "g": "Optional[str]",
+    }
+    assert sorted(changes) == sorted(
+        [
+            "'NoneType | None'→'Any | None'",
+            "'null|none'→'Any | None'",
+            "'Optional[None]'→'Any | None'",
+            "'Optional[NoneType]'→'Any | None'",
+        ]
+    )
+
+
+def test_normalize_shapes_skips_malformed_containers():
+    shapes = {
+        "top_fields_list": {"fields": ["a", "b"], "input_overrides": "int"},
+        "variants_list": {"discriminator": "k", "variants": [{"fields": {"x": "null"}}]},
+        "variant_values": {
+            "discriminator": "k",
+            "variants": {
+                "a": "Person",
+                "b": None,
+                "c": {"return_model": "C", "fields": "str"},
+                "d": {"return_model": "D", "fields": {"x": "NoneType"}},
+            },
+        },
+    }
+    changes = _normalize_shapes(shapes)
+
+    assert shapes["top_fields_list"] == {"fields": ["a", "b"], "input_overrides": "int"}
+    assert shapes["variants_list"]["variants"] == [{"fields": {"x": "null"}}]
+    assert shapes["variant_values"]["variants"]["c"]["fields"] == "str"
+    assert shapes["variant_values"]["variants"]["d"]["fields"] == {"x": "Any | None"}
+    assert changes == ["'NoneType'→'Any | None'"]
+
+
+def test_normalize_shapes_variant_input_overrides_untouched():
+    # codegen reads input_overrides from the tool entry only, so a variant's copy is inert.
+    shapes = {
+        "t": {
+            "discriminator": "k",
+            "input_overrides": {"k": "integer"},
+            "variants": {"1": {"return_model": "A", "fields": {}, "input_overrides": {"n": "integer"}}},
+        }
+    }
+    changes = _normalize_shapes(shapes)
+
+    assert shapes["t"]["input_overrides"] == {"k": "int"}
+    assert shapes["t"]["variants"]["1"]["input_overrides"] == {"n": "integer"}
+    assert changes == ["'integer'→'int'"]
+
+
+def test_normalize_shapes_covers_variant_and_resource_fields():
+    shapes = {
+        "get_item": {
+            "discriminator": "kind",
+            "variants": {
+                "user": {"return_model": "User", "fields": {"name": "str", "email": "null", "tags": "list[any]"}},
+                "team": {"return_model": "Team", "fields": {"owner": "NoneType"}},
+            },
+        },
+        "docs://readme": {
+            "kind": "resource",
+            "return_model": "Readme",
+            "fields": {"title": "string", "updated": "None"},
+        },
+    }
+    changes = _normalize_shapes(shapes)
+
+    variants = shapes["get_item"]["variants"]
+    assert variants["user"]["fields"] == {"name": "str", "email": "Any | None", "tags": "list[Any]"}
+    assert variants["team"]["fields"] == {"owner": "Any | None"}
+    assert variants["user"]["return_model"] == "User"
+    assert shapes["docs://readme"]["fields"] == {"title": "str", "updated": "Any | None"}
+    assert len(changes) == 5
+
+
+def test_load_shapes_null_only_field_renders_any_or_none(tmp_path, capsys):
+    shapes_file = tmp_path / "acme.shapes.json"
+    shapes_file.write_text(
+        json.dumps(
+            {
+                "get_entity": {
+                    "unwrap": ["data"],
+                    "return_model": "Entity",
+                    "fields": {"id": "str", "deleted_at": "NoneType", "note": "None"},
+                }
+            }
+        )
+    )
+    shapes = _load_shapes(SimpleNamespace(shapes=str(shapes_file), out=None, server="acme"))
+    assert shapes is not None
+    assert "'NoneType'→'Any | None'" in capsys.readouterr().err
+
+    tool = {"name": "get_entity", "description": "", "inputSchema": {"type": "object", "properties": {}}}
+    src = codegen.render_module("acme", [tool], shapes)
+
+    assert "    deleted_at: Any | None\n" in src
+    assert "    note: Any | None\n" in src
+    assert "NoneType" not in src
+    compile(src, "acme.py", "exec")
+
+
+def test_load_shapes_null_only_variant_field_renders_any_or_none(tmp_path):
+    shapes_file = tmp_path / "acme.shapes.json"
+    shapes_file.write_text(
+        json.dumps(
+            {
+                "get_entity": {
+                    "unwrap": ["data"],
+                    "discriminator": "entityType",
+                    "input_overrides": {"entityType": "int"},
+                    "variants": {
+                        "1": {"return_model": "Person", "fields": {"fullName": "str", "leftAt": "NoneType"}},
+                        "2": {"return_model": "Position", "fields": {"closedAt": "null"}},
+                    },
+                }
+            }
+        )
+    )
+    shapes = _load_shapes(SimpleNamespace(shapes=str(shapes_file), out=None, server="acme"))
+    tool = {
+        "name": "get_entity",
+        "description": "",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"entityId": {"type": "string"}, "entityType": {"type": "number"}},
+            "required": ["entityId", "entityType"],
+        },
+    }
+    src = codegen.render_module("acme", [tool], shapes)
+
+    assert "class Person(TypedDict, total=False):\n    fullName: str\n    leftAt: Any | None\n" in src
+    assert "class Position(TypedDict, total=False):\n    closedAt: Any | None\n" in src
+    assert "NoneType" not in src
+    compile(src, "acme.py", "exec")
+
+
 def test_load_shapes_normalizes_type_strings(tmp_path, capsys):
     shapes_file = tmp_path / "acme.shapes.json"
     shapes_file.write_text(

@@ -62,6 +62,13 @@ def test_normalize_annotation_passthrough():
         assert codegen.normalize_annotation(s) == s
 
 
+def test_normalize_annotation_rewrites_nonetype():
+    # Python's type name for None, as a single-probe `_observed_shape` records it.
+    assert codegen.normalize_annotation("NoneType") == "None"
+    assert codegen.normalize_annotation("list[NoneType]") == "list[None]"
+    assert codegen.normalize_annotation("str | NoneType") == "str | None"
+
+
 def test_normalize_annotation_word_boundary():
     # Tokens embedded in identifiers must not be touched.
     assert codegen.normalize_annotation("AnyThing") == "AnyThing"

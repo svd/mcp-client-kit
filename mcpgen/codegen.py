@@ -131,11 +131,14 @@ def py_type(schema: dict | None) -> str:
 # ── Shape-spec annotation normalization ──────────────────────────────────────
 
 # JSON/TS-cased tokens that need to be replaced with their Python equivalents
-# when they appear in hand-edited shapes.json values.
+# when they appear in hand-edited shapes.json values. `NoneType` is Python's
+# type name for None, copied from a single-probe `_observed_shape`; it is not a
+# name the generated module defines.
 _ANNOTATION_REWRITE: dict[str, str] = {
     "any": "Any",
     "null": "None",
     "none": "None",
+    "NoneType": "None",
     **{k: v for k, v in _SCALARS.items() if k != "null"},  # string→str, integer→int, etc.
 }
 _ANNOTATION_RE = re.compile(r"\b(" + "|".join(re.escape(k) for k in _ANNOTATION_REWRITE) + r")\b")
@@ -150,11 +153,12 @@ def normalize_annotation(s: str) -> str:
 
     Examples::
 
-        normalize_annotation("any")           == "Any"
-        normalize_annotation("null")          == "None"
-        normalize_annotation("list[any]")     == "list[Any]"
-        normalize_annotation("str | null")    == "str | None"
-        normalize_annotation("AnyThing")      == "AnyThing"   # unchanged
+        normalize_annotation("any")            == "Any"
+        normalize_annotation("null")           == "None"
+        normalize_annotation("list[NoneType]") == "list[None]"
+        normalize_annotation("list[any]")      == "list[Any]"
+        normalize_annotation("str | null")     == "str | None"
+        normalize_annotation("AnyThing")       == "AnyThing"   # unchanged
     """
     return _ANNOTATION_RE.sub(lambda m: _ANNOTATION_REWRITE[m.group()], s)
 
