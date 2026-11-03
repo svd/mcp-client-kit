@@ -2,6 +2,8 @@
 
 ## [Unreleased] — 0.12.0
 
+## [0.11.1] — 2026-11-03
+
 ### Fixed
 
 - **Tool listing reads every `tools/list` page.** `list`, `codegen` and `check` read only the
