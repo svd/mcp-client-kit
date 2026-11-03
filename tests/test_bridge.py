@@ -4725,7 +4725,7 @@ def _fake_session_factory(captured: dict):
     async def fake_session(*args, **kwargs):
         captured.update(kwargs)
         s = MagicMock()
-        s.list_tools = AsyncMock(return_value=MagicMock(tools=[]))
+        s.list_tools = AsyncMock(return_value=MagicMock(tools=[], nextCursor=None))
         s.get_server_capabilities = MagicMock(return_value=None)
         yield s
 

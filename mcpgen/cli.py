@@ -50,7 +50,9 @@ async def _list_tools(
     env: dict[str, str] | None = None,
     on_session: Callable[[Any], Awaitable[None]] | None = None,
 ) -> list[dict]:
-    """List the server's tools as plain dicts.
+    """List the server's tools as plain dicts, following ``tools/list`` pagination.
+
+    Each page is bounded by ``_bridge.LIST_PAGE_TIMEOUT``.
 
     *on_session*, when given, is awaited with the initialized session after
     ``tools/list``, before the session closes, so a caller can issue further
@@ -67,11 +69,11 @@ async def _list_tools(
         creds_path=creds_path,
         env=env,
     ) as s:
-        result = await s.list_tools()
+        listed = await _bridge._list_all_pages(s.list_tools, "tools")
         if on_session is not None:
             await on_session(s)
     tools = []
-    for t in result.tools:
+    for t in listed:
         raw_annotations = getattr(t, "annotations", None)
         annotations = raw_annotations.model_dump(exclude_none=True) if raw_annotations else None
         tools.append(
@@ -97,7 +99,7 @@ under httpx's own 30s timeout) are outside it.
 class ResourceListingFailed(Exception):
     """A strict ``_list_inventory`` could not list resources.
 
-    Raised for an ``McpError`` / ``ValueError`` from the listing itself and for
+    Raised for an ``McpError`` / ``ValueError`` / ``TimeoutError`` from the listing itself and for
     a transport failure while it ran, such as an HTTP 502 on ``resources/list``
     failing the transport's per-request task, which would otherwise escape as
     an ExceptionGroup. The message reads ``could not list resources: <cause>``
@@ -146,7 +148,8 @@ def _check_reportable(group: BaseExceptionGroup) -> None:
     from a mid-request 401) surfaces as the transport's ExceptionGroup, never
     as the bare error. An interrupt re-raises the group unchanged. An auth-only
     group raises its leaf for ``main()``'s auth handler. A group of nothing but
-    ``McpError`` / ``ValueError`` returns: the caller prints
+    ``McpError`` / ``ValueError`` / ``TimeoutError`` (a listing page past
+    ``_bridge.LIST_PAGE_TIMEOUT``) returns: the caller prints
     ``_bridge._describe(group)`` and exits 1. Anything else is a bug and
     re-raises the group, to traceback.
     """
@@ -155,7 +158,7 @@ def _check_reportable(group: BaseExceptionGroup) -> None:
     auth = _auth_leaf(group)
     if auth is not None:
         raise auth from group
-    if not all(isinstance(leaf, (McpError, ValueError)) for leaf in _leaves(group)):
+    if not all(isinstance(leaf, (McpError, ValueError, TimeoutError)) for leaf in _leaves(group)):
         raise group
 
 
@@ -325,7 +328,7 @@ async def _list_inventory(server: str, *, scope: str, strict: bool = True, **con
                     hook_outcome = "finished"
                     return
                 resources, inv.resources_truncated, templates, inv.templates_truncated = preview
-        except (McpError, ValueError) as exc:
+        except (McpError, ValueError, TimeoutError) as exc:
             inv.resource_error = exc
             hook_outcome = "finished"
             return
