@@ -162,6 +162,12 @@
 
 ### Fixed
 
+- **A union-typed input param no longer crashes `list`.** A param declared
+  `"type": ["string", "null"]` — legal JSON Schema, emitted by real servers for a nullable
+  arg — raised `TypeError: unhashable type: 'list'` in discriminator detection, which
+  `mcpgen list` runs on every tool, so one such param broke listing for the whole server.
+  Such a param is now skipped and never becomes a discriminator candidate.
+
 - **`probe` no longer records a tool's error as its shape.** A tool reports its own failure
   as a result flagged `isError` — Notion answers a tool its plan lacks with
   `{"code": "validation_error", …, "additional_data": {"tool_error_class":

@@ -1445,6 +1445,15 @@ def test_detect_discriminators_denylist_camelcase_compound_forms():
         assert param not in result, f"compound param {param!r} must be in denylist"
 
 
+def test_detect_discriminators_skips_union_typed_param():
+    """A param whose `type` is a JSON Schema list is skipped; it neither crashes nor qualifies."""
+    params = {"kind": {"type": ["string", "null"]}, "mode": {"type": "string"}}
+    tools = [_make_tool("tool_a", params), _make_tool("tool_b", params)]
+    result = codegen.detect_discriminators(tools)
+    assert "kind" not in result
+    assert result["mode"] == ["tool_a", "tool_b"]
+
+
 # ---------------------------------------------------------------------------
 # Task C — enum → Literal[...] in py_type and render_module
 # ---------------------------------------------------------------------------

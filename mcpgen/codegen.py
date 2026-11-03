@@ -1430,8 +1430,10 @@ def detect_discriminators(tools: list[dict]) -> dict[str, list[str]]:
                 continue
             if not isinstance(pschema, dict):
                 continue
+            # A union `type` (a JSON Schema list such as ["string", "null"]) is
+            # unhashable and never yields a candidate.
             ptype = pschema.get("type")
-            if ptype not in _SCALAR_TYPES:
+            if not isinstance(ptype, str) or ptype not in _SCALAR_TYPES:
                 continue
             # Track all scalar params; the ≥2-tools filter in the return
             # covers the shared-scalar heuristic. Heuristic-name and enum
