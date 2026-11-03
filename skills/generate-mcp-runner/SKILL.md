@@ -90,7 +90,7 @@ not survive between tool invocations, and `uv run mcpgen` held in a variable or 
 of your own does not word-split in `zsh`, so a bare `$c` runs the wrong command. State the
 path once in your report, then substitute it wherever a block below writes `<mcpgen>`.
 
-Requires `mcpgen >= 0.11.0.dev2` (install: see README). Do not proceed on an older one.
+Requires `mcpgen >= 0.11.0` (install: see README). Do not proceed on an older one.
 
 The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
 Try each candidate in turn and keep the first that both answers **and** meets the floor —
@@ -99,7 +99,7 @@ first resolved to the absolute path of the executable it would run, and the floo
 on that path, so what the loop settles on is always one word:
 
 ```bash
-min=0.11.0.dev2; MCPGEN=
+min=0.11.0; MCPGEN=
 vkey() {  # PEP 440 version -> dotted key that sort -V orders correctly
   local r s
   r=${1%%[!0-9.]*}; r=${r%.}; s=${1#"$r"}; s=${s#.}
