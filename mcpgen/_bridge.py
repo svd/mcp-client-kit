@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import errno as _errno
 import json
 import os
@@ -42,11 +43,12 @@ import threading
 import time
 import warnings
 import webbrowser
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
+from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, TypeVar
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
 import httpx
@@ -60,12 +62,24 @@ from mcp.shared.auth import (
     OAuthClientMetadata,
     OAuthToken,
 )
+from mcp.shared.exceptions import McpError
+from mcp.types import (
+    METHOD_NOT_FOUND,
+    BlobResourceContents,
+    CallToolResult,
+    PaginatedRequestParams,
+    ReadResourceResult,
+    TextResourceContents,
+)
+from pydantic import AnyUrl, TypeAdapter, UrlConstraints
 
 if sys.version_info < (3, 11):  # pragma: no cover - version-gated
     # ExceptionGroup became a builtin in 3.11. anyio requires this backport below
     # that, so it is present wherever the MCP SDK is; the isinstance checks in
     # _carries_interrupt and _describe need the same class anyio raises.
     from exceptiongroup import BaseExceptionGroup
+
+_T = TypeVar("_T")
 
 DEFAULT_CREDS_PATH = Path.home() / ".mcpgen" / "credentials.json"
 DEFAULT_CONFIG_PATH = Path.home() / ".mcpgen" / "config.json"
@@ -1979,9 +1993,9 @@ class _SessionBlock:
         self._caller = caller
         self._requests: asyncio.Queue = asyncio.Queue()
         self._sessions: dict[str, Any] = {}
-        # Guards the open path only. call_tool() itself runs unserialized, so
-        # asyncio.gather() over wrappers stays genuinely concurrent — the SDK's
-        # ClientSession multiplexes on JSON-RPC request id.
+        # Guards the open path only. call_tool() and read_resource() themselves
+        # run unserialized, so asyncio.gather() over wrappers stays genuinely
+        # concurrent — the SDK's ClientSession multiplexes on JSON-RPC request id.
         self._open_lock = asyncio.Lock()
         self._ready = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -2036,7 +2050,21 @@ class _SessionBlock:
 
 
 class McpBridgeCaller:
-    """McpCaller implementation backed by the standalone MCP client."""
+    """McpCaller implementation backed by the standalone MCP client.
+
+    *call_timeout* bounds each ``tools/call`` round trip, in seconds, through the
+    SDK's per-request read timeout. On expiry the SDK raises an ``McpError`` with
+    code 408: bare from ``call()`` inside ``connected()`` and from
+    ``call_tool_result()``, but wrapped as
+    ``ExceptionGroup(ExceptionGroup(McpError))`` from a one-shot ``call()``, since
+    it leaves the session's task groups. The server is not told to cancel the
+    call (no ``notifications/cancelled``), so the tool may still run to
+    completion. The timeout does not cover opening the session (the
+    ``initialize`` handshake, OAuth) or closing it. The bound is the SDK's rather
+    than an outer cancel scope so the session still unwinds normally: an outer
+    cancellation would also cut short the stdio transport's shutdown, which is
+    what terminates the server's process tree. None (the default) waits forever.
+    """
 
     def __init__(
         self,
@@ -2049,6 +2077,7 @@ class McpBridgeCaller:
         cred_backend: str | None = None,
         creds_path: Path | None = None,
         env: dict[str, str] | None = None,
+        call_timeout: float | None = None,
     ) -> None:
         self._cmd = cmd
         self._url = url
@@ -2058,6 +2087,7 @@ class McpBridgeCaller:
         self._cred_backend = cred_backend
         self._creds_path = creds_path
         self._env = env
+        self._read_timeout = None if call_timeout is None else timedelta(seconds=call_timeout)
         self._block: _SessionBlock | None = None
 
     def _session_cm(self, server: str):
@@ -2078,10 +2108,10 @@ class McpBridgeCaller:
     async def connected(self):
         """Reuse one initialized session per server for the duration of the block.
 
-        Inside the block every ``call()`` to the same server reuses one
-        ``ClientSession``: one ``initialize()``, one stdio subprocess, one OAuth
-        pre-flight refresh. Outside the block ``call()`` is unchanged — it opens
-        and closes a session per invocation.
+        Inside the block every ``call()`` and ``read_resource()`` to the same
+        server reuses one ``ClientSession``: one ``initialize()``, one stdio
+        subprocess, one OAuth pre-flight refresh. Outside the block each of them
+        opens and closes a session per invocation.
 
             caller = McpBridgeCaller(cmd="python server.py")
             async with caller.connected():
@@ -2112,11 +2142,80 @@ class McpBridgeCaller:
                 return await self._invoke(s, tool, arguments)
         return await self._invoke(await block.session_for(server), tool, arguments)
 
-    @staticmethod
-    async def _invoke(s: Any, tool: str, arguments: dict) -> Any:
-        result = await s.call_tool(tool, arguments)
-        content = [_summarize_content_item(item) for item in result.content]
-        return parse(content)
+    async def _invoke(self, s: Any, tool: str, arguments: dict) -> Any:
+        result = await s.call_tool(tool, arguments, read_timeout_seconds=self._read_timeout)
+        return _parse_tool_result(result)
+
+    async def call_tool_result(self, server: str, tool: str, arguments: dict) -> CallToolResult:
+        """Call *tool* and return the SDK's unparsed ``CallToolResult``, ``isError`` included.
+
+        For callers that must tell a tool's reported failure from its answer, which
+        ``call()`` cannot: it parses an ``isError`` result like any other. Session
+        handling and *call_timeout* are ``call()``'s, except that a call error raised
+        in a one-shot session is re-raised bare once the session has closed (see
+        ``_one_shot``). ``_parse_tool_result`` turns the result into ``call()``'s payload.
+        """
+
+        async def invoke(s: Any) -> CallToolResult:
+            return await s.call_tool(tool, arguments, read_timeout_seconds=self._read_timeout)
+
+        block = self._block
+        if block is None:
+            return await self._one_shot(server, invoke)
+        return await invoke(await block.session_for(server))
+
+    async def read_resource(self, server: str, uri: str) -> Any:
+        """Read the resource at *uri* and return its parsed contents (see ``parse_resource``)."""
+        return parse_resource((await self.read_resource_result(server, uri)).contents)
+
+    async def read_resource_result(self, server: str, uri: str) -> ReadResourceResult:
+        """Read the resource at *uri* and return the SDK's unparsed ``ReadResourceResult``.
+
+        Session handling is ``call()``'s: one-shot outside ``connected()``, the
+        block's session for *server* inside it. A read error raised in a one-shot
+        session is re-raised bare once the session has closed (see ``_one_shot``).
+        """
+        # Validated before any session opens, so a malformed URI costs no
+        # subprocess spawn, handshake or OAuth refresh.
+        url = _RESOURCE_URI.validate_python(uri)
+
+        async def read(s: Any) -> ReadResourceResult:
+            return await s.read_resource(url)
+
+        block = self._block
+        if block is None:
+            return await self._one_shot(server, read)
+        return await read(await block.session_for(server))
+
+    async def _one_shot(self, server: str, op: Callable[[Any], Awaitable[_T]]) -> _T:
+        """Run *op* on a fresh session for *server* and close it.
+
+        An ``Exception`` raised by *op* is caught inside the session and re-raised
+        after it closes. Raised through the session instead, it would cross the
+        transport's anyio task groups and reach the caller as
+        ``ExceptionGroup(ExceptionGroup(exc))``. Interrupts and anything the
+        session itself raises (auth, transport) propagate unchanged. A failure
+        the session raises while closing replaces the captured one, which is
+        kept as its ``__context__`` when that is unset.
+        """
+        failure: Exception | None = None
+        try:
+            async with self._session_cm(server) as s:
+                try:
+                    return await op(s)
+                except Exception as exc:  # noqa: BLE001 — re-raised below, outside the session
+                    failure = exc
+        except BaseException as close_exc:
+            if failure is not None and close_exc.__context__ is None:
+                close_exc.__context__ = failure
+            raise
+        assert failure is not None  # the body either returned or captured
+        raise failure
+
+
+def _parse_tool_result(result: CallToolResult) -> Any:
+    """The payload ``McpBridgeCaller.call`` returns for *result*, whatever its ``isError``."""
+    return parse([_summarize_content_item(item) for item in result.content])
 
 
 def _summarize_content_item(item: Any) -> dict:
@@ -2153,21 +2252,14 @@ def _summarize_content_item(item: Any) -> dict:
     return {"type": item_type, "text": getattr(item, "text", "")}
 
 
-def _parse_one(item: Any) -> Any:
-    """Parse a single MCP content block into a Python value.
+def _parse_text(text: str) -> Any:
+    """Parse a text payload into a Python value.
 
-    Falls back to ``ast.literal_eval`` for Python-repr payloads (e.g. servers
-    that return single-quoted dicts like sqlite), then to a plain string as a
-    last resort so callers can still inspect the response.
-
-    Non-text content blocks (image / resource / resource_link) carry no `.text`
-    to parse — return the block's own summary dict as-is rather than falling
-    through to an empty string, so the shape-spec records something real.
+    JSON first; then ``ast.literal_eval`` for Python-repr payloads (e.g. servers
+    that return single-quoted dicts like sqlite); then the plain string as a last
+    resort so callers can still inspect the response. Tool text blocks and text
+    resource contents both go through this chain.
     """
-    item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
-    if item_type in ("image", "resource", "resource_link"):
-        return item if isinstance(item, dict) else _summarize_content_item(item)
-    text = item.get("text", "") if isinstance(item, dict) else getattr(item, "text", "")
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -2175,6 +2267,21 @@ def _parse_one(item: Any) -> Any:
             return ast.literal_eval(text)
         except (ValueError, SyntaxError):
             return text
+
+
+def _parse_one(item: Any) -> Any:
+    """Parse a single MCP content block into a Python value.
+
+    Text blocks go through ``_parse_text``. Non-text content blocks (image /
+    resource / resource_link) carry no `.text` to parse — return the block's own
+    summary dict as-is rather than falling through to an empty string, so the
+    shape-spec records something real.
+    """
+    item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+    if item_type in ("image", "resource", "resource_link"):
+        return item if isinstance(item, dict) else _summarize_content_item(item)
+    text = item.get("text", "") if isinstance(item, dict) else getattr(item, "text", "")
+    return _parse_text(text)
 
 
 def parse(content_items: list) -> Any:
@@ -2199,6 +2306,156 @@ def parse(content_items: list) -> Any:
     if len(content_items) == 1:
         return _parse_one(content_items[0])
     return [_parse_one(item) for item in content_items]
+
+
+# The SDK types every resource URI as this annotation (``mcp.types.Resource.uri``,
+# ``ResourceContents.uri``), so validating through it reproduces the SDK's
+# normalization exactly: lower-cased scheme, percent-encoded spaces.
+_RESOURCE_URI: TypeAdapter[AnyUrl] = TypeAdapter(Annotated[AnyUrl, UrlConstraints(host_required=False)])
+
+
+def normalize_resource_uri(uri: str) -> str:
+    """Return *uri* in the form the SDK puts on the wire and in listings.
+
+    ``Dimension://ALL`` becomes ``dimension://ALL`` and ``a b`` becomes ``a%20b``.
+    Every place a resource URI is used as a key must pass through here, or a key
+    written from user input would not match the one read back from the server.
+    Raises ``ValueError`` (pydantic ``ValidationError``) for a string that is not
+    a URI.
+    """
+    return str(_RESOURCE_URI.validate_python(uri))
+
+
+_ASCII_WHITESPACE = re.compile(r"[ \t\n\r\f\v]+")
+
+
+def _parse_resource_one(item: TextResourceContents | BlobResourceContents) -> Any:
+    if isinstance(item, TextResourceContents):
+        return _parse_text(item.text)
+    # Line-wrapped (MIME-style) base64 is accepted; anything outside the standard
+    # alphabet, such as URL-safe base64, raises instead of silently decoding to
+    # different bytes.
+    return base64.b64decode(_ASCII_WHITESPACE.sub("", item.blob), validate=True)
+
+
+def parse_resource(contents: Sequence[TextResourceContents | BlobResourceContents]) -> Any:
+    """Extract the payload from the ``contents`` of an MCP ``resources/read`` result.
+
+    Text contents parse exactly like tool text blocks (``_parse_text``); blob
+    contents are base64-decoded to ``bytes``, raising ``ValueError`` for invalid
+    base64. One content returns its value directly, several return a list of
+    per-content values in server order — the same folding as ``parse``.
+    Per-content URIs and mimeTypes are not kept.
+    """
+    if not contents:
+        raise ValueError("MCP resource read returned no contents")
+    if len(contents) == 1:
+        return _parse_resource_one(contents[0])
+    return [_parse_resource_one(item) for item in contents]
+
+
+_MAX_LIST_PAGES = 1000
+"""Upper bound on pages fetched for one listing; a server that never stops paging fails loudly."""
+
+
+async def _list_all_pages(fetch: Callable[..., Awaitable[Any]], field: str) -> list:
+    """Collect *field* from every page of a paginated MCP list request.
+
+    The first request carries no params, as the SDK's own no-argument call does.
+    An absent or empty ``nextCursor`` ends the listing. A cursor the server has
+    already handed out, or more than ``_MAX_LIST_PAGES`` pages, raises
+    ``ValueError`` rather than looping forever.
+    """
+    items: list = []
+    seen: set[str] = set()
+    params: PaginatedRequestParams | None = None
+    for _ in range(_MAX_LIST_PAGES):
+        page = await fetch(params=params)
+        items.extend(getattr(page, field))
+        cursor = page.nextCursor
+        if not cursor:
+            return items
+        if cursor in seen:
+            raise ValueError(f"MCP server repeated pagination cursor {cursor!r} while listing {field}")
+        seen.add(cursor)
+        params = PaginatedRequestParams(cursor=cursor)
+    raise ValueError(f"MCP server returned more than {_MAX_LIST_PAGES} pages while listing {field}")
+
+
+def _dump_listing(item: Any) -> dict:
+    return item.model_dump(mode="json", exclude_none=True, by_alias=True)
+
+
+async def _every_page(fetch: Callable[..., Awaitable[Any]], field: str) -> tuple[list, bool]:
+    return await _list_all_pages(fetch, field), False
+
+
+async def _first_page(fetch: Callable[..., Awaitable[Any]], field: str) -> tuple[list, bool]:
+    page = await fetch(params=None)
+    return list(getattr(page, field)), bool(page.nextCursor)
+
+
+async def _resource_listing(
+    s: Any,
+    *,
+    statics: bool,
+    pages: Callable[[Callable[..., Awaitable[Any]], str], Awaitable[tuple[list, bool]]],
+) -> tuple[list[dict], bool, list[dict], bool]:
+    """``(resources, more_resources, templates, more_templates)`` read via *pages*.
+
+    Shared body of ``list_resource_inventory`` and ``preview_resource_inventory``;
+    see the former for the capability gate, METHOD_NOT_FOUND and *statics*.
+    """
+    capabilities = s.get_server_capabilities()
+    if capabilities is None or capabilities.resources is None:
+        return [], False, [], False
+    raw_resources, more_resources = await pages(s.list_resources, "resources") if statics else ([], False)
+    resources = []
+    for resource in raw_resources:
+        entry = _dump_listing(resource)
+        entry["uri"] = normalize_resource_uri(str(resource.uri))
+        resources.append(entry)
+    try:
+        raw_templates, more_templates = await pages(s.list_resource_templates, "resourceTemplates")
+    except McpError as exc:
+        if exc.error.code != METHOD_NOT_FOUND:
+            raise
+        raw_templates, more_templates = [], False
+    return resources, more_resources, [_dump_listing(t) for t in raw_templates], more_templates
+
+
+async def list_resource_inventory(s: Any, *, statics: bool = True) -> tuple[list[dict], list[dict]]:
+    """List every resource and resource template on the initialized session *s*.
+
+    Returns ``(resources, templates)`` as plain JSON-safe dicts — the SDK models
+    dumped by alias with ``None`` fields dropped — so each carries ``uri`` or
+    ``uriTemplate`` plus whatever of ``name``, ``title``, ``description``,
+    ``mimeType``, ``size``, ``icons``, ``annotations`` and ``_meta`` the server
+    sent, and any non-standard fields too (the SDK models allow extras). A
+    resource's ``uri`` is in ``normalize_resource_uri`` form; a template's
+    ``uriTemplate`` is the server's string unchanged.
+
+    A server that does not advertise the ``resources`` capability gets no
+    requests and yields ``([], [])``. ``resources/templates/list`` answered with
+    METHOD_NOT_FOUND yields no templates, since some servers implement only
+    ``resources/list``; every other ``McpError`` propagates.
+
+    ``statics=False`` sends no ``resources/list`` and yields ``[]`` for
+    resources, for callers that want only the templates of a server that may
+    list thousands of static resources.
+    """
+    resources, _, templates, _ = await _resource_listing(s, statics=statics, pages=_every_page)
+    return resources, templates
+
+
+async def preview_resource_inventory(s: Any, *, statics: bool = True) -> tuple[list[dict], bool, list[dict], bool]:
+    """First page of each listing: ``(resources, more_resources, templates, more_templates)``.
+
+    One request per list at most, no cursor followed: a ``more_*`` flag is True
+    when the server offered a further page. Entries, the capability gate,
+    METHOD_NOT_FOUND and *statics* are as in ``list_resource_inventory``.
+    """
+    return await _resource_listing(s, statics=statics, pages=_first_page)
 
 
 # ---------------------------------------------------------------------------

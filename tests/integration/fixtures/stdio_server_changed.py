@@ -4,13 +4,20 @@ Differences from stdio_server.py, all of which must surface as drift:
   - greet() gains a required `title` parameter
   - styled()'s enum gains "shouty"
   - json_payload() is removed
+  - demo://config's mimeType changes from application/json to text/plain
+  - demo://status is added
+  - demo://logo is removed
+The demo://records/{record_id} template is unchanged.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Literal
 
+import anyio
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 mcp = FastMCP("demo")
 
@@ -40,6 +47,34 @@ def styled(name: str, style: Literal["formal", "casual", "shouty"] = "casual") -
     if style == "formal":
         return f"Good day, {name}."
     return f"HEY {name.upper()}" if style == "shouty" else f"hey {name}"
+
+
+@mcp.tool()
+async def hang() -> str:
+    """Never answer, like a tool waiting for a human; probes of it must time out."""
+    await anyio.sleep_forever()
+    return "unreachable"
+
+
+@mcp.tool()
+def refuse() -> str:
+    """Fail the way a tool reports failure: a result flagged isError, not a JSON-RPC error."""
+    raise ToolError('{"code": "validation_error", "message": "This feature requires a paid plan."}')
+
+
+@mcp.resource("demo://config", mime_type="text/plain", description="Server configuration.")
+def config() -> str:
+    return json.dumps({"name": "demo", "version": 2, "features": ["greet", "add"]})
+
+
+@mcp.resource("demo://status", mime_type="application/json", description="Server status.")
+def status() -> str:
+    return json.dumps({"ok": True})
+
+
+@mcp.resource("demo://records/{record_id}", mime_type="application/json", description="One record by id.")
+def record(record_id: str) -> str:
+    return json.dumps({"id": record_id, "name": f"record-{record_id}"})
 
 
 if __name__ == "__main__":

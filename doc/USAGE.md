@@ -83,17 +83,18 @@ uv add mcp-client-kit            # or: pip install mcp-client-kit
 
 | Command | Purpose | Key flags |
 |---------|---------|-----------|
-| `codegen <server>` | Emit wrappers (typed inputs; typed returns once `--shapes` is supplied) and a tool-inventory manifest | `--out`, `--shapes <path>`, `--probe <tool>` / `--probe-args`, `--embed-schema`, `--manifest <path>`, `--no-manifest` |
-| `check <server>` | Compare the live tool inventory against a stored manifest | `--manifest <path>`, `--json`, `--update`, `--stdio` |
-| `list <server>` | Tools as JSON `[{name, description}]` (add `--schema` for `inputSchema` per tool); discriminator advisory on stderr | `--schema` |
-| `probe <server> <tool>` | Live call(s) → shape skeleton | `--args` (repeatable), `--emit-shape <path>` (writes `.parts/`) |
-| `call <server> <tool>` | One live call, raw payload to disk — bootstrap ids / inspect output | `--out <path>` (required) |
-| `merge <server>` | Consolidate `.parts/` → `<server>.shapes.json`; emit gitignored `verify.json` | `--out <path>` |
+| `codegen <server>` | Emit wrappers (typed inputs; typed returns once `--shapes` is supplied), resource accessors, and an inventory manifest | `--out`, `--shapes <path>`, `--probe <tool>` / `--probe-args` / `--timeout <seconds>`, `--embed-schema`, `--manifest <path>`, `--no-manifest`, `--resources {all,templates,none}` |
+| `check <server>` | Compare the live tool and resource inventory against a stored manifest | `--manifest <path>`, `--json`, `--update`, `--resources {all,templates,none}`, `--stdio` |
+| `list <server>` | Tools as JSON `[{name, description}]` (add `--schema` for `inputSchema` per tool); discriminator advisory and resource-count hint on stderr. `--resources` prints `{"resources": [...], "resourceTemplates": [...]}` instead | `--schema`, `--resources` |
+| `probe <server> <tool>` | Live call(s) → shape skeleton; with `--resource`, reads a resource URI or template instead | `--args` (repeatable), `--emit-shape <path>` (writes `.parts/`), `--save-raw <path>`, `--resource`, `--timeout <seconds>` |
+| `call <server> <tool>` | One live call, raw payload to disk — bootstrap ids / inspect output | `--out <path>` (required), `--args <json>`, `--timeout <seconds>` |
+| `read <server> <uri>` | Read one resource, contents to disk — the resource twin of `call` | `--out <path>` (required), `--args <json>` (template variables) |
+| `merge <server>` | Consolidate `.parts/` → `<server>.shapes.json`; emit gitignored `verify.json` | `--out <path>`, `--keep-parts`, `--no-scrub`, `--manifest <path>` |
 | `login <server>` | Browser OAuth login | `--headless` / `--no-headless`, `--callback-timeout <seconds>`, connection flags below |
 | `migrate-creds` | Copy stored OAuth tokens between `file`/`keyring` backends | `--from`, `--to`, `--servers`, `--purge`, `--set-default`, `--creds <path>` |
 | `discover` | List MCP servers configured in Claude Code | `--host <id>` (repeatable), `--json` |
 
-Connection flags shared by `codegen`/`check`/`list`/`probe`/`call`/`login`: `--url`,
+Connection flags shared by `codegen`/`check`/`list`/`probe`/`call`/`read`/`login`: `--url`,
 `--bearer`, `--config`, `--client-name`, `--cred-backend`, `--creds`, `--env`
 (see [§ Authenticate](#authenticate)). `--stdio` is available on every command in that
 list except `login`.
@@ -106,8 +107,52 @@ hosts gets added.
 `delete-creds`, `migrate-creds` — so a non-default store stays addressable from every
 command that reads or writes it.
 
-> **PII:** `call` writes the raw, unscrubbed payload. Name the file `*.probe-raw.json`
-> (gitignored) and never commit it.
+> **PII:** `call` and `read` write the raw, unscrubbed payload. Name the file
+> `*.probe-raw.json` (gitignored) and never commit it.
+
+**Tool-call timeout.** `probe` and `call` give each tool call `--timeout` seconds to answer
+(default 60; `0` waits forever). A tool that waits for a human — an annotation, a
+confirmation, a pick in the browser — never answers on its own. On expiry the command exits
+`1` with `[probe] timeout: no answer within 60s (raise with --timeout)` (or `[call] timeout:
+…`) and writes no part file or `--out` file. Only the `tools/call` request is bounded:
+connecting, the `initialize` handshake and a `probe --resource` read are not. A timeout does
+not cancel the tool on the server — no `notifications/cancelled` is sent — so a timed-out
+call that mutates may still have taken effect: check before re-issuing it. `codegen --probe`
+takes the same flag. In code, the same value is `call_timeout=` on `McpBridgeCaller`; its
+default, `None`, leaves generated wrappers unbounded.
+
+**A tool that reports failure.** A tool can answer with a result flagged `isError` — MCP's way
+of saying the tool ran and failed (a validation error, a missing entitlement), as opposed to a
+JSON-RPC error. All three commands below print `[<command>] tool returned isError: <text>`,
+where `<text>` is the first 300 characters of the result's text (text blocks and embedded
+text resources), whitespace collapsed and credential-shaped members such as `access_token`
+redacted, and exit `1`. `probe` records no shape for it and writes no part file, `--save-raw`
+file or skeleton. With several `--args`, the first such variant ends the probe like any other
+failure. `codegen --probe` writes no module or manifest. `call` still writes the error body to
+`--out`, unredacted and formatted as a successful payload would be, as evidence; a result with
+no content, or a body that the parse chain or JSON serialisation rejects, writes nothing and
+prints `[call] note: body not written (<exception type>)`. Generated wrappers are unchanged:
+`McpBridgeCaller.call` returns an `isError` result's parsed content like any other, and
+`McpBridgeCaller.call_tool_result` returns the SDK's unparsed `CallToolResult`, `isError`
+included.
+
+**Resources from the CLI.** `list --resources` prints each resource's `uri`, `name`,
+`title`, `description`, `mimeType`, and `size`, and each template's `uriTemplate`, `name`,
+`title`, `description`, and `mimeType`; other fields the server sends are dropped. Plain
+`list` output is unchanged, but it also asks for the first page of each resource list
+(bounded by a 10 s timeout) and, when the server has any, prints a stderr hint such as
+`2 resource(s) and 1+ resource template(s) available` (`+` marks a list with more pages).
+
+`read` writes one text content verbatim, one blob as raw bytes, and several contents as a
+JSON array of the contents as the server sent them. A target containing `{` is a URI
+template, expanded from `--args` (keyed by the template's variable names); `--args` on a
+static URI, a missing required variable, or a server error exits `1` with a one-line
+message.
+
+`probe --resource` keys its part by the normalized URI, or by the template string for a
+template target, and tags the entry with `kind`. Each `--args` is one read's template
+variables. A blob's shape is `"bytes"`, and `--save-raw` base64-encodes it. See
+[§ Reading resources](#reading-resources) for the accessors these entries type.
 
 ---
 
@@ -337,7 +382,7 @@ Seven steps from invocation to typed wrappers:
 |------|-------------|
 | 1. Mechanical stubs | `mcpgen codegen <server> --out <server>.py` — all tools, returns `Any` |
 | 2. Curate | Pick tools whose payloads you want typed (not all of them) |
-| 3. Probe → skeleton | `mcpgen probe <server> <tool> --args '...' --emit-shape <server>.shapes.json` — writes a per-tool part under `<server>.shapes.json.parts/` (parallel-safe; many probes can run at once) |
+| 3. Probe → skeleton | `mcpgen probe <server> <tool> --args '...' --emit-shape <server>.shapes.json` — writes a per-tool part under `<server>.shapes.json.parts/` (parallel-safe; many probes can run at once). Resources: `mcpgen probe <server> '<uri-or-template>' --resource [--args '...'] --emit-shape …` |
 | 4. Merge | `mcpgen merge <server> --out <server>.shapes.json` — consolidate the `.parts/` into the committed shape-spec, preserving hand-edits for un-probed tools. Also emits a gitignored `<server>.verify.json` sidecar holding pre-scrub `probed_args` for roundtrip verification. Re-run after partial re-probes. |
 | 5. Edit shape-spec | Set `unwrap`, `return_model`, `fields`, `input_overrides` — the judgment pass. For tools that return different shapes per input value, use `discriminator` + `variants` instead of a flat `return_model` — see [§ Polymorphic tools](#polymorphic-tools-discriminated-shaping). |
 | 6. Regenerate | `mcpgen codegen <server> --out <server>.py --shapes <server>.shapes.json` |
@@ -350,7 +395,10 @@ name, or `null` for `Any`), `fields` (top-level scalar fields), `return_containe
 (e.g. `"list"` when the unwrapped value is a list), `input_overrides` (fix schema-lie
 types), `discriminator` + `variants` (polymorphic tools), and `source` (`"live"` vs
 `"fixture"`). JSON/TS type tokens (`any`, `null`, `integer`) are normalized to Python
-(`Any`, `None`, `int`) at load.
+(`Any`, `None`, `int`) at load. A resource entry is keyed by its normalized URI or template
+string, carries `"kind": "resource"` or `"resource_template"`, takes the same keys except
+`discriminator` / `variants`, and keys `input_overrides` by the template's raw variable
+names.
 
 Multi-probe: repeat `--args` for each sample input; shapes are deep-merged (keys unioned,
 type conflicts widened). Use when fields are nullable or a tool has multiple response shapes.
@@ -486,6 +534,86 @@ class FakeCaller:
         return {"login": "octocat"}
 ```
 
+### Reading resources
+
+When the server exposes MCP resources, `codegen` emits one accessor per static resource and
+per resource template, after the tool wrappers:
+
+```python
+async def read_risk_dictionary(caller: McpResourceReader) -> Any:
+    """Risk categories and levels
+
+    Resource: risk://dictionary
+    MIME type: application/json
+    """
+
+async def read_dimension_by_unit_type(caller: McpResourceReader, *, unitType: str) -> list[Dimension]:
+    """Dimensions for one unit type
+
+    Resource template: dimension://by-unit-type/{unitType}
+    MIME type: application/json
+    """
+```
+
+- **Names come from the URI**, not the server's `name` field: `read_`, then the URI with
+  template expressions dropped, every run of other characters collapsed to `_`, and
+  leading/trailing `_` trimmed. A name already taken by a tool or an earlier accessor gets a
+  `_2`, `_3`, … suffix. The docstring's `Resource:` / `Resource template:` line names the
+  URI either way.
+- **Template variables are keyword-only `str` arguments**, retyped by `input_overrides`.
+  Variables in a `{?…}` or `{&…}` expression are optional (`str | None = None`) and omitted
+  from the URI when `None`. The accessor expands the template itself (RFC 6570, levels 1–4),
+  so `unitType="Delivery Unit"` reads `dimension://by-unit-type/Delivery%20Unit`.
+- **Return values** are decoded the way tool results are. A text content is parsed as JSON,
+  else as a Python literal (`ast.literal_eval`), else returned as the `str`; a blob content
+  comes back as decoded `bytes`; several contents come back as a list in server order; no
+  contents raise `ValueError`. Without a shape entry the accessor returns `Any`; a probed and
+  shaped entry types it exactly as for a tool (`unwrap`, `return_model`, `return_container`).
+- **A read error raises the SDK's `McpError`** — an unknown URI, for example — not an
+  exception group.
+
+`McpBridgeCaller` implements both Protocols, so one caller serves tools and resources, one-shot
+or inside `connected()`:
+
+```python
+caller = McpBridgeCaller(config_path=CONFIG_PATH)
+async with caller.connected():
+    risks = await dc.read_risk_dictionary(caller)
+    dims = await dc.read_dimension_by_unit_type(caller, unitType="PROJECT")
+```
+
+A custom caller that implements only `McpCaller` keeps working with every module that has no
+resource accessors. For a module that has them, add `read_resource` to your fake caller:
+
+```python
+from typing import Any
+
+class FakeCaller:
+    async def call(self, server: str, tool: str, arguments: dict) -> Any:
+        return {"login": "octocat"}
+
+    async def read_resource(self, server: str, uri: str) -> Any:
+        return {"levels": ["low", "high"]}
+```
+
+`codegen --resources` chooses what gets an accessor:
+
+| Value | Accessors | Manifest tracks |
+|---|---|---|
+| `all` *(default)* | every static resource and template | both |
+| `templates` | templates only; static resources are not even listed | templates |
+| `none` | none — a tools-only module | neither |
+
+A scope other than `all` is also recorded in the manifest, so `mcpgen check` lists the same
+resources without a flag. `codegen` does not read it back: pass the same `--resources` when
+you regenerate.
+
+Above 50 static resources `codegen` warns: a server that lists its data as resources gets an
+accessor per record, and `--resources templates` or `none` is usually what you want. A shapes
+entry that matches no listed resource or template, or has an unknown `kind`, is not applied and
+`codegen` warns. A failed resource listing exits `1` with a hint to retry with
+`--resources none`.
+
 ---
 
 ## Reusing one connection for a series of calls
@@ -518,8 +646,10 @@ Details:
   first-calls cannot start two subprocesses.
 - **Cleanup.** Sessions close when the block exits, including when the body raises.
 - **Not re-entrant.** Nesting `connected()` on the same caller raises `RuntimeError`.
-- **Generated wrappers are unaffected.** They depend only on the `McpCaller`
-  protocol and neither know nor care whether a block is active.
+- **Generated wrappers are unaffected.** They depend only on the `McpCaller` and
+  `McpResourceReader` protocols and neither know nor care whether a block is active.
+- **Resources share the session.** A resource accessor called inside the block reads
+  over the same session as the tool calls around it.
 
 ---
 
@@ -535,6 +665,8 @@ Invoke it after the wrapper skill (optional step 8) with a phrase like
 
 - calls each **read-only** tool once (one call per discriminator variant), in a
   sensible workflow order (identity → metadata → discovery → detail → search);
+- calls each **resource accessor** once, template variables from `verify.json`, placing an
+  accessor before any tool whose description says to read that resource first;
 - **skips mutating tools** by default (opt in via an explicit instruction);
 - picks args from `verify.json` → scrubbed `probed_args` → schema-minimal synthetic;
 - selects a connection skeleton matching the transport + auth (stdio / http public /
@@ -554,7 +686,7 @@ you when that contract has moved.
 
 ### The manifest
 
-Every `mcpgen codegen` run that writes a module also writes a **tool-inventory manifest**
+Every `mcpgen codegen` run that writes a module also writes an **inventory manifest**
 beside it, derived from the `--out` stem:
 
 ```bash
@@ -567,21 +699,28 @@ mcpgen codegen demo --stdio 'python server.py' --out gen/demo.py
 | *(none)* | Write `<out-stem>.mcpgen.json` next to `--out` |
 | `--manifest PATH` | Write it to `PATH` instead |
 | `--no-manifest` | Do not write one |
+| `--resources {all,templates,none}` | Which resource sections it tracks — the same scope that picks the accessors. `templates` and `none` are recorded as `resource_scope` |
 
 Stdout mode (no `--out`) writes no manifest.
 
-The file holds exactly three keys — `format_version`, `server`, and `tools` (each tool's
-`description`, `inputSchema`, and `annotations`). There is **no timestamp and no generator
-version**, so the manifest is a pure function of the inventory: regenerating against an
-unchanged server produces a byte-identical file and never dirties a git diff. Object keys
-are sorted and set-like schema arrays (`required`, `enum`) are normalized, so a server that
-merely re-orders them does not read as a change. It contains no credentials — commit it
-alongside the generated module.
+The file holds `format_version`, `server`, and `tools` (each tool's `description`,
+`inputSchema`, and `annotations`), plus up to two resource sections: `resources`, keyed by
+normalized URI, and `resource_templates`, keyed by template string, each entry holding
+`name`, `description`, and `mimeType`. A section is written only when `codegen` collected
+it: absent means untracked, and `{}` means tracked with nothing listed. A top-level
+`resource_scope` (`"templates"` or `"none"`) records a `--resources` narrower than `all`; it
+is absent for `all`. `format_version` is `1`; mcpgen versions before 0.11.0 ignore the extra
+keys. There is **no timestamp and no generator version**, so the manifest is a pure function
+of the inventory and the scope: regenerating against an unchanged server produces a
+byte-identical file and never dirties a git diff.
+Object keys are sorted and set-like schema arrays (`required`, `enum`) are normalized, so a
+server that merely re-orders them does not read as a change. It contains no credentials —
+commit it alongside the generated module.
 
 ### Checking
 
 ```bash
-mcpgen check <server> [--manifest PATH] [--json] [--update] [--stdio CMD] <connection flags>
+mcpgen check <server> [--manifest PATH] [--json] [--update] [--resources SCOPE] [--stdio CMD] <connection flags>
 ```
 
 | Flag | Meaning |
@@ -589,6 +728,7 @@ mcpgen check <server> [--manifest PATH] [--json] [--update] [--stdio CMD] <conne
 | `--manifest PATH` | Manifest to compare against (default: `<server>.mcpgen.json`) |
 | `--json` | Emit a structured report on stdout instead of human text |
 | `--update` | Accept the live inventory: rewrite the manifest and exit 0 |
+| `--resources {all,templates,none}` | Resources to list and compare (default: the scope the stored manifest records, else what it tracks — see [§ Resources in the manifest](#resources-in-the-manifest)) |
 | `--stdio CMD` | stdio transport, e.g. `'python server.py'` |
 
 Plus the same connection flags as `codegen`: `--url`, `--bearer`, `--client-name`,
@@ -598,9 +738,9 @@ Plus the same connection flags as `codegen`: `--url`, `--bearer`, `--client-name
 
 | Exit | Meaning |
 |------|---------|
-| `0` | No drift. Description-only changes print as **advisories** and do not affect the exit code. |
-| `1` | Drift: a tool was added, removed, or its `inputSchema` or `annotations` changed. |
-| `2` | Operational error: manifest missing (without `--update`) or unreadable, unknown `format_version`, transport failure, auth failure, bad config. |
+| `0` | No drift. Description-only changes, resource `name` changes, and untracked live resources print as **advisories** and do not affect the exit code. |
+| `1` | Drift: a tool was added, removed, or its `inputSchema` or `annotations` changed; or a resource or resource template was added, removed, or changed its `mimeType`. |
+| `2` | Operational error: manifest missing (without `--update`) or unreadable, unknown `format_version`, transport failure, auth failure, bad config, a failed resource listing (except the untracked-manifest preview). |
 
 `2` is never drift. A dead CI runner or an expired token can therefore never be misread as
 a changed tool contract — the two failure modes stay distinguishable in a pipeline.
@@ -609,6 +749,58 @@ a changed tool contract — the two failure modes stay distinguishable in a pipe
 - name: Check MCP tool drift
   run: mcpgen check demo --config .mcp.json --manifest gen/demo.mcpgen.json --json
 ```
+
+Resource drift prints as `ADDED     demo resource demo://status`,
+`REMOVED   demo resource template demo://records/{record_id}`, or
+`CHANGED   demo resource demo://config: mimeType changed: …`. With `--json`, a `resources`
+block (`compared`, `untracked`, `added`, `removed`, `changed`, `advisory`, and `error` on a
+failed listing) appears only when resources were compared, are untracked, or failed to
+list; otherwise the report has no `resources` key. A top-level `resource_scope` names the
+scope `check` listed with when it is not `all`.
+
+### Resources in the manifest
+
+`check` compares the resource sections the stored manifest tracks, and lists the live
+resources in the scope the manifest records or, failing that, the one its sections imply:
+
+| Stored manifest | Default scope |
+|---|---|
+| `resource_scope: "none"` (from `codegen --resources none`) | `none` — no resource request is sent |
+| `resource_scope: "templates"` (from `codegen --resources templates`) | `templates` — static resources are not listed |
+| no `resource_scope`, only `resource_templates` | `templates` |
+| no `resource_scope`, `resources` or both sections | `all` |
+| no `resource_scope` and neither section (from before 0.11.0) | `all`, as a first-page preview — see below |
+
+`--resources` overrides the default. With `--update`, an explicit `--resources` is recorded:
+`templates` or `none` writes `resource_scope` and drops the sections outside it (`templates`
+drops `resources`, `none` drops both), and `all` removes the key. Without the flag a recorded
+scope is kept, and an inferred one is never written. A `resource_scope` other than `all`,
+`templates` or `none` exits `2`, whatever the flags: fix or remove the key by hand, or
+regenerate the manifest with `codegen`.
+
+`codegen` never writes a section outside its scope. In a hand-edited manifest that does, such
+as a `resources` section beside `resource_scope: "templates"`, the section is neither listed
+nor compared, and `--update` without `--resources` keeps it as stored.
+
+**Untracked manifests.** With no resource section, no recorded scope, no `--resources`, and
+no `--update`, `check` reads only the first page of each resource list (10 s timeout), to
+decide on one advisory: *live resources are not tracked by the stored manifest; re-run with
+`--update` to track them, or with `--resources none --update` to stop listing them*. It exits
+`0`. A failed or timed-out listing there is an advisory too, still exit `0`: with nothing
+stored, nothing would be compared. Anywhere else — a tracked manifest, a recorded scope, an
+explicit `--resources`, or `--update` — the listing is complete and strict, and a failure
+exits `2`.
+
+The same advisory names `--resources templates --update` instead when resource templates are
+tracked and only static resources are not (after an explicit `--resources all`), since that
+scope keeps the templates.
+
+**`--resources none` manifests.** A manifest from `codegen --resources none` records
+`"resource_scope": "none"`, so `check` sends no resource request and prints no advisory, and
+`--update` keeps it tools-only. To start tracking resources, regenerate with `codegen` (whose
+default is `all`) or run `check --resources all --update`, which writes both sections and
+removes the key. A manifest from before 0.11.0 records no scope; `check --resources none
+--update` records the opt-out for it.
 
 ### Accepting a change
 
@@ -621,11 +813,19 @@ mcpgen check demo --stdio 'python server.py' --manifest gen/demo.mcpgen.json --u
 
 `--update` writes the live inventory and exits `0`. It also bootstraps a manifest for an
 existing wrapper that predates one. On an operational error (exit `2`) it writes nothing.
-After an `--update`, regenerate the wrapper if the change affects tools you call.
+It writes the resource sections it listed. A stored section the scope did not list is kept
+as stored, unless an explicit `--resources` leaves it out: then it is dropped along with the
+recorded scope change (see [§ Resources in the manifest](#resources-in-the-manifest)). The
+closing line says what changed beyond the accepted drift: `now tracking resources and
+resource templates`, `recorded resource_scope templates`, `removed resource_scope`, or
+`stopped tracking resources`.
+After an `--update`, regenerate the wrapper if the change affects tools you call or
+resources you read.
 
 ### What `check` does not touch
 
-- It **never calls a tool** — `tools/list` only, no probing, no side effects on the server.
+- It **never calls a tool and never reads a resource** — `tools/list` and the resource
+  lists only, no probing, no side effects on the server.
 - It **never reads or writes** `<server>.shapes.json`. Your shape-spec and its hand-edits
   are untouched.
 
@@ -683,12 +883,15 @@ union — it never raises.
 
 ### Enum params → `Literal[...]`
 
-Any input param whose `inputSchema` carries an `enum` array is automatically typed as
-`Literal[<v1>, <v2>, ...]` — no flag required. This applies to all scalar enums
-(string, int, …). Use `mcpgen list <server> --schema` to inspect the raw `enum` arrays
-before generating. Do not widen enum params to `str` in your calling code; if the server
-accepts values outside the declared enum, the appropriate fix is to update the shape-spec
-`input_overrides` for that param rather than loosening the call site.
+Any input param whose `inputSchema` pins its values is automatically typed as
+`Literal[<v1>, <v2>, ...]` — no flag required. That covers an `enum` array, a lone `const`,
+and an `anyOf`/`oneOf` whose branches are all `const`s, `enum`s or `{"type": "null"}` (the
+form Zod and pydantic emit; a null branch adds `| None`). Values must be scalars (string,
+int, bool): a float in an `enum` or `const` falls back to the declared type, while a float
+or any open branch in a union leaves the param `Any`. Use `mcpgen list <server> --schema` to inspect the raw schemas before generating. Do
+not widen these params to `str` in your calling code; if the server accepts values outside
+the declared set, the appropriate fix is to update the shape-spec `input_overrides` for that
+param rather than loosening the call site.
 
 ---
 

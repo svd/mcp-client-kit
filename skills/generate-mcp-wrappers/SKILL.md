@@ -6,7 +6,9 @@ description: Use when generating typed Python wrappers for an MCP server. Drives
 # Generate typed MCP wrappers (the judgment pass)
 
 `mcpgen codegen` does the deterministic 80%: `tools/list` → one typed `async def` per tool
-against the `McpCaller` seam. It returns `Any` and is blind to vendor response envelopes.
+against the `McpCaller` seam, and one `read_*` accessor per resource and resource template
+against the `McpResourceReader` seam. Both return `Any` and are blind to vendor response
+envelopes.
 **This skill is the 20% judgment that an LLM must do:** probe a real call, read the actual
 response, and record what the input schema couldn't tell you — into a **shape-spec sidecar**
 (`<server>.shapes.json`, data not code) that codegen re-consumes to emit unwrap helpers and
@@ -31,11 +33,12 @@ These bite in every step, so they are stated once here rather than repeated per 
 - **Quote every substituted value.** A server name is a config key or a URL, so it can hold
   spaces, `?`, `&`, or glob characters — `"my server"`, `"my server/my server.py"`. Unquoted,
   it word-splits or globs in `sh`/`bash`, and globs in `zsh`.
-- **`eval` for two-word invocations.** A bare `$c` does not word-split in `zsh`, so a
-  `uv run mcpgen` form never matches without it.
-- **Shell variables do not survive between invocations.** `$MCPGEN` is not available to later
-  steps: state the resolved invocation once in your report, then substitute that literal
-  string wherever a block below writes `<mcpgen>`.
+- **`<mcpgen>` is the absolute path step 0 prints, pasted in literally.** Shell variables and
+  functions do not survive between invocations, so `$MCPGEN` is gone by step 1. Do not wrap
+  the command in a variable or function of your own either: a `c="uv run mcpgen"` run as a
+  bare `$c` does not word-split in `zsh`, so every line of the batch runs the wrong command.
+  State the path once in your report, then substitute it wherever a block below writes
+  `<mcpgen>`.
 - **An env prefix must be in the same invocation as the command.** `MCPGEN_SERVERS=servers.json
   <mcpgen> …` — it does not persist across calls.
 - **Never `|| echo` a failure.** It returns 0 and hides the error, including from `set -e`.
@@ -59,40 +62,61 @@ barrier stays on main.
 
 ## Procedure
 
-0. **Resolve the CLI.** Requires `mcpgen >= 0.10.0` — one floor for the whole procedure and
-   for the plugin, step 7's runner included, so no later step gates on a different number.
-   Do not proceed on an older one.
+0. **Resolve the CLI.** Requires `mcpgen >= 0.11.0`. Do not proceed on an older one.
 
    The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
    Probe the three forms and keep the first that both answers **and** meets the floor — an
-   outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
+   outdated `mcpgen` on `PATH` must not shadow a current one in the venv. Each form is first
+   resolved to the absolute path of the executable it would run, and the floor check runs on
+   that path, so what the loop settles on is always one word:
 
    ```bash
-   min=0.10.0; MCPGEN=
+   min=0.11.0; MCPGEN=
+   vkey() {  # PEP 440 version -> dotted key that sort -V orders correctly
+     local r s
+     r=${1%%[!0-9.]*}; r=${r%.}; s=${1#"$r"}; s=${s#.}
+     case $s in
+       '')   s=4.0 ;;
+       dev*) s=0.${s#dev} ;;
+       a*)   s=1.${s#a} ;;
+       b*)   s=2.${s#b} ;;
+       rc*)  s=3.${s#rc} ;;
+       post*) s=5.${s#post} ;;
+       *)    return 1 ;;
+     esac
+     printf '%s.%s\n' "$r" "$s" | grep -E '^[0-9]+(\.[0-9]+)+$'
+   }
+   mkey=$(vkey "$min")
    for c in "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
-     out=$(eval "$c --version" 2>/dev/null) || continue
+     case $c in
+       "uv run mcpgen")
+         p=$(uv run python -c 'import shutil; print(shutil.which("mcpgen") or "")' 2>/dev/null) ;;
+       */*) p=$PWD/$c ;;
+       *)   p=$(command -v "$c") ;;
+     esac
+     case $p in /*) [ -x "$p" ] || continue ;; *) continue ;; esac
+     out=$("$p" --version 2>/dev/null) || continue
      ver=$(printf '%s\n' "$out" | awk '{print $2}')
-     base=${ver%%[!0-9.]*}; base=${base%.}
-     printf '%s' "$base" | grep -Eq '^[0-9]+(\.[0-9]+)+$' || continue
-     if [ "$base" = "$min" ] && [ "$base" != "$ver" ]; then
-       echo "skipping $c ($ver is a pre-release of $min)"; continue
-     fi
-     [ "$(printf '%s\n%s\n' "$min" "$base" | sort -V | head -n 1)" = "$min" ] || \
-       { echo "skipping $c ($ver < $min)"; continue; }
-     MCPGEN="$c"; break
+     key=$(vkey "$ver") || { echo "skipping $p (unparsable version '$ver')"; continue; }
+     [ "$(printf '%s\n%s\n' "$mkey" "$key" | sort -V | head -n 1)" = "$mkey" ] || \
+       { echo "skipping $p ($ver < $min)"; continue; }
+     MCPGEN=$p; break
    done
    [ -n "$MCPGEN" ] || { echo "no mcpgen >= $min found on any invocation"; exit 1; }
    echo "resolved: $MCPGEN ($ver)"
    ```
 
-   The comparison runs on `$base`, the release part alone: `${ver%%[!0-9.]*}` trims from the
-   first character that is neither digit nor dot and `${base%.}` drops the dot a `.devN`
-   suffix leaves behind, so `0.10.0rc1` and `0.10.0.dev1` both reduce to `0.10.0`. That split
-   is what lets the guard accept a newer pre-release (`0.11.0.dev1` clears a `0.10.0` floor —
-   this repo's own `dev` branch is one) while rejecting a pre-release *of the floor itself*,
-   which `sort -V` alone orders above `0.10.0` even though it may predate the feature the
-   floor exists for. The `$`-anchored `grep` is what makes the trim load-bearing: without it
-   a version that is not a dotted number at all would slip through as its own prefix.
+   `uv run mcpgen` becomes the path `uv run` would execute, found by `shutil.which` inside the
+   project environment; `.venv/bin/mcpgen` is anchored to `$PWD`; a bare name goes through
+   `command -v`, which prints nothing usable for an alias or a shell function, so those are
+   skipped. Anything that is not an absolute path to an executable file is skipped the same
+   way.
+
+   `sort -V` alone misorders PEP 440: it puts `0.11.0.dev1` above `0.11.0`. `vkey` fixes that
+   by splitting the release part from the suffix and appending a rank for the suffix, so
+   `.devN` < `aN` < `bN` < `rcN` < final < `.postN`: `0.11.0.dev1` becomes `0.11.0.0.1` and
+   `0.11.0` becomes `0.11.0.4.0`. The `$`-anchored `grep` rejects anything the ranks do not
+   cover, such as a combined `rc1.dev2`, rather than letting it through as its own prefix.
 
 1. **Mechanical stubs.**
 
@@ -125,23 +149,52 @@ barrier stays on main.
    server it merges over that server's own `env` block, so one extra variable never costs you
    the config's block.
 
-   `codegen`, `list`, `probe`, and `call` each require the same transport flags
+   `codegen`, `list`, `probe`, `call`, and `read` each require the same transport flags
    (`--stdio` / `--url` / `--bearer` / `--env` / `--config`) on **every** invocation — they do
    not inherit flags from a prior run. `merge` and `discover` need no connection flags (`merge`
    accepts `--config` and ignores it). Later command blocks elide those flags for brevity: add
    the same transport form this step used, including the `MCPGEN_SERVERS=` prefix, to every
-   runnable `codegen`, `list`, `probe`, and `call` line below.
+   runnable `codegen`, `list`, `probe`, `call`, and `read` line below.
 
    The result parses, with every tool typed from `inputSchema`, and returns `Any` until a
    shape-spec exists beside the output (step 5 regenerates once it does). `--embed-schema` also
    emits `fn.__schema__ = {<raw inputSchema>}` on each function and an Args docstring section
    listing each param's description, enum values, and default.
 
-2. **Select tools to probe.**
+   When the server exposes resources, the module also holds one accessor per static resource
+   and resource template, named from the URI: `risk://dictionary` → `read_risk_dictionary`,
+   `dimension://by-unit-type/{unitType}` → `read_dimension_by_unit_type(caller, *, unitType:
+   str)`. `codegen` prints the resource counts on stderr. Above 50 static resources it warns
+   that the server may list its data as resources; step 2b decides whether to narrow with
+   `--resources templates` or `--resources none`. A failed resource listing exits 1 with a
+   hint to retry with `--resources none`, which generates the tool wrappers alone.
+
+2. **Select tools and resources to probe.**
 
    Keep a running `session-overview.md` beside the generated module (the `--out` dir). It is
-   the human-readable log for everything the shape-spec cannot hold: skipped mutating tools,
-   unprobed tools and why, and discriminator verdicts.
+   the human-readable log for everything the shape-spec cannot hold: skipped mutating and
+   interactive tools, unprobed tools and why, failed commands, and discriminator verdicts.
+
+   List each tool whose record shape no probe observed under a `## unprobed` heading, one line
+   apiece — tool, cause, detail — with the first cause below that fits:
+
+   - `id-gated` — a required argument takes an id no read-only tool supplied. Name the argument
+     and, when known, the producer tool that would mint it. Never run a mutating producer to
+     get one: it stays skipped without step 2c's explicit human yes.
+   - `entitlement-gated` — the server says the plan or account lacks the tool. Quote its
+     machine-readable class (`tool_error_class: entitlement_required`), else its message.
+   - `empty store` — the listing tool returned no items, so no record shape was observed.
+   - `tool error` — `probe` printed `[probe] tool returned isError: …`; cite that line.
+   - `timeout` — `probe` printed `[probe] timeout: …`; cite that line.
+   - `interactive`, `mutating` — skipped by policy and logged under `## mutating-skipped`
+     (`references/mutating-tools.md`), not repeated here.
+   - `inconclusive` — the residue: the probe ran but told nothing usable. Say what came back,
+     plus any note `references/probe-failures.md` asks for.
+
+   A probe batch or command that failed stays in the log with the error it printed, even when
+   a re-issue succeeded: say what failed, why, and what the retry changed. Write "no errors"
+   only for a session in which nothing failed — a clean retry is the fix, not evidence that
+   the first run was clean.
 
    a. Run `<mcpgen> list <server> --schema` → `[{name, description, inputSchema}]` for every
       tool, plus `annotations` on the tools whose server supplies it (the key is absent when it
@@ -150,9 +203,21 @@ barrier stays on main.
       the authoritative source for step 3's required-arg and enum checks — no separate schema
       fetch is needed.
 
+      The same run prints a stderr line when the server has resources —
+      `[list] 2 resource(s) and 1 resource template(s) available; …`. Its counts cover the
+      first page only (`N+` means more pages). When that line appears, or
+      `[list] note: could not list resources` does (an error or a 10 s timeout), run
+      `<mcpgen> list <server> --resources` → `{"resources": [{uri, name, title, description,
+      mimeType, size}], "resourceTemplates": [{uriTemplate, name, title, description,
+      mimeType}]}`. It pages through both lists and fails loudly where the preview only noted
+      the error. With neither line, the server has no resources: record `resources: none` and
+      skip every resource step below.
+
    b. **Classify and report.** Decide safe-to-probe per `references/mutating-tools.md` —
       `annotations.readOnlyHint` first, keyword test plus semantic read as fallback, and record
-      every verdict that isn't a clean `readOnlyHint`. Then print:
+      every verdict that isn't a clean `readOnlyHint`. A tool that waits for a human (input,
+      confirmation, a pick in the browser) is interactive and skipped like a mutating one. Then
+      print:
 
       ```
       Tools on <server>:
@@ -160,6 +225,7 @@ barrier stays on main.
         query_acme      — Search entities matching criteria
         whoami          — Return the calling user's profile
         ⚠ create_entity — Create a new entity [MUTATING]
+        ⚠ pick_entity   — Wait for the user to pick an entity in the browser [INTERACTIVE]
         ...
       ```
 
@@ -168,6 +234,30 @@ barrier stays on main.
       a `TypedDict`, so the default set below may be pruned to the record-carrying tools — say
       in `session-overview.md` what you dropped and why. **Prune before sizing the run:** the
       Execution model picks single-driver vs fan-out from how many tools are *selected*.
+
+      **Resources are read-only.** Reading one never changes the server, so resources need no
+      mutating classification and no opt-in; the 2c/2d gates below govern tools alone. Select
+      resources by what they hold:
+      - **Every template** (`dimension://by-unit-type/{unitType}`) — a parameterized lookup, the
+        resource form of a read tool.
+      - **API-like statics** — reference data the tools depend on: a dictionary, a catalog, a
+        schema, a config. A tool description that says "read `risk://dictionary` before
+        calling" names one outright.
+      - **Skip data-like lists** — statics that enumerate records one URI each
+        (`file:///…/a.txt`, `file:///…/b.txt`, `db://orders/1041`, …). List them in
+        `session-overview.md` as skipped data resources. Skipping means not probing: `codegen`
+        still emits an accessor for every listed static. Where the statics are data-like as a
+        group (codegen warns above 50), regenerate in step 5 with `--resources templates`
+        (templates only) or `--resources none`, and record the choice in the overview.
+
+      Print the resource verdicts under the tool list:
+
+      ```
+      Resources on <server>:
+        risk://dictionary                    — Risk categories and levels [static]
+        dimension://by-unit-type/{unitType}  — Dimensions for one unit type [template]
+        ✗ file:///data/orders/1041.json      — [data-like, skipped]
+      ```
 
    c. **Select the set — default path.** The default is **every non-mutating tool**, optionally
       pruned per the focus note. Mutating tools are skipped entirely — never probed without an
@@ -194,7 +284,7 @@ barrier stays on main.
       - **I'll specify the tools** — user names them (free-text via "Other"); confirm any
         ambiguous name before probing, and any named tool step 2b flagged.
 
-   The selected set (from either path) drives steps 3 and 4.
+   The selected set (from either path), plus the resources 2b selected, drives steps 3 and 4.
 
    e. **Detect discriminators.** The advisory is stderr of the *same* `list --schema` run step
       2.a already made, so the answer is in hand before any analysis.
@@ -294,7 +384,11 @@ barrier stays on main.
       probe overwrites the tool's part file: read the shape between calls, or only the last one
       survives.
 
-3. **Probe each selected tool → skeleton (parallel-safe).**
+      **Resources carry no discriminators.** A template's variables choose *which* resource is
+      read, not a response variant, so neither pass applies to resources and `probe --resource`
+      prints no advisory.
+
+3. **Probe each selected tool and resource → skeleton (parallel-safe).**
 
    First, establish `<shapes-path>` — the consolidated shapes sidecar. It must sit **beside the
    generated module** so `mcpgen codegen` auto-detects it:
@@ -308,15 +402,22 @@ barrier stays on main.
    subagent's. Probing writes raw ids and PII into three artifacts, and `mcpgen` installs no
    ignore rules.
 
-   Two of the three paths follow `<shapes-path>`, not the CWD: `merge` writes the verify sidecar
-   beside the shapes file. Write `<shapes-stem>` for `<shapes-path>` with the `.shapes.json`
-   suffix removed (`github/github.shapes.json` → `github/github`). Only `probe-raw.json` is
-   CWD-relative. Raw payloads are named **per tool** — `<server>.<tool>.probe-raw.json` — so an
-   ignore rule covering them must be a `*.probe-raw.json` glob, not one literal path.
+   All three artifacts follow `<shapes-path>`, and none depends on the CWD. Write `<shapes-stem>`
+   for `<shapes-path>` with the `.shapes.json` suffix removed (`github/github.shapes.json` →
+   `github/github`), and `<shapes-dir>` for the directory holding it (`github`, or `.` for CWD
+   output):
+   - parts: `<shapes-path>.parts/` — written by `probe --emit-shape`
+   - verify sidecar: `<shapes-stem>.verify.json` — written by `merge`
+   - raw payloads: `<shapes-dir>/<server>.<tool>.probe-raw.json` — written by `probe --save-raw`,
+     `call --out` and `read --out`, whose paths you supply
+
+   Every raw-payload path below carries the `<shapes-dir>/` prefix. Raw payloads are named
+   **per tool** (per accessor for a resource), so an ignore rule covering them must be a
+   `*.probe-raw.json` glob, not one literal path.
 
    ```bash
    bad=0
-   for p in "<shapes-path>.parts/" "<shapes-stem>.verify.json" "<server>.<tool>.probe-raw.json"; do
+   for p in "<shapes-path>.parts/" "<shapes-stem>.verify.json" "<shapes-dir>/<server>.<tool>.probe-raw.json"; do
      git check-ignore -q "$p" || { echo "NOT IGNORED — add to .gitignore: $p"; bad=1; }
    done
    [ "$bad" -eq 0 ] || { echo "ignore preflight FAILED — do not probe"; exit 1; }
@@ -368,6 +469,40 @@ barrier stays on main.
    yourself: `probe` announces the tool before calling it, but an unparseable `--args` payload
    fails ahead of that line and names nothing.
 
+   **Resources — `probe --resource`.** The target is the URI or template exactly as
+   `list --resources` printed it; quote it, since `{`, `?`, and `&` are shell metacharacters.
+   The probe reads through `read_resource`, the path the generated accessor takes, so the part
+   records the shape the accessor will return.
+
+   ```bash
+   set -e
+   # static resource: keyed by its normalized URI; takes no --args
+   <mcpgen> probe <server> 'risk://dictionary' --resource --emit-shape <shapes-path>
+   # template: keyed by the template string; each --args is one read's variables
+   <mcpgen> probe <server> 'dimension://by-unit-type/{unitType}' --resource \
+     --args '{"unitType":"PROJECT"}' --emit-shape <shapes-path>
+   ```
+
+   - **Real variable values.** Key `--args` by the template's raw variable names. A variable
+     names an existing object as often as a tool's id argument does, so take its value from
+     the same places: the recon catalog, a discovery tool, or a static resource that
+     enumerates the values (`dimension://all` lists the unit types). An invented value reads
+     back an error or an empty result, not the record.
+   - **Argument errors.** A template with a required variable missing from `--args`, or
+     `--args` on a static URI, exits 1 before any live read.
+   - **Keys.** The entry for a static URI is keyed by its normalized form (`Dimension://ALL`
+     → `dimension://ALL`); a template's entry by the template string as given. `codegen`
+     matches entries against the listed URIs and templates, so a template typed with a
+     different variable name (`{id}` for `{record_id}`) applies to nothing — step 5 warns.
+   - **Blobs.** A binary resource's shape is `"bytes"`; `--save-raw` writes its payload
+     base64-encoded. Name raw files `<shapes-dir>/<server>.<accessor>.probe-raw.json`
+     (`<shapes-dir>/<server>.read_risk_dictionary.probe-raw.json`) so the preflight's glob
+     covers them.
+   - **Inspecting without a shape.** `<mcpgen> read <server> '<uri>' [--args '<json>'] --out
+     <shapes-dir>/<server>.<accessor>.probe-raw.json` is the resource twin of `call --out`:
+     one text content is written verbatim, one blob as raw bytes, several contents as a JSON
+     array.
+
    **Pacing for hosted endpoints.** Against an HTTP/remote server, leave **≥ 2 s between live
    probes**. The multi-`--args` form fires its calls back-to-back inside a single invocation, so
    against a hosted server split a tool's variant probes into separate, paced invocations,
@@ -375,15 +510,17 @@ barrier stays on main.
 
    **When a probe fails, hangs, or returns `"str"`** — read `references/probe-failures.md`
    before recording anything. It separates quota/auth (never retry), challenge/transport
-   (bounded backoff), and settled facts, and it covers the `uvx`/`npx` cold-start tracebacks
-   that are noise on a successful probe.
+   (bounded backoff), settled facts, and `--timeout` expiries, and it covers the `uvx`/`npx`
+   cold-start tracebacks that are noise on a successful probe.
 
-   **Part files.** They land at `<shapes-path>.parts/<tool>.json` (git-ignored). Concurrent
-   probes of *distinct* tools do not clobber each other, with one exception: filenames preserve case, so on a case-insensitive
-   filesystem (macOS's default) two tools differing only in case share one part file and the
-   second overwrites the first. Reading between the two probes does not save the first — `merge`
-   only ever sees the surviving part. Probe one, run step 3b, then probe the other and merge
-   again.
+   **Part files.** They land at `<shapes-path>.parts/<key>.json` (git-ignored), where `<key>`
+   is the URL-quoted tool name, URI, or template; a key too long for a filename is cut short
+   and ends in a hash. Concurrent probes of *distinct* keys do not clobber each other, with one
+   exception: filenames preserve case, so on a case-insensitive filesystem (macOS's default)
+   two keys differing only in case (`Search` and `search`, `demo://x/Users` and
+   `demo://x/users`) share one part file. `probe` refuses the second with an error naming the
+   first rather than overwriting it. Run step 3b to merge the first, then probe the other and
+   merge again.
 
    **Deep merge.** Each `--args` makes one live call. Observed shapes are deep-merged: keys are
    unioned (a key absent from some probes is kept — `total=False` covers it), type conflicts
@@ -413,27 +550,31 @@ barrier stays on main.
    > 20 the sweep proceeds without asking — the threshold is what the interactive gate guards,
    > not the sweep itself.
 
-   Enumerate discriminator values from: (a) the param's `enum` in `inputSchema`; (b) discovery
-   tools / glossary / tool descriptions (e.g. `get_filters` / `get_entity_fields` per
-   `entityType`); (c) `AskUserQuestion` if not discoverable from available tools — and where 2d's
-   condition is not met there is no (c): probe the values you did discover, and record the
-   candidate as unconfirmed with the values you could not enumerate.
+   Enumerate discriminator values from: (a) the param's `enum`, `const`, or `anyOf`/`oneOf` of
+   `const`/`enum` branches in `inputSchema`; (b) discovery tools / glossary / tool descriptions
+   (e.g. `get_filters` / `get_entity_fields` per `entityType`); (c) `AskUserQuestion` if not
+   discoverable from available tools — and where 2d's condition is not met there is no (c):
+   probe the values you did discover, and record the candidate as unconfirmed with the values
+   you could not enumerate.
 
    **Check `inputSchema.required` before constructing probe args.** If the array is non-empty,
    never probe with `'{}'` — call the tool with minimal valid args on the first attempt. For a
    required arg that **references an existing object** (an id, key, or slug), use a real value
    from the recon catalog or a discovery tool: a server that validates existence answers an
-   invented id with an error, and you record an error shape instead of the record. Invent values
-   only for required string args that reference nothing (a free-text query, a label, a title). For
-   GitHub servers, prefer `owner: "microsoft", repo: "vscode"` — real, public, and carrying
-   releases, tags, and issues to observe.
+   invented id with an error, and you record an error shape instead of the record — or, if the
+   tool flags `isError`, the probe fails. Invent values only for required string args that
+   reference nothing (a free-text query, a label, a title). For GitHub servers, prefer
+   `owner: "microsoft", repo: "vscode"` — real, public, and carrying releases, tags, and issues
+   to observe.
 
-   **Inspect `inputSchema` for enum constraints** (`inputSchema.properties[param].enum`). If an
-   `enum` array is present, use its **first listed value** rather than inventing one — a
-   validating server rejects invented values, and mcpgen itself does not check. Record the chosen
-   value in `probed_args`. Codegen maps scalar enum members to `Literal[...]` automatically
-   (float and object members fall back to `float` / `dict`), so the generated signature already
-   encodes the allowed values.
+   **Inspect `inputSchema` for enum constraints.** A param pins its values with an `enum` array,
+   a `const`, or an `anyOf`/`oneOf` whose branches each carry a `const` or `enum` (Zod and
+   pydantic emit this, often with a `{"type": "null"}` branch). If any of these is present, use
+   the **first listed non-null value** rather than inventing one — a validating server rejects
+   invented values, and mcpgen itself does not check. Record the chosen value in `probed_args`.
+   Codegen maps all three forms to `Literal[...]` automatically when the values are scalars (a
+   float falls back to the declared type in an `enum`/`const` and to `Any` in a union), so the
+   generated signature already encodes the allowed values.
 
    **JSON-in-string detection.** Some servers double-encode: the record arrives as a JSON *string*
    inside the MCP envelope (e.g. `directory_tree`), so the client parses the envelope and still
@@ -445,7 +586,7 @@ barrier stays on main.
    ```python
    import json, pathlib
    try:
-       raw = pathlib.Path("<server>.<tool>.probe-raw.json").read_text()
+       raw = pathlib.Path("<shapes-dir>/<server>.<tool>.probe-raw.json").read_text()
        parsed = json.loads(raw)
        label = "JSON_UNWRAP" if isinstance(parsed, (dict, list)) else "NOT_JSON"
        print(label, type(parsed).__name__)
@@ -469,26 +610,33 @@ barrier stays on main.
 
    Record `"_json_unwrap": true` as a note for the next reader. `NOT_JSON` is an **expected
    outcome**, not a probe failure: the payload is prose or a bare scalar, `_observed_shape: "str"`
-   stands, and nothing is recorded as an error.
+   stands, and nothing is recorded as an error. That includes a fixed notice a tool returns
+   whatever the args — a deprecation, "moved to …" — often flagged `[DEPRECATED]` in its title
+   or description: the tool answered, deterministically, so it is observed, not unprobed and not
+   `inconclusive`. Keep the wrapper `-> Any` and say in `session-overview.md` that it is
+   deprecated, quoting the notice.
 
    **Image / binary / media tools.** `image`, `resource`, and `resource_link` blocks surface as
    small metadata dicts — `{"type", "mimeType", "has_data"}` and friends — never the base64
    bytes, which are deliberately dropped to keep shape-specs small. The observed shape therefore
    describes the envelope, not the record. If a tool description mentions "image", "media",
    "audio", "base64", or "binary", leave the wrapper as `-> Any`, note it in
-   `session-overview.md`, and do not model a payload the probe never saw.
+   `session-overview.md`, and do not model a payload the probe never saw. A blob *resource*
+   is different: the accessor returns the decoded `bytes` and the probe records `"bytes"` —
+   step 4 still leaves it `Any`.
 
    **Empty-store probes produce under-typed list fields.** A read tool returning `[]` leaves the
    element shape unobservable and the skeleton omits the field; add `"<field>": "list"` by hand to
    keep it visible, never a guessed element type. Note in `session-overview.md` that it is
-   unobservable at probe time, and recommend re-probing once the server holds representative data.
+   unobservable at probe time — when the empty list is the records themselves, as an `empty
+   store` line (step 2) — and recommend re-probing once the server holds representative data.
 
    **Bootstrapping sample args.** Some tools need a real id first (e.g. before probing
    `get_entity`). Find a no-arg / discovery tool on *this* server that returns user or entity ids
    — there is no universal tool for this, infer from `mcpgen list` output. Capture its raw
    payload in the same invocation that probes it:
 
-   `<mcpgen> probe <server> <discovery-tool> --args '<args>' --save-raw <server>.<discovery-tool>.probe-raw.json`
+   `<mcpgen> probe <server> <discovery-tool> --args '<args>' --save-raw <shapes-dir>/<server>.<discovery-tool>.probe-raw.json`
 
    then read the ids from that file. `--save-raw` requires a `*.probe-raw.json` name (git-ignored)
    and saves the duplicate live round-trip that a separate `mcpgen call --out` costs. **No
@@ -498,7 +646,11 @@ barrier stays on main.
 
    **`probed_args` carries live PII.** Batch agents write parts with raw args; `mcpgen merge`
    scrubs them on the way into `<shapes-path>`, and the step-3 ignore preflight covers the parts
-   themselves.
+   themselves. A template's variables are its `probed_args` and are scrubbed the same way.
+   **Entry keys are not:** a static resource's URI is its key and reaches the committed
+   `<shapes-path>` verbatim, and it cannot be redacted without breaking the match. Do not probe
+   a static whose URI embeds a user, email, or record id; skip it in `session-overview.md`
+   instead.
 
 3b. **Consolidate parts → shapes.json.**
 
@@ -526,7 +678,14 @@ barrier stays on main.
      lands beside the shapes file. It holds a flat `{tool: probed_args}` map sourced from raw
      parts (pre-scrub) for the roundtrip verifier. Partial re-probes overlay existing entries —
      except a re-probe with empty args, which does not overwrite: delete that tool's stale entry
-     by hand, or the verifier replays the old arguments live.
+     by hand, or the verifier replays the old arguments live. A template's entry is keyed by
+     the template string and holds its variables; a static resource takes no args and gets
+     no entry.
+   - Entries carried forward unprobed are checked against the manifest beside the shapes file
+     (`<shapes-stem>.mcpgen.json`): tools against its tools, resource entries against its
+     resource sections. Those absent from it are named as possibly retired. A manifest
+     without the matching section (written before 0.11.0, or by a narrower `--resources`)
+     cannot say, so merge prints only a count — `N resource entry(ies) not checked`.
 
 4. **Edit the shape-spec — THIS is the judgment.**
 
@@ -539,6 +698,15 @@ barrier stays on main.
    Then, for each tool entry, set `unwrap`, `return_model`, `return_container`,
    `input_overrides`, `fields`, and `source`; delete `_observed_shape`; and add
    `_mutating_suspect` / `_mutating_reason` for every probed tool step 2b flagged.
+
+   **Resource entries** take the same fields with three differences — the "Resource entries"
+   section of `references/shape-spec.md` has the detail:
+   - Leave the key and `kind` as the probe wrote them; codegen matches on both.
+   - `input_overrides` is keyed by the template's **raw** variable names, and there is no
+     `discriminator` or `variants` (codegen ignores them with a warning).
+   - **A blob stays `Any`.** An `_observed_shape` of `"bytes"` gets no `return_model` and no
+     `fields`: the accessor returns the decoded `bytes` at runtime, and the shape-spec has no
+     key to annotate a bare scalar return.
 
    **Discriminator resolution is mandatory for polymorphic-suspect tools.** For every tool
    flagged in step 2.e **that is in the selected set**, choose one of three options before the
@@ -590,12 +758,30 @@ barrier stays on main.
    `.parts/` directory, and passing it disables the in-memory parts fallback, so
    `codegen --shapes <path>` on a not-yet-merged run fails with `FileNotFoundError`.
 
-   Now shaped tools return their `TypedDict` (or `list[<model>]`), unwrapping via `_dig` /
-   `_dig_list`.
+   Now shaped tools and resource accessors return their `TypedDict` (or `list[<model>]`),
+   unwrapping via `_dig` / `_dig_list`.
+
+   Add `--resources templates` or `--resources none` when step 2b narrowed the resource scope;
+   the manifest `codegen` writes records the scope, so `mcpgen check` needs no flag.
+
+   Read `codegen`'s stderr for two resource warnings. `shapes entry '<key>' matches no listed
+   resource template — not applied` means the key differs from the listed URI or template:
+   rename the key to the string `list --resources` printed, in both `<shapes-path>` and
+   `<shapes-stem>.verify.json`. `has unknown kind` means `kind` was edited to something other
+   than `resource` or `resource_template`.
 
 6. **Verify.** `ast.parse` the module; confirm the eval target — the shaped tool's signature
    reads `-> Entity` (not `Any`) and its body digs the envelope. Where a hand-built wrapper
-   exists, diff the generated unwrap against it as an oracle.
+   exists, diff the generated unwrap against it as an oracle. For each shaped resource, confirm
+   the accessor the same way: `read_dimension_by_unit_type(caller, *, unitType: str) ->
+   list[Dimension]`.
+
+   A text match on `-> Entity` passes even when the wrong model is named, so also check the
+   models against the annotations: every `class <Name>(TypedDict, …)` in the module must appear
+   in at least one function's return annotation. A class nothing returns means a wrapper is
+   annotated with the wrong model. If `codegen`'s stderr printed `shape collision for '<Name>'
+   (<owner>); emitted '<Name>_2'`, two entries share a name with different `fields`: rename one
+   in `<shapes-path>` (see `references/shape-spec.md`) and rerun `codegen`.
 
 7. **Generate a smoke-test runner.**
 
@@ -603,9 +789,8 @@ barrier stays on main.
    Generation adds one new file, so it is the default in every non-interactive run — a subagent
    that cannot reach `AskUserQuestion` generates the runner rather than skipping the step.
 
-   Step 0's floor already covers runner generation, so there is no engine check to repeat
-   here. When the output folder already holds a `run.py`, leave it alone and report that it
-   exists; a hand-edited runner is not regenerated over.
+   When the output folder already holds a `run.py`, leave it alone and report that it exists;
+   a hand-edited runner is not regenerated over.
 
    > **Interactive exception:** where 2d's condition holds, offer the choice first
    > (single-select, 2 options: **Yes** — invoke `mcp-client-kit:generate-mcp-runner` now;
@@ -619,9 +804,13 @@ barrier stays on main.
      `add`, `append`, `insert`, `upsert`, `push`, `close`, and `revoke`, and reads neither
      `annotations` nor the description semantically — so a tool only step 2 catches would
      otherwise be called for real.
-   - **Resolved `mcpgen` invocation** — the literal string step 0 settled on. Pass it
-     explicitly: the runner tries it as its first candidate, so one `--version` call settles
-     its check instead of a fresh probe down the same three forms.
+   - **The resource accessors** — the `read_*` functions the module holds. They are
+     read-only, so the runner includes them by default; name the data-like statics step 2b
+     skipped so it leaves their accessors out. Name any tool whose description says to read
+     a resource first, so the runner orders that accessor ahead of it.
+   - **Resolved `mcpgen` path** — the absolute path step 0 printed. Pass it explicitly: the
+     runner tries it as its first candidate, so one `--version` call settles its check instead
+     of a fresh probe down the same three forms.
    - **Server name** — `<server>`.
    - **Output folder** — the dir from `--out` (e.g. `<server>/`), holding `<server>.py`,
      `<shapes-path>`, and `<shapes-stem>.verify.json`.
@@ -638,10 +827,12 @@ barrier stays on main.
 ## Guards (do not violate)
 
 - **Only mcpgen talks to the server.** Every live interaction — `list`, `probe`, `call`,
-  bootstrap, inspect — goes through `mcpgen`. Never shell out to `curl`, `gh`, `httpie`, or raw
-  `python` HTTP. mcpgen owns auth (browser OAuth + silent token refresh); any other client is
-  unauthenticated, leaks the bearer token, or both. Need a raw payload? That's
-  `<mcpgen> call … --out *.probe-raw.json` (git-ignored).
+  `read`, bootstrap, inspect — goes through `mcpgen`. Never shell out to `curl`, `gh`,
+  `httpie`, or raw `python` HTTP. mcpgen owns auth (browser OAuth + silent token refresh);
+  any other client is unauthenticated, leaks the bearer token, or both. Need a raw payload?
+  That's `<mcpgen> call … --out <shapes-dir>/<server>.<tool>.probe-raw.json`, or
+  `<mcpgen> read … --out <shapes-dir>/<server>.<accessor>.probe-raw.json` for a resource (both
+  git-ignored).
 
 - **Never pipe any `mcpgen` command that talks to a server.** Stdout carries the artifact —
   `list` prints its JSON there, `codegen` the module whenever `--out` is absent — so a pipe over
@@ -654,18 +845,25 @@ barrier stays on main.
   separately.
 
 - **Run one `<mcpgen> call` per shell invocation.** Give two chained calls the same `--out` — the
-  per-tool `<server>.<tool>.probe-raw.json` naming exists to stop exactly that — and the second
-  overwrites the first, leaving only whichever call last succeeded, with nothing in the file to
-  say which that was. A failing `call` writes nothing at all, which leaves that call's file
-  either missing or holding an earlier run's payload — and
-  a chain that exited 0 gives you no reason to look. If you must chain, give each call **both**
-  its own `--out` and a per-call status label. (Independent `probe` invocations still batch — see
-  step 3.)
+  per-tool `<shapes-dir>/<server>.<tool>.probe-raw.json` naming exists to stop exactly that — and
+  the second overwrites the first, leaving only whichever call last succeeded, with nothing in
+  the file to say which that was. A failing `call` writes nothing at all, which leaves that
+  call's file either missing or holding an earlier run's payload — and a chain that exited 0
+  gives you no reason to look. The one failure that does write is a result the tool flagged
+  `isError`: its body lands in `--out` and `call` still exits 1. If you must chain, give each
+  call **both** its own `--out` and a per-call status label. (Independent `probe` invocations
+  still batch — see step 3.)
 
 - **Bound a slow `mcpgen` call with the harness's own timeout, never a `timeout` binary.**
-  Nothing guarantees one is installed: macOS ships none by default, and there the wrapped command
-  never runs at all — the whole line dies with `command not found` and status 127, which reads as
-  the command having failed rather than never having started.
+  `probe` and `call` bound each tool call with `--timeout` (default 60 s), but not the connect
+  and `initialize` handshake, which an interstitial page served with HTTP 200 stalls
+  indefinitely; that case still needs the harness's timeout. The bound is per call, so a batch
+  of N probes, or one probe with several `--args`, can run N × `--timeout`: set the harness's
+  command timeout to at least the sum of the `--timeout` values in the command, or lower
+  `--timeout` for the batch. Nothing guarantees a `timeout` binary is installed: macOS ships
+  none by default, and there the wrapped command never runs at all — the whole line dies with
+  `command not found` and status 127, which reads as the command having failed rather than
+  never having started.
 
 - **Probing is a live call — mutating tools mutate.** Probing a mutating tool executes it for real
   against the server. Classify per `references/mutating-tools.md`, keep flagged tools out of the
@@ -679,9 +877,10 @@ barrier stays on main.
 
 - **Don't model depth from one probe.** A container is promoted no further than its own
   annotation: `list[str]` / `dict[str, str]` where every element or value the probe evidenced
-  is that same scalar, bare `list` / `dict` otherwise — a list needs `--save-raw` or a second
-  probe, since the skeleton samples one element. `dict[str, Any]` claims nothing `dict` does
-  not. There is no nested `TypedDict`; see `references/shape-spec.md`.
+  is that same scalar, bare `list` / `dict` otherwise — a list needs its `--save-raw` payload
+  checked element by element, since every probe's skeleton samples only the first element and a
+  second probe adds no evidence. `dict[str, Any]` claims nothing `dict` does not. There is no
+  nested `TypedDict`; see `references/shape-spec.md`.
 
 - **Never emit a variant-specific `return_model` from a single-variant probe.** If a tool takes a
   discriminator arg (flagged in step 2.e), every sibling sharing that arg is polymorphic-suspect
@@ -689,9 +888,11 @@ barrier stays on main.
   from one `entityType` value misdescribes every response the other values return.
 
 - **Scalar enum params render as `Literal[...]` automatically** — do not hand-widen them to `str`.
-  A param whose `inputSchema` carries an `enum` of scalars gets one with no flag required; float
-  and object members fall back to `float` / `dict`. Widen to `str` only if the server actually
-  accepts values outside the declared enum.
+  A param whose `inputSchema` pins scalar values — an `enum`, a `const`, or an `anyOf`/`oneOf`
+  of `const`/`enum` branches plus an optional null branch — gets one with no flag required. A
+  float in an `enum`/`const` falls back to the declared type; a union with a float or an open
+  branch falls back to `Any`. Widen to `str` only if the server actually accepts values
+  outside the declared set.
 
 - **Review `probed_args` before committing.** `mcpgen merge` scrubs the committed
   `<shapes-path>` automatically; step 4 is where you catch what its patterns cannot recognise.

@@ -1,15 +1,18 @@
-"""Deterministic codegen: MCP tools/list -> typed Python wrapper source.
+"""Deterministic codegen: MCP tools/list (+ resources) -> typed Python wrapper source.
 
-Pure functions only (no I/O) so they're trivially testable. The CLI wires these
-to a live server via the bridge. Generated modules depend only on the McpCaller
-seam (mcpgen.seam), never on a concrete client.
+Pure functions only (no I/O) so they're trivially testable; warnings go to
+stderr. The CLI wires these to a live server via the bridge. Generated modules
+depend only on the seam Protocols (mcpgen.seam), never on a concrete client.
 """
 
 from __future__ import annotations
 
+import ast
 import keyword
 import re
 import sys
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 # ── JSON Schema -> Python type ───────────────────────────────────────────────
@@ -23,25 +26,94 @@ _SCALARS = {
 }
 
 
+# PEP 586 admits these as Literal parameters; floats, lists and dicts are not.
+_LITERAL_SAFE = (str, bool, int, bytes, type(None))
+
+
+def _literal_safe(vals: list) -> bool:
+    return all(type(v) in _LITERAL_SAFE for v in vals)
+
+
+def _literal(vals: list) -> str:
+    return "Literal[" + ", ".join(repr(v) for v in vals) + "]"
+
+
+def _closed_values(branch: dict) -> list | None:
+    """The values a union branch pins via `const` or a non-empty `enum`, or None if open."""
+    if "const" in branch:
+        return [branch["const"]]
+    vals = branch.get("enum")
+    return vals if isinstance(vals, list) and vals else None
+
+
+def _union_literal(schema: dict) -> str | None:
+    """`Literal[...]` for an anyOf/oneOf whose branches are all const/enum or null.
+
+    A branch with a `const` or a non-empty `enum` is closed whatever other keys
+    it carries; one with neither is a null branch if its `type` is "null", and
+    open otherwise. A null branch, a `None` value or a sibling `type` containing
+    "null" adds `| None`. Values keep their first-seen order and dedupe by
+    (type, value), so `1` and `True` stay apart. Returns None for any open
+    branch, an unsafe value, or no values.
+    """
+    if "anyOf" in schema and "oneOf" in schema:
+        return None
+    branches = schema.get("anyOf", schema.get("oneOf"))
+    if not isinstance(branches, list):
+        return None
+    t = schema.get("type")
+    nullable = t == "null" or (isinstance(t, list) and "null" in t)
+    vals: list = []
+    seen: set = set()
+    for b in branches:
+        if not isinstance(b, dict):
+            return None
+        pinned = _closed_values(b)
+        if pinned is None:
+            if b.get("type") == "null":
+                nullable = True
+                continue
+            return None
+        if not _literal_safe(pinned):
+            return None
+        for v in pinned:
+            if v is None:
+                nullable = True
+            elif (type(v), v) not in seen:
+                seen.add((type(v), v))
+                vals.append(v)
+    if not vals:
+        return None
+    return f"{_literal(vals)} | None" if nullable else _literal(vals)
+
+
 def py_type(schema: dict | None) -> str:
     """Map a JSON Schema fragment to a Python type annotation string."""
     if not schema or not isinstance(schema, dict):
         return "Any"
 
-    # Union-ish constructs: punt to Any rather than guess wrong.
+    # Unions: an anyOf/oneOf of const/enum (and null) branches is a closed value
+    # set and becomes Literal[...]; anything else, and every allOf, punts to Any
+    # rather than guess wrong.
+    if "allOf" not in schema and ("anyOf" in schema or "oneOf" in schema):
+        lit = _union_literal(schema)
+        if lit is not None:
+            return lit
     if any(k in schema for k in ("anyOf", "oneOf", "allOf")):
         return "Any"
 
+    # A lone non-null const pins one value, whatever `type` says.
+    if "const" in schema and schema["const"] is not None and _literal_safe([schema["const"]]):
+        return _literal([schema["const"]])
+
     # Enum: emit Literal[...] only when every member is a PEP 586-safe scalar.
-    # Floats, lists, and dicts are not valid Literal parameters; fall through to
-    # the type-based path so we emit the declared type (or Any) instead.
+    # Otherwise fall through to the type-based path so we emit the declared
+    # type (or Any) instead.
     enum_vals = schema.get("enum")
-    if isinstance(enum_vals, list) and enum_vals:
-        if all(type(v) in (str, bool, int, bytes, type(None)) for v in enum_vals):
-            t = schema.get("type")
-            nullable = isinstance(t, list) and "null" in t
-            inner = "Literal[" + ", ".join(repr(v) for v in enum_vals) + "]"
-            return f"{inner} | None" if nullable else inner
+    if isinstance(enum_vals, list) and enum_vals and _literal_safe(enum_vals):
+        t = schema.get("type")
+        nullable = isinstance(t, list) and "null" in t
+        return f"{_literal(enum_vals)} | None" if nullable else _literal(enum_vals)
 
     t = schema.get("type")
     if isinstance(t, list):  # e.g. ["string", "null"]
@@ -59,11 +131,14 @@ def py_type(schema: dict | None) -> str:
 # ── Shape-spec annotation normalization ──────────────────────────────────────
 
 # JSON/TS-cased tokens that need to be replaced with their Python equivalents
-# when they appear in hand-edited shapes.json values.
+# when they appear in hand-edited shapes.json values. `NoneType` is Python's
+# type name for None, copied from a single-probe `_observed_shape`; it is not a
+# name the generated module defines.
 _ANNOTATION_REWRITE: dict[str, str] = {
     "any": "Any",
     "null": "None",
     "none": "None",
+    "NoneType": "None",
     **{k: v for k, v in _SCALARS.items() if k != "null"},  # string→str, integer→int, etc.
 }
 _ANNOTATION_RE = re.compile(r"\b(" + "|".join(re.escape(k) for k in _ANNOTATION_REWRITE) + r")\b")
@@ -78,11 +153,12 @@ def normalize_annotation(s: str) -> str:
 
     Examples::
 
-        normalize_annotation("any")           == "Any"
-        normalize_annotation("null")          == "None"
-        normalize_annotation("list[any]")     == "list[Any]"
-        normalize_annotation("str | null")    == "str | None"
-        normalize_annotation("AnyThing")      == "AnyThing"   # unchanged
+        normalize_annotation("any")            == "Any"
+        normalize_annotation("null")           == "None"
+        normalize_annotation("list[NoneType]") == "list[None]"
+        normalize_annotation("list[any]")      == "list[Any]"
+        normalize_annotation("str | null")     == "str | None"
+        normalize_annotation("AnyThing")       == "AnyThing"   # unchanged
     """
     return _ANNOTATION_RE.sub(lambda m: _ANNOTATION_REWRITE[m.group()], s)
 
@@ -98,6 +174,193 @@ def sanitize(name: str) -> str:
     if keyword.iskeyword(s):
         s += "_"
     return s
+
+
+# ── RFC 6570 URI templates ───────────────────────────────────────────────────
+#
+# Levels 1-4 for scalar values only: lists and associative arrays are out of
+# scope, so the explode modifier `*` leaves a scalar unchanged (section 3.2.1).
+# Literals are validated for braces only; any other character outside
+# unreserved/reserved is pct-encoded on expansion (section 3.1) instead of
+# rejected, because server templates are not always strictly conformant.
+# The prefix modifier counts code points of the raw value, so it can split a
+# pct-triplet already present in a `+`/`#` value.
+# Expansion itself lives in the emitted `_EXPAND_URI` source: generated
+# modules and `expand_uri_template` run the same code.
+
+
+class UriTemplateError(ValueError):
+    """A URI template whose expressions do not conform to RFC 6570 section 2."""
+
+
+@dataclass(frozen=True)
+class UriVar:
+    """One varspec of a template expression, keyed by its raw (unsanitized) name."""
+
+    name: str
+    operator: str = ""
+    prefix: int | None = None
+    explode: bool = False
+
+    @property
+    def required(self) -> bool:
+        """Form-style query variables (`?`, `&`) are optional; all others are required."""
+        return self.operator not in ("?", "&")
+
+
+_URI_OPERATORS = "+#./;?&"  # section 2.2 operator characters (level 2 and 3)
+_URI_OP_RESERVED = "=,!@|"  # section 2.2: reserved for future extensions
+_URI_VARCHAR = r"(?:[A-Za-z0-9_]|%[0-9A-Fa-f]{2})"
+# varname, then either a prefix ":" %x31-39 0*3DIGIT or an explode "*" (section 2.4).
+_URI_VARSPEC_RE = re.compile(rf"({_URI_VARCHAR}(?:\.?{_URI_VARCHAR})*)(?::([1-9][0-9]{{0,3}})|(\*))?")
+
+
+def _parse_uri_expression(body: str, template: str) -> tuple[UriVar, ...]:
+    if not body:
+        raise UriTemplateError(f"empty expression in URI template {template!r}")
+    if body[0] in _URI_OP_RESERVED:
+        raise UriTemplateError(f"reserved operator {body[0]!r} in URI template {template!r}")
+    op = body[0] if body[0] in _URI_OPERATORS else ""
+    out: list[UriVar] = []
+    for spec in body[len(op) :].split(","):
+        m = _URI_VARSPEC_RE.fullmatch(spec)
+        if not m:
+            raise UriTemplateError(f"invalid varspec {spec!r} in URI template {template!r}")
+        out.append(UriVar(m.group(1), op, int(m.group(2)) if m.group(2) else None, bool(m.group(3))))
+    return tuple(out)
+
+
+def parse_uri_template(template: str) -> list[str | tuple[UriVar, ...]]:
+    """Split *template* into literal strings and expressions (tuples of `UriVar`).
+
+    Raises `UriTemplateError` on an unbalanced or nested brace, an empty
+    expression, a reserved operator or an invalid varspec.
+    """
+    parts: list[str | tuple[UriVar, ...]] = []
+    pos = 0
+    while pos < len(template):
+        start = template.find("{", pos)
+        literal = template[pos:] if start < 0 else template[pos:start]
+        if "}" in literal:
+            raise UriTemplateError(f"unmatched '}}' in URI template {template!r}")
+        if literal:
+            parts.append(literal)
+        if start < 0:
+            break
+        end = template.find("}", start)
+        if end < 0:
+            raise UriTemplateError(f"unclosed '{{' in URI template {template!r}")
+        body = template[start + 1 : end]
+        if "{" in body:
+            raise UriTemplateError(f"nested '{{' in URI template {template!r}")
+        parts.append(_parse_uri_expression(body, template))
+        pos = end + 1
+    return parts
+
+
+def uri_template_variables(template: str) -> list[tuple[str, bool]]:
+    """Raw variable names in first-use order, each with whether it is required.
+
+    A variable used more than once is required if any use is outside `?`/`&`.
+    """
+    seen: dict[str, bool] = {}
+    for part in parse_uri_template(template):
+        if isinstance(part, str):
+            continue
+        for var in part:
+            seen[var.name] = seen.get(var.name, False) or var.required
+    return list(seen.items())
+
+
+# Emitted once per module when any resource template accessor is rendered, so
+# generated modules expand templates without importing mcpgen.codegen. It skips
+# validation: codegen only emits accessors for templates `parse_uri_template`
+# accepts, and `expand_uri_template` validates before delegating to it.
+# `ops` is RFC 6570 appendix A: operator -> (first, sep, named, ifemp); `+`
+# and `#` also allow reserved characters and pct-triplets.
+_EXPAND_URI = '''def _expand_uri(template: str, values: dict[str, Any]) -> str:
+    """Expand an RFC 6570 URI template (levels 1-4) with scalar values.
+
+    A None value is undefined and is omitted (RFC 6570 section 3.2.1); a bool
+    expands as true/false."""
+    from urllib.parse import quote
+
+    reserved = ":/?#[]@!$&'()*+,;="
+    hexdigits = "0123456789abcdefABCDEF"
+    ops = {
+        "": ("", ",", False, ""),
+        "+": ("", ",", False, ""),
+        "#": ("#", ",", False, ""),
+        ".": (".", ".", False, ""),
+        "/": ("/", "/", False, ""),
+        ";": (";", ";", True, ""),
+        "?": ("?", "&", True, "="),
+        "&": ("&", "&", True, "="),
+    }
+
+    def enc(text: str, allow_reserved: bool) -> str:
+        if not allow_reserved:
+            return quote(text, safe="")
+        out, i = [], 0
+        while i < len(text):
+            if text[i] == "%" and i + 2 < len(text) and text[i + 1] in hexdigits and text[i + 2] in hexdigits:
+                out.append(text[i : i + 3])
+                i += 3
+            else:
+                out.append(quote(text[i], safe=reserved))
+                i += 1
+        return "".join(out)
+
+    out, pos = [], 0
+    while True:
+        start = template.find("{", pos)
+        if start < 0:
+            out.append(enc(template[pos:], True))
+            return "".join(out)
+        end = template.find("}", start)
+        out.append(enc(template[pos:start], True))
+        body = template[start + 1 : end]
+        op = body[0] if body[0] in "+#./;?&" else ""
+        first, sep, named, ifemp = ops[op]
+        allow = op in ("+", "#")
+        items = []
+        for spec in body[len(op) :].split(","):
+            prefix = None
+            if spec.endswith("*"):
+                spec = spec[:-1]
+            elif ":" in spec:
+                spec, n = spec.split(":", 1)
+                prefix = int(n)
+            value = values.get(spec)
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                text = "true" if value else "false"
+            else:
+                text = str(value)
+            if prefix is not None:
+                text = text[:prefix]
+            if named:
+                items.append(spec + ("=" + enc(text, allow) if text else ifemp))
+            else:
+                items.append(enc(text, allow))
+        if items:
+            out.append(first + sep.join(items))
+        pos = end + 1'''
+
+_EXPAND_URI_NS: dict[str, Any] = {"Any": Any}
+exec(compile(_EXPAND_URI, "<mcpgen.codegen._EXPAND_URI>", "exec"), _EXPAND_URI_NS)
+
+
+def expand_uri_template(template: str, values: Mapping[str, Any]) -> str:
+    """Expand *template* with scalar *values* keyed by raw variable name.
+
+    A missing or `None` value is undefined and is omitted per section 3.2.1; a
+    bool expands as `true`/`false`, any other value as `str(value)`. Raises
+    `UriTemplateError` for a malformed template.
+    """
+    parse_uri_template(template)
+    return _EXPAND_URI_NS["_expand_uri"](template, values)
 
 
 # ── Rendering ────────────────────────────────────────────────────────────────
@@ -136,7 +399,10 @@ def _with_size_note(desc: str | None, shape: dict | None) -> str | None:
     return f"{desc}\n\n{note}" if desc else note
 
 
-def _docstring(text: str | None, indent: str) -> str:
+def _docstring(text: str | None, indent: str, indent_blank_lines: bool = True) -> str:
+    """Docstring source for *text*. `indent_blank_lines=False` leaves blank and
+    whitespace-only lines empty and strips trailing whitespace from the rest;
+    tool wrappers keep the indented form so their output stays byte-stable."""
     text = (text or "").strip()
     if not text:
         return f'{indent}""" """'
@@ -147,7 +413,10 @@ def _docstring(text: str | None, indent: str) -> str:
         lines = text.splitlines()
         if len(lines) == 1:
             return f'{indent}"""{lines[0]}"""'
-        body = f"\n{indent}".join(lines)
+        if indent_blank_lines:
+            body = f"\n{indent}".join(lines)
+        else:
+            body = lines[0].rstrip() + "".join(f"\n{indent}{ln.rstrip()}" if ln.strip() else "\n" for ln in lines[1:])
         return f'{indent}"""{body}\n{indent}"""'
     # Server-controlled text with special chars — use a repr() literal.
     # repr() always produces a valid, injection-safe Python string literal.
@@ -493,6 +762,34 @@ def _render_overloaded(
     return "\n\n".join(blocks)
 
 
+def _return_annotation(shape: dict) -> str:
+    """Return annotation for a flat (non-discriminated) wrapper or resource accessor.
+
+    return_container="list" => the unwrapped value is a LIST of return_model
+    records (e.g. query_acme's data.results), so annotation/cast become
+    list[Model] and the body digs via _dig_list. Default (None) = dict/scalar.
+    """
+    return_model: str | None = shape.get("return_model")
+    if not return_model:
+        return "Any"
+    return f"list[{return_model}]" if shape.get("return_container") == "list" else return_model
+
+
+def _return_lines(call: str, shape: dict, ret_ann: str) -> list[str]:
+    """Body lines that await *call* and return it, unwrapped and cast per *shape*."""
+    unwrap: list = shape.get("unwrap") or []
+    return_model: str | None = shape.get("return_model")
+    if unwrap:
+        path = "(" + "".join(f"{k!r}, " for k in unwrap) + ")"
+        digger = "_dig_list" if shape.get("return_container") == "list" else "_dig"
+        dug = f"{digger}(result, {path})"
+        ret = f'cast("{ret_ann}", {dug})' if return_model else dug
+        return [f"    result = {call}", f"    return {ret}"]
+    if return_model:
+        return [f'    return cast("{ret_ann}", {call})']
+    return [f"    return {call}"]
+
+
 def render_tool(tool: dict, shape: dict | None = None, embed_schema: bool = False) -> str:
     """Render one MCP tool into a typed `async def` against the McpCaller seam.
 
@@ -510,17 +807,8 @@ def render_tool(tool: dict, shape: dict | None = None, embed_schema: bool = Fals
     if shape.get("discriminator") and shape.get("variants"):
         return _render_overloaded(tool, fn, raw_name, props, required, shape, embed_schema=embed_schema, schema=schema)
 
-    unwrap: list = shape.get("unwrap") or []
-    return_model: str | None = shape.get("return_model")
     overrides: dict = _get_overrides(shape)
-    # return_container="list" => the unwrapped value is a LIST of return_model
-    # records (e.g. query_acme's data.results). Annotation/cast become
-    # list[Model] and the body digs via _dig_list. Default (None) = dict/scalar.
-    container: str | None = shape.get("return_container")
-    if return_model:
-        ret_ann = f"list[{return_model}]" if container == "list" else return_model
-    else:
-        ret_ann = "Any"
+    ret_ann = _return_annotation(shape)
 
     # required params first (no default), then optional (= None).
     ordered = sorted(props.items(), key=lambda kv: kv[0] not in required)
@@ -564,17 +852,7 @@ def render_tool(tool: dict, shape: dict | None = None, embed_schema: bool = Fals
         args_expr = "args"
 
     call = f"await caller.call(SERVER, {_str_literal(raw_name)}, {args_expr})"
-    if unwrap:
-        path = "(" + "".join(f"{k!r}, " for k in unwrap) + ")"
-        lines.append(f"    result = {call}")
-        digger = "_dig_list" if container == "list" else "_dig"
-        dug = f"{digger}(result, {path})"
-        ret = f'cast("{ret_ann}", {dug})' if return_model else dug
-        lines.append(f"    return {ret}")
-    elif return_model:
-        lines.append(f'    return cast("{ret_ann}", {call})')
-    else:
-        lines.append(f"    return {call}")
+    lines.extend(_return_lines(call, shape, ret_ann))
 
     result = "\n".join(lines)
     if embed_schema:
@@ -582,93 +860,355 @@ def render_tool(tool: dict, shape: dict | None = None, embed_schema: bool = Fals
     return result
 
 
+# ── Resource accessors ───────────────────────────────────────────────────────
+#
+# Resources arrive as MCP `Resource` / `ResourceTemplate` dicts (`uri` or
+# `uriTemplate`, plus optional `name`, `description`, `mimeType`) with URIs
+# already normalized by the caller. Shape-spec entries are keyed by that URI or
+# template string, never by `name`.
+
+# Top-level names every generated module may define; an accessor never takes one.
+_MODULE_NAMES = frozenset({"SERVER", "_dig", "_dig_list", "_expand_uri"})
+# Names an accessor body references; a template variable that sanitizes to one
+# of them gets a trailing underscore so the parameter cannot shadow it.
+_ACCESSOR_RESERVED = frozenset({"caller", "cast", "uri", *_MODULE_NAMES})
+_RESOURCE_KINDS = ("resource", "resource_template")
+
+
+def _is_resource_entry(key: str, entry: Any, tool_names: set[str]) -> bool:
+    """Whether a shapes.json entry belongs to a resource rather than a tool.
+
+    A key naming a rendered tool is always a tool entry. Otherwise `kind`
+    decides, falling back to a `:` in the key (MCP tool names should not
+    contain one; URIs always do).
+    """
+    if key in tool_names:
+        return False
+    return (isinstance(entry, dict) and entry.get("kind") in _RESOURCE_KINDS) or ":" in key
+
+
+def _resource_shape(shapes: dict, kind: str, key: str) -> dict:
+    """The shapes.json entry for a resource of *kind* keyed by *key*, or `{}`.
+
+    An entry tagged with the other kind is skipped, so a static URI and a
+    template spelled the same never share one; an untagged entry applies to both.
+    """
+    entry = shapes.get(key)
+    if isinstance(entry, dict) and entry.get("kind") in (None, kind):
+        return entry
+    return {}
+
+
+def _resource_base_name(uri: str) -> str:
+    """`read_` + the URI with template expressions dropped and non-alphanumeric runs collapsed to `_`."""
+    stem = re.sub(r"[^0-9A-Za-z]+", "_", re.sub(r"\{[^}]*\}", "", uri)).strip("_")
+    return f"read_{stem}" if stem else "read"
+
+
+def resource_function_names(
+    tools: list[dict], resources: list[dict] | None = None, templates: list[dict] | None = None
+) -> dict[tuple[str, str], str]:
+    """Map each `("resource", uri)` and `("resource_template", template)` to its accessor name.
+
+    Keys pair the shape-spec `kind` with the URI or template string, so a static
+    URI and a template spelled the same get distinct names. Statics are named
+    first in URI order, then templates in template order. A name already taken
+    by a sanitized tool name, a module-level name or an earlier accessor gets a
+    `_2`, `_3`, … suffix.
+    """
+    taken = {sanitize(t["name"]) for t in tools} | _MODULE_NAMES
+    keys = [("resource", u) for u in sorted({r["uri"] for r in resources or []})] + [
+        ("resource_template", t) for t in sorted({t["uriTemplate"] for t in templates or []})
+    ]
+    names: dict[tuple[str, str], str] = {}
+    for key in keys:
+        base = fn = _resource_base_name(key[1])
+        n = 2
+        while fn in taken:
+            fn = f"{base}_{n}"
+            n += 1
+        taken.add(fn)
+        names[key] = fn
+    return names
+
+
+def _resource_doc(label: str, key: str, meta: dict, shape: dict) -> str | None:
+    """Description, then the stable `<label>: <key>` line the runner skill greps for, then the mimeType."""
+    ref = f"{label}: {key}"
+    if meta.get("mimeType"):
+        ref += f"\nMIME type: {meta['mimeType']}"
+    desc = (meta.get("description") or "").strip()
+    return _with_size_note(f"{desc}\n\n{ref}" if desc else ref, shape)
+
+
+def _render_accessor(
+    fn: str, label: str, key: str, meta: dict, shape: dict | None, params: list[str], pre: list[str], uri_expr: str
+) -> str:
+    """Shared body of `render_resource` / `render_resource_template`; returns are handled as in `render_tool`."""
+    shape = shape or {}
+    if shape.get("discriminator") or shape.get("variants"):
+        print(
+            f"[codegen] ⚠  discriminator/variants ignored for resource {key!r} — resources take no arguments to discriminate on",
+            file=sys.stderr,
+        )
+    ret_ann = _return_annotation(shape)
+    sig = ", ".join(["caller: McpResourceReader", "*", *params] if params else ["caller: McpResourceReader"])
+    doc = _docstring(_resource_doc(label, key, meta, shape), "    ", indent_blank_lines=False)
+    lines = [f"async def {fn}({sig}) -> {ret_ann}:", doc, *pre]
+    lines.extend(_return_lines(f"await caller.read_resource(SERVER, {uri_expr})", shape, ret_ann))
+    return "\n".join(lines)
+
+
+def render_resource(resource: dict, fn: str | None = None, shape: dict | None = None) -> str:
+    """Render a static resource into an `async def` against the McpResourceReader seam.
+
+    `fn` defaults to the URI-derived name; `render_module` passes the
+    de-duplicated one from `resource_function_names`. `shape` is the entry keyed
+    by the URI and supports `unwrap` / `return_model` / `return_container` /
+    `fields` exactly as for tools.
+    """
+    uri = resource["uri"]
+    return _render_accessor(fn or _resource_base_name(uri), "Resource", uri, resource, shape, [], [], _str_literal(uri))
+
+
+def render_resource_template(template: dict, fn: str | None = None, shape: dict | None = None) -> str:
+    """Render a resource template into an accessor taking its variables as keyword-only arguments.
+
+    Variables are `str` unless `input_overrides` (keyed by the raw variable
+    name) says otherwise; `?`/`&` variables are optional. The values dict keeps
+    the raw names so `_expand_uri` resolves them. Raises `UriTemplateError` for
+    a malformed template.
+    """
+    tpl = template["uriTemplate"]
+    variables = uri_template_variables(tpl)
+    overrides = _get_overrides(shape or {})
+    required: list[str] = []
+    optional: list[str] = []
+    pairs: list[str] = []
+    used: set[str] = set()
+    for raw, is_required in variables:
+        py = sanitize(raw)
+        while py in _ACCESSOR_RESERVED or py in used:
+            py += "_"
+        used.add(py)
+        ann = overrides.get(raw) or "str"
+        if is_required:
+            required.append(f"{py}: {ann}")
+        else:
+            opt_ann = ann if ann.endswith("| None") else f"{ann} | None"
+            optional.append(f"{py}: {opt_ann} = None")
+        pairs.append(f"{_str_literal(raw)}: {py}")
+    pre = [f"    uri = _expand_uri({_str_literal(tpl)}, {{{', '.join(pairs)}}})"]
+    return _render_accessor(
+        fn or _resource_base_name(tpl), "Resource template", tpl, template, shape, required + optional, pre, "uri"
+    )
+
+
 _HEADER = '''"""Generated MCP wrappers for the {server!r} server. DO NOT hand-edit signatures.
 
-Generated by mcpgen from a live tools/list. Each function forwards to an
-injected McpCaller (see mcpgen.seam); the auth/transport backend is the
-caller's concern, not this module's.
+{about}
 {probe_note}"""
 from __future__ import annotations
 
 {imports}
 
-from mcpgen.seam import McpCaller
+from mcpgen.seam import {seam}
 
 SERVER = {server!r}
 '''
 
 
+# Header paragraph per module content: tools only, tools + resources, resources only.
+_ABOUT_TOOLS = """Generated by mcpgen from a live tools/list. Each function forwards to an
+injected McpCaller (see mcpgen.seam); the auth/transport backend is the
+caller's concern, not this module's."""
+_ABOUT_TOOLS_AND_RESOURCES = """Generated by mcpgen from a live tools/list and resources/list. Tool wrappers
+forward to an injected McpCaller and resource accessors to an injected
+McpResourceReader (see mcpgen.seam); the auth/transport backend is the
+caller's concern, not this module's."""
+_ABOUT_RESOURCES = """Generated by mcpgen from a live tools/list and resources/list. Resource
+accessors forward to an injected McpResourceReader (see mcpgen.seam); the
+auth/transport backend is the caller's concern, not this module's."""
+
+
 _PY_BUILTINS = frozenset({"str", "int", "float", "list", "dict", "bool", "bytes", "object", "type", "set", "tuple"})
 
 
+def _warn_unmatched_resource_entries(
+    shapes: dict, tool_names: set[str], resources: list[dict] | None, templates: list[dict] | None
+) -> None:
+    """Warn for each resource shapes entry that no listed resource or template picks up.
+
+    Catches a probe keyed by a template that differs from the listed one
+    (`demo://records/{id}` vs `demo://records/{record_id}`), whose entry would
+    otherwise be dropped silently. An entry tagged with a `kind` is checked
+    against that kind's listing, an untagged one against both, as
+    `_resource_shape` applies it to either. A listing of `None` was not
+    collected, so an entry that could belong to it is not judged. An entry
+    whose `kind` is neither `resource` nor `resource_template` (a misspelling
+    such as `resource-template`) applies to nothing and always warns, unless
+    its key names a tool, whose wrapper ignores `kind`.
+    """
+    listed = {
+        "resource": None if resources is None else {r["uri"] for r in resources},
+        "resource_template": None if templates is None else {t["uriTemplate"] for t in templates},
+    }
+    for key, entry in shapes.items():
+        kind = entry.get("kind") if isinstance(entry, dict) else None
+        if kind is not None and kind not in _RESOURCE_KINDS and key not in tool_names:
+            print(f"[codegen] ⚠  shapes entry {key!r} has unknown kind {kind!r} — not applied", file=sys.stderr)
+            continue
+        if not _is_resource_entry(key, entry, tool_names):
+            continue
+        kinds = [kind] if kind in _RESOURCE_KINDS else list(_RESOURCE_KINDS)
+        keys = [listed[k] for k in kinds]
+        if any(k is None for k in keys) or any(key in k for k in keys if k is not None):
+            continue
+        label = " or ".join(k.replace("_", " ") for k in kinds)
+        print(f"[codegen] ⚠  shapes entry {key!r} matches no listed {label} — not applied", file=sys.stderr)
+
+
+def _valid_templates(templates: list[dict]) -> list[dict]:
+    """Templates that parse, first occurrence per template string; each malformed one warns and is skipped."""
+    out: dict[str, dict] = {}
+    for t in templates:
+        tpl = t["uriTemplate"]
+        try:
+            parse_uri_template(tpl)
+        except UriTemplateError as e:
+            print(f"[codegen] ⚠  resource template {tpl!r} skipped: {e}", file=sys.stderr)
+            continue
+        out.setdefault(tpl, t)
+    return [out[k] for k in sorted(out)]
+
+
+# `typing` names a module body may reference. `Any` is always imported; the
+# rest only when the rendered code uses them.
+_TYPING_OPTIONAL = ("Literal", "TypedDict", "cast", "overload")
+
+
+def _names(node: ast.AST, skip: frozenset[str] = frozenset()) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and n.id not in skip}
+
+
+def _module_names(tree: ast.Module) -> set[str]:
+    """Bare names *tree* reads from module scope.
+
+    A function body's reference to one of its own parameters is local: a tool
+    param named `cast` renders `args["cast"] = cast`, which needs no import.
+    Decorators, annotations and defaults resolve in module scope and always
+    count. A body that shadows a name it also calls (a `cast` param on a
+    wrapper that returns `cast(...)`) is broken either way and not handled.
+    """
+    used: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            params = frozenset(a.arg for a in ast.walk(node.args) if isinstance(a, ast.arg))
+            for h in [*node.decorator_list, node.args, *([node.returns] if node.returns else [])]:
+                used |= _names(h)
+            for stmt in node.body:
+                used |= _names(stmt, params)
+        else:
+            used |= _names(node)
+    return used
+
+
+def _typing_imports(body: str) -> str:
+    """The `from typing import ...` line for a rendered module *body*.
+
+    A name counts when the body reads it from module scope as a bare name
+    (see `_module_names`), so docstrings and `typing.Literal[...]` do not.
+    Hand-edited annotations can make the body unparsable, and a lone surrogate
+    in a description makes it unencodable; a whole-word match then errs on
+    importing.
+    """
+    try:
+        used = _module_names(ast.parse(body))
+    except (SyntaxError, ValueError):  # UnicodeEncodeError is a ValueError
+        used = {n for n in _TYPING_OPTIONAL if re.search(rf"\b{n}\b", body)}
+    return "from typing import " + ", ".join(["Any", *(n for n in _TYPING_OPTIONAL if n in used)])
+
+
 def render_module(
-    server: str, tools: list[dict], shapes: dict | None = None, probe_note: str = "", embed_schema: bool = False
+    server: str,
+    tools: list[dict],
+    shapes: dict | None = None,
+    probe_note: str = "",
+    embed_schema: bool = False,
+    resources: list[dict] | None = None,
+    resource_templates: list[dict] | None = None,
 ) -> str:
     """Render a full wrapper module.
 
-    `shapes` maps tool name -> probe-derived shape-spec (see render_tool). When
-    present, the module gains TypedDict return models and a `_dig` unwrap helper;
-    the no-shapes path is byte-identical to pure stub generation.
+    `shapes` maps tool name, resource URI or template string -> probe-derived
+    shape-spec (see render_tool). When present, the module gains TypedDict
+    return models and a `_dig` unwrap helper; the no-shapes path is
+    byte-identical to pure stub generation. Resource accessors follow the tools,
+    statics before templates; without resources the output is byte-identical to
+    a tools-only module. A resource entry in `shapes` that matches no listed
+    resource or template warns on stderr.
     """
     shapes = shapes or {}
     note = f"\n{probe_note}\n" if probe_note else ""
-    has_disc = any(s.get("discriminator") and s.get("variants") for s in shapes.values())
-    needs_json = bool(shapes) and any((shapes.get(t["name"]) or {}).get("unwrap") for t in tools)
-    has_typed_return = has_disc or any(s.get("return_model") for s in shapes.values())
-
-    def _schema_has_enum(s: dict | None) -> bool:
-        if not isinstance(s, dict):
-            return False
-        if s.get("enum"):
-            return True
-        # recurse into array items (py_type can emit Literal for nested enums)
-        items = s.get("items")
-        return isinstance(items, dict) and bool(items.get("enum"))
-
-    has_enum = any(
-        any(_schema_has_enum(pschema) for pschema in (((t.get("inputSchema") or {}).get("properties") or {}).values()))
-        for t in tools
+    statics: dict[str, dict] = {}
+    for r in resources or []:
+        statics.setdefault(r["uri"], r)
+    static_list = [statics[k] for k in sorted(statics)]
+    template_list = _valid_templates(resource_templates or [])
+    resource_names = resource_function_names(tools, static_list, template_list)
+    static_specs = [_resource_shape(shapes, "resource", r["uri"]) for r in static_list]
+    template_specs = [_resource_shape(shapes, "resource_template", t["uriTemplate"]) for t in template_list]
+    resource_specs = static_specs + template_specs
+    tool_names = {t["name"] for t in tools}
+    _warn_unmatched_resource_entries(shapes, tool_names, resources, resource_templates)
+    # A resource entry only counts when rendered, via resource_specs.
+    needs_json = bool(shapes) and any(
+        s.get("unwrap") for s in [*(shapes.get(t["name"]) or {} for t in tools), *resource_specs]
     )
-    if has_disc:
-        type_imports = "from typing import Any, Literal, TypedDict, cast, overload"
-    elif has_typed_return and has_enum:
-        type_imports = "from typing import Any, Literal, TypedDict, cast"
-    elif has_typed_return:
-        type_imports = "from typing import Any, TypedDict, cast"
-    elif has_enum:
-        type_imports = "from typing import Any, Literal"
-    else:
-        type_imports = "from typing import Any"
-    imports = ("import json\n" + type_imports) if needs_json else type_imports
-    parts = [_HEADER.format(server=server, probe_note=note, imports=imports)]
+    # Everything below the header; the header's typing import is derived from it.
+    parts: list[str] = []
 
+    # Specs whose return_model was renamed by a collision; the renderers read
+    # return_model from the spec they are handed, so they get these copies.
+    # The caller's `shapes` is never mutated.
+    resolved_tool_shapes: dict[str, dict] = {}
     if shapes:
         models: list[str] = []
-        _seen_models: dict[str, str] = {}  # name → rendered body; dedup across tools
+        _seen_models: dict[str, str] = {}  # emitted name → rendered body; dedup across tools and resources
 
-        def _append_model(name: str, fields: dict) -> None:
+        def _append_model(name: str, fields: dict, owner: str) -> str:
+            """Emit the model unless an identical one exists; return the class name the owner must annotate.
+
+            Same name with different fields gets the first `_2`, `_3`, … suffix
+            whose body matches, or else the first free one.
+            """
             if name in _PY_BUILTINS:
                 print(
                     f"[codegen] ⚠  return_model {name!r} is a Python builtin — ignored; use null instead",
                     file=sys.stderr,
                 )
-                return
-            body = render_model(name, fields)
-            if name not in _seen_models:
-                _seen_models[name] = body
-                models.append(body)
-            elif _seen_models[name] == body:
-                pass  # identical duplicate — skip silently
-            else:
-                # True shape collision: same name, different fields → emit suffixed variant.
-                suffix = 2
-                while f"{name}_{suffix}" in _seen_models:
-                    suffix += 1
-                suffixed = f"{name}_{suffix}"
-                suffixed_body = render_model(suffixed, fields)
-                _seen_models[suffixed] = suffixed_body
-                models.append(suffixed_body)
-                print(f"[codegen] ⚠  shape collision for {name!r}; emitted {suffixed!r}", file=sys.stderr)
+                return name
+            candidate, suffix = name, 1
+            while candidate in _seen_models:
+                if _seen_models[candidate] == render_model(candidate, fields):
+                    return candidate
+                suffix += 1
+                candidate = f"{name}_{suffix}"
+            body = render_model(candidate, fields)
+            _seen_models[candidate] = body
+            models.append(body)
+            if candidate != name:
+                print(
+                    f"[codegen] ⚠  shape collision for {name!r} ({owner}); emitted {candidate!r}",
+                    file=sys.stderr,
+                )
+            return candidate
+
+        def _resolve_flat(sp: dict, owner: str) -> dict:
+            if not sp.get("return_model"):
+                return sp
+            got = _append_model(sp["return_model"], sp.get("fields") or {}, owner)
+            return sp if got == sp["return_model"] else {**sp, "return_model": got}
 
         for tool in sorted(tools, key=lambda t: t["name"]):
             sp = shapes.get(tool["name"])
@@ -677,21 +1217,50 @@ def render_module(
             if sp.get("discriminator") and sp.get("variants"):
                 variants = sp["variants"]
                 disc, numeric = _discriminator_context(tool, sp)
-                for _, variant in sorted(variants.items(), key=lambda kv: _variant_key(kv[0], disc, numeric)):
-                    if variant.get("return_model"):
-                        _append_model(variant["return_model"], variant.get("fields") or {})
-            elif sp.get("return_model"):
-                _append_model(sp["return_model"], sp.get("fields") or {})
+                renamed: dict = {}
+                for key, variant in sorted(variants.items(), key=lambda kv: _variant_key(kv[0], disc, numeric)):
+                    resolved = _resolve_flat(variant, f"{tool['name']}[{key}]")
+                    if resolved is not variant:
+                        renamed[key] = resolved
+                if renamed:
+                    resolved_tool_shapes[tool["name"]] = {**sp, "variants": {**variants, **renamed}}
+            else:
+                resolved = _resolve_flat(sp, tool["name"])
+                if resolved is not sp:
+                    resolved_tool_shapes[tool["name"]] = resolved
+        static_specs = [_resolve_flat(sp, r["uri"]) for r, sp in zip(static_list, static_specs, strict=True)]
+        template_specs = [
+            _resolve_flat(sp, t["uriTemplate"]) for t, sp in zip(template_list, template_specs, strict=True)
+        ]
+        resource_specs = static_specs + template_specs
         parts.extend(models)
-        specs = [shapes.get(t["name"]) or {} for t in tools]
+        specs = [shapes.get(t["name"]) or {} for t in tools] + resource_specs
         if any(s.get("unwrap") and s.get("return_container") != "list" for s in specs):
             parts.append(_DIG)
         if any(s.get("unwrap") and s.get("return_container") == "list" for s in specs):
             parts.append(_DIG_LIST)
+    if template_list:
+        parts.append(_EXPAND_URI)
 
     for tool in sorted(tools, key=lambda t: t["name"]):
-        parts.append(render_tool(tool, shapes.get(tool["name"]), embed_schema=embed_schema))
-    return "\n\n\n".join(parts) + "\n"
+        shape = resolved_tool_shapes.get(tool["name"]) or shapes.get(tool["name"])
+        parts.append(render_tool(tool, shape, embed_schema=embed_schema))
+    for r, spec in zip(static_list, static_specs, strict=True):
+        parts.append(render_resource(r, resource_names["resource", r["uri"]], spec))
+    for t, spec in zip(template_list, template_specs, strict=True):
+        parts.append(render_resource_template(t, resource_names["resource_template", t["uriTemplate"]], spec))
+
+    body = "\n\n\n".join(parts)
+    type_imports = _typing_imports(body)
+    imports = ("import json\n" + type_imports) if needs_json else type_imports
+    if not resource_names:
+        seam, about = "McpCaller", _ABOUT_TOOLS
+    elif tools:
+        seam, about = "McpCaller, McpResourceReader", _ABOUT_TOOLS_AND_RESOURCES
+    else:
+        seam, about = "McpResourceReader", _ABOUT_RESOURCES
+    header = _HEADER.format(server=server, about=about, probe_note=note, imports=imports, seam=seam)
+    return "\n\n\n".join([header, *parts]) + "\n"
 
 
 # ── Response-shape summary (for the empirical probe) ─────────────────────────
@@ -861,8 +1430,10 @@ def detect_discriminators(tools: list[dict]) -> dict[str, list[str]]:
                 continue
             if not isinstance(pschema, dict):
                 continue
+            # A union `type` (a JSON Schema list such as ["string", "null"]) is
+            # unhashable and never yields a candidate.
             ptype = pschema.get("type")
-            if ptype not in _SCALAR_TYPES:
+            if not isinstance(ptype, str) or ptype not in _SCALAR_TYPES:
                 continue
             # Track all scalar params; the ≥2-tools filter in the return
             # covers the shared-scalar heuristic. Heuristic-name and enum
@@ -888,16 +1459,23 @@ def merge_skeletons(skeletons: list[dict]) -> dict:
 
 
 def probe_skeleton(
-    tool: str, args_list: list[dict], shapes: list[Any], observed_bytes: list[int] | None = None
+    tool: str,
+    args_list: list[dict],
+    shapes: list[Any],
+    observed_bytes: list[int] | None = None,
+    kind: str | None = None,
 ) -> dict:
     """Build a shape-spec skeleton from N probe calls.
 
+    tool           — the entry key: a tool name, resource URI or template string.
     args_list      — the N arg-dicts passed to the tool (one per probe).
     shapes         — the N summarize_shape() results from those calls.
     observed_bytes — optional raw response sizes (one per probe); the largest
-                     is recorded as `_observed_shape` so the generated docstring
+                     is recorded as `_observed_bytes` so the generated docstring
                      can warn callers about outsized payloads. Omitted entirely
                      when not passed (byte-stable with existing shapes.json).
+    kind           — `"resource"` / `"resource_template"` for a resource entry.
+                     Omitted when not passed, so tool entries stay byte-stable.
 
     When args_list has a single entry, probed_args is that dict (byte-stable
     with current single-probe output). With multiple entries, probed_args is
@@ -910,7 +1488,8 @@ def probe_skeleton(
         {k: _merge_scalar({v}) for k, v in merged.items() if isinstance(v, str)} if isinstance(merged, dict) else {}
     )
     probed_args: Any = args_list[0] if len(args_list) == 1 else list(args_list)
-    entry: dict[str, Any] = {
+    entry: dict[str, Any] = {"kind": kind} if kind is not None else {}
+    entry |= {
         "unwrap": [],
         "return_model": None,
         "input_overrides": {},

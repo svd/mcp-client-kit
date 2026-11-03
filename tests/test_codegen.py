@@ -2,6 +2,8 @@
 
 import ast
 import asyncio
+import copy
+import inspect
 
 import pytest
 
@@ -58,6 +60,13 @@ def test_normalize_annotation_passthrough():
     # Already-correct Python annotations must not be changed.
     for s in ("Any", "None", "str", "int", "float", "bool", "list[str]", "dict", "MyModel", "str | None", "list[Any]"):
         assert codegen.normalize_annotation(s) == s
+
+
+def test_normalize_annotation_rewrites_nonetype():
+    # Python's type name for None, as a single-probe `_observed_shape` records it.
+    assert codegen.normalize_annotation("NoneType") == "None"
+    assert codegen.normalize_annotation("list[NoneType]") == "list[None]"
+    assert codegen.normalize_annotation("str | NoneType") == "str | None"
 
 
 def test_normalize_annotation_word_boundary():
@@ -1120,6 +1129,140 @@ def test_render_module_collision_emits_suffixed_variant(capsys):
     assert "class Result(TypedDict, total=False):" in src
     assert "class Result_2(TypedDict, total=False):" in src
     assert "collision" in err.lower() or "Result_2" in err
+    assert "async def tool_a(caller: McpCaller) -> Result:" in src
+    assert "async def tool_b(caller: McpCaller) -> Result_2:" in src
+    assert 'cast("Result_2", await caller.call(SERVER, "tool_b", {}))' in src
+    _assert_every_model_is_returned(src)
+
+
+def _assert_every_model_is_returned(src: str) -> None:
+    """Every emitted TypedDict is named in some return annotation — a dead model means a mis-annotated wrapper."""
+    tree = ast.parse(src)
+    models = {
+        n.name
+        for n in tree.body
+        if isinstance(n, ast.ClassDef) and any(isinstance(b, ast.Name) and b.id == "TypedDict" for b in n.bases)
+    }
+    returned = {
+        node.id
+        for fn in ast.walk(tree)
+        if isinstance(fn, ast.AsyncFunctionDef) and fn.returns is not None
+        for node in ast.walk(fn.returns)
+        if isinstance(node, ast.Name)
+    }
+    assert models <= returned, f"models never returned: {sorted(models - returned)}"
+
+
+def test_render_module_collision_between_tool_and_resource_annotates_suffixed_model(capsys):
+    """A resource whose model name a tool already took returns the suffixed class it caused."""
+    shapes = {
+        "read_graph": {"return_model": "KnowledgeGraph", "fields": {"nodes": "list"}},
+        "memory://graph": {"kind": "resource", "return_model": "KnowledgeGraph", "fields": {"edges": "list"}},
+    }
+    src = codegen.render_module(
+        "memory",
+        [{"name": "read_graph", "description": "x", "inputSchema": {}}],
+        shapes=shapes,
+        resources=[{"uri": "memory://graph"}],
+    )
+    err = capsys.readouterr().err
+
+    assert "async def read_graph(caller: McpCaller) -> KnowledgeGraph:" in src
+    assert "async def read_memory_graph(caller: McpResourceReader) -> KnowledgeGraph_2:" in src
+    assert 'cast("KnowledgeGraph_2", await caller.read_resource(SERVER, "memory://graph"))' in src
+    assert "memory://graph" in err
+    _assert_every_model_is_returned(src)
+
+
+def test_render_module_collision_with_template_keeps_list_container():
+    shapes = {
+        "get_dim": {"return_model": "Dimension", "fields": {"id": "str"}},
+        "dim://{unit}": {
+            "kind": "resource_template",
+            "unwrap": ["items"],
+            "return_container": "list",
+            "return_model": "Dimension",
+            "fields": {"name": "str"},
+        },
+    }
+    src = codegen.render_module(
+        "dc",
+        [{"name": "get_dim", "description": "x", "inputSchema": {}}],
+        shapes=shapes,
+        resource_templates=[{"uriTemplate": "dim://{unit}"}],
+    )
+    assert "async def read_dim(caller: McpResourceReader, *, unit: str) -> list[Dimension_2]:" in src
+    assert "cast(\"list[Dimension_2]\", _dig_list(result, ('items', )))" in src
+    _assert_every_model_is_returned(src)
+
+
+def test_render_module_collision_between_variants_annotates_each_overload():
+    tool = {
+        "name": "get",
+        "description": "x",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"kind": {"type": "string", "enum": ["a", "b"]}},
+            "required": ["kind"],
+        },
+    }
+    shapes = {
+        "get": {
+            "discriminator": "kind",
+            "variants": {
+                "a": {"return_model": "R", "fields": {"x": "str"}},
+                "b": {"return_model": "R", "fields": {"y": "str"}},
+            },
+        }
+    }
+    src = codegen.render_module("d", [tool], shapes=shapes)
+
+    assert "async def get(caller: McpCaller, *, kind: Literal['a']) -> R: ..." in src
+    assert "async def get(caller: McpCaller, *, kind: Literal['b']) -> R_2: ..." in src
+    assert "async def get(caller: McpCaller, *, kind: str) -> R | R_2:" in src
+    _assert_every_model_is_returned(src)
+
+
+def test_render_module_collision_reuses_matching_suffixed_model(capsys):
+    """A third spec with the fields of `R_2` returns `R_2` rather than emitting `R_3`."""
+    tools = [{"name": n, "description": "x", "inputSchema": {}} for n in ("a", "b", "c")]
+    shapes = {
+        "a": {"return_model": "R", "fields": {"x": "str"}},
+        "b": {"return_model": "R", "fields": {"y": "str"}},
+        "c": {"return_model": "R", "fields": {"y": "str"}},
+    }
+    src = codegen.render_module("d", tools, shapes=shapes)
+    err = capsys.readouterr().err
+
+    assert "class R_3" not in src
+    assert src.count("class R_2(TypedDict, total=False):") == 1
+    assert "async def c(caller: McpCaller) -> R_2:" in src
+    assert err.count("collision") == 1
+    _assert_every_model_is_returned(src)
+
+
+def test_render_module_collision_leaves_callers_shapes_untouched():
+    tool = {
+        "name": "get",
+        "description": "x",
+        "inputSchema": {"type": "object", "properties": {"kind": {"type": "string"}}, "required": ["kind"]},
+    }
+    shapes = {
+        "first": {"return_model": "R", "fields": {"x": "str"}},
+        "get": {
+            "discriminator": "kind",
+            "variants": {"a": {"return_model": "R", "fields": {"y": "str"}}},
+        },
+        "x://r": {"kind": "resource", "return_model": "R", "fields": {"z": "str"}},
+    }
+    before = copy.deepcopy(shapes)
+    codegen.render_module(
+        "d",
+        [{"name": "first", "description": "x", "inputSchema": {}}, tool],
+        shapes=shapes,
+        resources=[{"uri": "x://r"}],
+    )
+    assert shapes == before
 
 
 # ---------------------------------------------------------------------------
@@ -1302,6 +1445,15 @@ def test_detect_discriminators_denylist_camelcase_compound_forms():
         assert param not in result, f"compound param {param!r} must be in denylist"
 
 
+def test_detect_discriminators_skips_union_typed_param():
+    """A param whose `type` is a JSON Schema list is skipped; it neither crashes nor qualifies."""
+    params = {"kind": {"type": ["string", "null"]}, "mode": {"type": "string"}}
+    tools = [_make_tool("tool_a", params), _make_tool("tool_b", params)]
+    result = codegen.detect_discriminators(tools)
+    assert "kind" not in result
+    assert result["mode"] == ["tool_a", "tool_b"]
+
+
 # ---------------------------------------------------------------------------
 # Task C — enum → Literal[...] in py_type and render_module
 # ---------------------------------------------------------------------------
@@ -1386,6 +1538,304 @@ def test_render_tool_enum_param_uses_literal():
     tools = [tool]
     module_src = codegen.render_module("demo", tools)
     ast.parse(module_src)
+
+
+# ---------------------------------------------------------------------------
+# anyOf/oneOf of closed branches (const/enum, optionally null) → Literal[...]
+# ---------------------------------------------------------------------------
+
+
+def test_py_type_anyof_consts_literal():
+    assert codegen.py_type({"anyOf": [{"const": "a"}, {"const": "b"}]}) == "Literal['a', 'b']"
+
+
+def test_py_type_oneof_consts_literal():
+    assert codegen.py_type({"oneOf": [{"const": "a"}, {"const": "b"}]}) == "Literal['a', 'b']"
+
+
+def test_py_type_anyof_const_null_branch_is_optional():
+    assert codegen.py_type({"anyOf": [{"const": "a"}, {"type": "null"}]}) == "Literal['a'] | None"
+
+
+def test_py_type_anyof_const_none_value_is_optional():
+    assert codegen.py_type({"anyOf": [{"const": "a"}, {"const": None}]}) == "Literal['a'] | None"
+
+
+def test_py_type_anyof_sibling_nullable_type_is_optional():
+    schema = {"type": ["string", "null"], "anyOf": [{"const": "a"}, {"const": "b"}]}
+    assert codegen.py_type(schema) == "Literal['a', 'b'] | None"
+
+
+def test_py_type_anyof_const_branches_with_extra_keys():
+    # Zod / pydantic branches carry type, title and description beside the const.
+    schema = {
+        "anyOf": [
+            {"type": "string", "const": "x", "description": "The x mode"},
+            {"type": "string", "const": "y", "title": "Y"},
+        ]
+    }
+    assert codegen.py_type(schema) == "Literal['x', 'y']"
+
+
+def test_py_type_pydantic_optional_enum():
+    # Pydantic's Optional[Literal['a', 'b']].
+    schema = {"anyOf": [{"type": "string", "enum": ["a", "b"]}, {"type": "null"}], "default": None}
+    assert codegen.py_type(schema) == "Literal['a', 'b'] | None"
+
+
+def test_py_type_anyof_const_and_open_branch_is_any():
+    assert codegen.py_type({"anyOf": [{"const": "a"}, {"type": "string"}]}) == "Any"
+
+
+def test_py_type_anyof_float_const_is_any():
+    assert codegen.py_type({"anyOf": [{"const": 1.5}, {"const": "a"}]}) == "Any"
+
+
+def test_py_type_anyof_consts_dedupe_keeps_int_and_bool_apart():
+    # 1 == True in Python, but they are distinct Literal members.
+    assert codegen.py_type({"anyOf": [{"const": 1}, {"const": True}, {"const": 1}]}) == "Literal[1, True]"
+
+
+def test_py_type_anyof_quotes_render_via_repr():
+    schema = {"anyOf": [{"const": "it's"}, {"const": 'b"q'}]}
+    assert codegen.py_type(schema) == "Literal[\"it's\", 'b\"q']"
+
+
+def test_py_type_anyof_null_only_or_empty_is_any():
+    assert codegen.py_type({"anyOf": [{"type": "null"}]}) == "Any"
+    assert codegen.py_type({"anyOf": []}) == "Any"
+
+
+def test_py_type_allof_consts_stay_any():
+    assert codegen.py_type({"allOf": [{"const": "a"}]}) == "Any"
+    assert codegen.py_type({"anyOf": [{"const": "a"}], "allOf": [{"const": "a"}]}) == "Any"
+
+
+def test_py_type_lone_const_literal():
+    assert codegen.py_type({"const": "x"}) == "Literal['x']"
+    assert codegen.py_type({"type": "string", "const": "x"}) == "Literal['x']"
+    assert codegen.py_type({"type": "integer", "const": 3}) == "Literal[3]"
+
+
+def test_py_type_lone_const_unsafe_falls_through():
+    assert codegen.py_type({"type": "number", "const": 1.5}) == "float"
+    assert codegen.py_type({"const": None}) == "Any"
+
+
+def test_py_type_array_of_anyof_consts():
+    schema = {"type": "array", "items": {"anyOf": [{"const": "a"}, {"const": "b"}]}}
+    assert codegen.py_type(schema) == "list[Literal['a', 'b']]"
+
+
+def test_render_module_anyof_const_optional_param_imports_literal():
+    tools = [
+        {
+            "name": "set_policy",
+            "description": "Set the policy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"policy": {"anyOf": [{"const": "a"}, {"type": "null"}]}},
+            },
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert "from typing import Any, Literal" in src
+    assert "policy: Literal['a'] | None = None" in src
+    assert "| None | None" not in src
+    ast.parse(src)
+
+
+def test_render_module_nested_list_enum_imports_literal():
+    tools = [
+        {
+            "name": "grid",
+            "description": "Grid.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cells": {
+                        "type": "array",
+                        "items": {"type": "array", "items": {"type": "string", "enum": ["x", "o"]}},
+                    }
+                },
+                "required": ["cells"],
+            },
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert "cells: list[list[Literal['x', 'o']]]" in src
+    assert "from typing import Any, Literal" in src
+
+
+def test_render_module_literal_override_imports_literal():
+    tools = [
+        {
+            "name": "sort_items",
+            "description": "Sort items.",
+            "inputSchema": {"type": "object", "properties": {"direction": {"type": "string"}}},
+        }
+    ]
+    shapes = {"sort_items": {"input_overrides": {"direction": "Literal['asc', 'desc']"}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert "direction: Literal['asc', 'desc'] | None = None" in src
+    assert "Literal" in src.split("from typing import ", 1)[1].splitlines()[0]
+
+
+def test_render_module_without_literal_params_skips_literal_import():
+    tools = [
+        {
+            "name": "echo",
+            "description": "Mentions Literal[ in prose only.",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}},
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert "from typing import Any\n" in src
+
+
+def _typing_import(src: str) -> str:
+    return next(line for line in src.splitlines() if line.startswith("from typing import "))
+
+
+def test_render_module_template_override_literal_imports_literal():
+    templates = [{"uriTemplate": "res://items/{kind}", "name": "items"}]
+    shapes = {"res://items/{kind}": {"kind": "resource_template", "input_overrides": {"kind": "Literal['a', 'b']"}}}
+    src = codegen.render_module("demo", [], shapes, resource_templates=templates)
+    assert "kind: Literal['a', 'b']" in src
+    assert _typing_import(src) == "from typing import Any, Literal"
+
+
+def test_render_module_model_field_literal_imports_literal():
+    tools = [{"name": "get", "description": "Get.", "inputSchema": {"type": "object", "properties": {}}}]
+    shapes = {"get": {"return_model": "Item", "fields": {"status": "Literal['open', 'closed']"}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert "status: Literal['open', 'closed']" in src
+    assert _typing_import(src) == "from typing import Any, Literal, TypedDict, cast"
+
+
+def test_render_module_typing_literal_override_needs_no_literal_import():
+    tools = [
+        {
+            "name": "sort_items",
+            "description": "Sort items.",
+            "inputSchema": {"type": "object", "properties": {"direction": {"type": "string"}}},
+        }
+    ]
+    shapes = {"sort_items": {"input_overrides": {"direction": "typing.Literal['asc']"}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert _typing_import(src) == "from typing import Any"
+
+
+def test_render_module_float_enum_skips_literal_import():
+    tools = [
+        {
+            "name": "scale",
+            "description": "Scale.",
+            "inputSchema": {"type": "object", "properties": {"factor": {"type": "number", "enum": [0.5, 1.5]}}},
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert "factor: float | None = None" in src
+    assert _typing_import(src) == "from typing import Any"
+
+
+def test_render_module_discriminator_without_overloads_imports_only_used_names():
+    tools = [
+        {
+            "name": "get",
+            "description": "Get.",
+            "inputSchema": {"type": "object", "properties": {"kind": {"type": "string"}}, "required": ["kind"]},
+        }
+    ]
+    # No variant carries a return_model, so no @overload stub is emitted.
+    shapes = {"get": {"discriminator": "kind", "variants": {"a": {}, "b": {}}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert "@overload" not in src
+    assert _typing_import(src) == "from typing import Any, cast"
+    ast.parse(src)
+
+
+def test_render_module_discriminator_for_unlisted_tool_imports_nothing_extra():
+    tools = [{"name": "echo", "description": "Echo.", "inputSchema": {"type": "object", "properties": {}}}]
+    shapes = {"other": {"discriminator": "kind", "variants": {"a": {"return_model": "A", "fields": {"x": "int"}}}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert _typing_import(src) == "from typing import Any"
+
+
+def test_render_module_unparsable_override_still_imports_named_typing():
+    # A malformed hand-edited annotation leaves nothing to walk; fall back to a
+    # whole-word match so the import errs on the side of being present.
+    tools = [
+        {
+            "name": "sort_items",
+            "description": "Sort items.",
+            "inputSchema": {"type": "object", "properties": {"direction": {"type": "string"}}},
+        }
+    ]
+    shapes = {"sort_items": {"input_overrides": {"direction": "Literal['asc'"}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert _typing_import(src) == "from typing import Any, Literal"
+
+
+def test_render_module_lone_surrogate_description_falls_back():
+    # ast.parse cannot encode a lone surrogate; render_module must still return source.
+    tools = [{"name": "echo", "description": "bad \ud800 text", "inputSchema": {"type": "object", "properties": {}}}]
+    src = codegen.render_module("demo", tools)
+    assert _typing_import(src) == "from typing import Any"
+    assert "async def echo(" in src
+
+
+def test_render_module_params_named_like_typing_names_skip_import():
+    tools = [
+        {
+            "name": "tag",
+            "description": "Tag.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"cast": {"type": "string"}, "Literal": {"type": "string"}},
+                "required": ["cast"],
+            },
+        }
+    ]
+    src = codegen.render_module("demo", tools)
+    assert 'args: dict[str, Any] = {"cast": cast}' in src
+    assert _typing_import(src) == "from typing import Any"
+
+
+def test_render_module_param_named_cast_does_not_hide_cast_used_elsewhere():
+    tools = [
+        {
+            "name": "tag",
+            "description": "Tag.",
+            "inputSchema": {"type": "object", "properties": {"cast": {"type": "string"}}},
+        },
+        {"name": "get", "description": "Get.", "inputSchema": {"type": "object", "properties": {}}},
+    ]
+    shapes = {"get": {"return_model": "Item", "fields": {"x": "int"}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert _typing_import(src) == "from typing import Any, TypedDict, cast"
+
+
+def test_render_module_overloaded_anyof_const_param_parses():
+    tools = [
+        {
+            "name": "get",
+            "description": "Get.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string"},
+                    "mode": {"anyOf": [{"const": "fast"}, {"const": "slow"}, {"type": "null"}]},
+                },
+                "required": ["kind"],
+            },
+        }
+    ]
+    shapes = {"get": {"discriminator": "kind", "variants": {"a": {"return_model": "R", "fields": {"x": "int"}}}}}
+    src = codegen.render_module("demo", tools, shapes)
+    assert "mode: Literal['fast', 'slow'] | None = None" in src
+    assert "| None | None" not in src
+    ast.parse(src)
 
 
 # ── --embed-schema tests ──────────────────────────────────────────────────────
@@ -1594,3 +2044,345 @@ def test_scrub_probed_args_redacts_word_adjacent_uuid():
     out, changed = codegen.scrub_probed_args({"a": "id_3f2504e0-4f89-11d3-9a0c-0305e82c3301"})
     assert out == {"a": "id_<uuid>"}
     assert changed is True
+
+
+# ── resource accessors ───────────────────────────────────────────────────────
+
+_RISK_DICT = {
+    "uri": "risk://dictionary",
+    "name": "risk_dictionary",
+    "description": "Risk dictionary. Read this before calling upsert_unit_risk.",
+    "mimeType": "application/json",
+}
+_DIM_ALL = {"uri": "dimension://all", "name": "dimensions"}
+_DIM_BY_UNIT = {
+    "uriTemplate": "dimension://by-unit-type/{unitType}",
+    "name": "dimension_by_unit_type",
+    "description": "Dimensions for one unit type.",
+    "mimeType": "application/json",
+}
+_UNITS_SEARCH = {"uriTemplate": "units://{unit}/search{?page,limit}", "name": "units_search"}
+
+
+class _FakeReader:
+    def __init__(self, resp=None):
+        self.resp = resp
+        self.reads: list[tuple[str, str]] = []
+
+    async def read_resource(self, server, uri):
+        self.reads.append((server, uri))
+        return self.resp
+
+
+def _exec_module(src: str) -> dict:
+    ns: dict = {}
+    exec(compile(src, "gen.py", "exec"), ns)
+    return ns
+
+
+def test_render_module_without_resources_is_byte_identical():
+    tools = [_GET_ENTITY, _QUERY_ACME, {"name": "whoami", "description": "x", "inputSchema": {}}]
+    shapes = {"get_entity": _GET_ENTITY_SHAPE, "query_acme": _QUERY_ACME_SHAPE}
+    base = codegen.render_module("acme", tools, shapes=shapes)
+    assert codegen.render_module("acme", tools, shapes=shapes, resources=[], resource_templates=[]) == base
+    # Resource entries in shapes.json that are not rendered change nothing.
+    with_resource_entries = {
+        **shapes,
+        "risk://dictionary": {"kind": "resource", "unwrap": ["data"], "return_model": "Risk", "fields": {}},
+        "dimension://by-unit-type/{unitType}": {"kind": "resource_template", "return_model": "Dim", "fields": {}},
+    }
+    assert codegen.render_module("acme", tools, shapes=with_resource_entries) == base
+    assert "from mcpgen.seam import McpCaller\n" in base
+    assert "McpResourceReader" not in base
+    assert "_expand_uri" not in base
+
+
+def test_resource_function_names_derived_from_uri():
+    names = codegen.resource_function_names([], [_RISK_DICT, _DIM_ALL], [_DIM_BY_UNIT])
+    assert names == {
+        ("resource", "risk://dictionary"): "read_risk_dictionary",
+        ("resource", "dimension://all"): "read_dimension_all",
+        ("resource_template", "dimension://by-unit-type/{unitType}"): "read_dimension_by_unit_type",
+    }
+    assert codegen.resource_function_names([], None, None) == {}
+
+
+def test_resource_function_names_deduplicate_against_tools_and_each_other():
+    tools = [{"name": "read-risk-dictionary", "inputSchema": {}}]
+    names = codegen.resource_function_names(
+        tools,
+        [_RISK_DICT, {"uri": "dimension://by-unit-type"}, {"uri": "a://b-c"}, {"uri": "a://b_c"}],
+        [_DIM_BY_UNIT],
+    )
+    assert names["resource", "risk://dictionary"] == "read_risk_dictionary_2"
+    # Statics are named before templates, each group in key order.
+    assert names["resource", "dimension://by-unit-type"] == "read_dimension_by_unit_type"
+    assert names["resource_template", "dimension://by-unit-type/{unitType}"] == "read_dimension_by_unit_type_2"
+    assert names["resource", "a://b-c"] == "read_a_b_c"
+    assert names["resource", "a://b_c"] == "read_a_b_c_2"
+
+
+def test_static_and_template_with_same_string_get_distinct_accessors():
+    src = codegen.render_module("dc", [], resources=[{"uri": "x://a"}], resource_templates=[{"uriTemplate": "x://a"}])
+    defs = [n.name for n in ast.parse(src).body if isinstance(n, ast.AsyncFunctionDef)]
+    assert defs == ["read_x_a", "read_x_a_2"]
+    assert len(defs) == len(set(defs))
+
+
+def test_resource_shape_lookup_respects_kind():
+    shapes = {"x://a": {"kind": "resource_template", "unwrap": ["d"], "return_model": "T", "fields": {"v": "int"}}}
+    src = codegen.render_module(
+        "dc", [], shapes=shapes, resources=[{"uri": "x://a"}], resource_templates=[{"uriTemplate": "x://a"}]
+    )
+    assert "async def read_x_a(caller: McpResourceReader) -> Any:" in src
+    assert "async def read_x_a_2(caller: McpResourceReader) -> T:" in src
+    # The tagged entry does not apply to the static accessor, so its model and
+    # helpers are gated on the template alone.
+    only_static = codegen.render_module("dc", [], shapes=shapes, resources=[{"uri": "x://a"}])
+    assert "TypedDict" not in only_static
+    assert "_dig" not in only_static
+    assert "import json" not in only_static
+    # An untagged entry applies to either kind.
+    untagged = {"x://a": {"return_model": "U", "fields": {}}}
+    src = codegen.render_module("dc", [], shapes=untagged, resources=[{"uri": "x://a"}])
+    assert "async def read_x_a(caller: McpResourceReader) -> U:" in src
+
+
+def test_tool_name_with_colon_keeps_its_shape():
+    tool = {"name": "srv:get", "description": "x", "inputSchema": {}}
+    shapes = {"srv:get": {"return_model": "Thing", "fields": {"a": "str"}}}
+    src = codegen.render_module("acme", [tool], shapes=shapes)
+    assert "from typing import Any, TypedDict, cast" in src
+    ns = _exec_module(src)
+    assert "Thing" in ns
+
+    class _Caller:
+        async def call(self, server, name, arguments):
+            return {"a": "1"}
+
+    assert asyncio.run(ns["srv_get"](_Caller())) == {"a": "1"}
+
+
+def test_template_variable_named_uri_is_renamed():
+    src = codegen.render_module("dc", [], resource_templates=[{"uriTemplate": "x://{uri}"}])
+    assert "async def read_x(caller: McpResourceReader, *, uri_: str) -> Any:" in src
+    ns = _exec_module(src)
+    reader = _FakeReader()
+    asyncio.run(ns["read_x"](reader, uri_="v"))
+    assert reader.reads == [("dc", "x://v")]
+
+
+def test_header_docstring_mentions_resources_only_when_rendered():
+    tools = [{"name": "whoami", "description": "x", "inputSchema": {}}]
+    both = codegen.render_module("dc", tools, resources=[_RISK_DICT])
+    header = both.split('"""', 2)[1]
+    assert "tools/list and resources/list" in header
+    assert "McpCaller" in header
+    assert "McpResourceReader" in header
+    only = codegen.render_module("dc", [], resources=[_RISK_DICT]).split('"""', 2)[1]
+    assert "resources/list" in only
+    assert "McpCaller" not in only
+    assert "resources/list" not in codegen.render_module("dc", tools)
+
+
+def test_resource_module_has_no_trailing_whitespace():
+    shapes = {"risk://dictionary": {"kind": "resource", "_observed_bytes": 200_000}}
+    resources = [{**_RISK_DICT, "description": "Line one.  \n   \nLine two.\t\nLine three."}]
+    src = codegen.render_module("dc", [], shapes=shapes, resources=resources, resource_templates=[_DIM_BY_UNIT])
+    assert not [ln for ln in src.splitlines() if ln != ln.rstrip()]
+    ns = _exec_module(src)
+    assert "\n\nResource: risk://dictionary\n" in inspect.cleandoc(ns["read_risk_dictionary"].__doc__)
+
+
+def test_render_module_static_accessor_calls_reader():
+    src = codegen.render_module("dc", [], resources=[_RISK_DICT])
+    ast.parse(src)
+    assert "async def read_risk_dictionary(caller: McpResourceReader) -> Any:" in src
+    ns = _exec_module(src)
+    reader = _FakeReader({"risks": []})
+    assert asyncio.run(ns["read_risk_dictionary"](reader)) == {"risks": []}
+    assert reader.reads == [("dc", "risk://dictionary")]
+
+
+def test_resource_docstring_has_description_uri_and_mime():
+    ns = _exec_module(codegen.render_module("dc", [], resources=[_RISK_DICT], resource_templates=[_DIM_BY_UNIT]))
+    assert inspect.cleandoc(ns["read_risk_dictionary"].__doc__) == (
+        "Risk dictionary. Read this before calling upsert_unit_risk.\n"
+        "\n"
+        "Resource: risk://dictionary\n"
+        "MIME type: application/json"
+    )
+    doc = ns["read_dimension_by_unit_type"].__doc__
+    assert "Resource template: dimension://by-unit-type/{unitType}" in doc
+    # No description, no mimeType: the Resource line stands alone.
+    ns = _exec_module(codegen.render_module("dc", [], resources=[_DIM_ALL]))
+    assert ns["read_dimension_all"].__doc__ == "Resource: dimension://all"
+
+
+def test_resource_docstring_size_note():
+    shapes = {"risk://dictionary": {"kind": "resource", "_observed_bytes": 200_000}}
+    src = codegen.render_module("dc", [], shapes=shapes, resources=[_RISK_DICT])
+    assert "Returns a large payload (~195 KB observed)" in src
+
+
+def test_render_module_template_accessor_expands_uri():
+    src = codegen.render_module("dc", [], resource_templates=[_DIM_BY_UNIT])
+    ast.parse(src)
+    assert "async def read_dimension_by_unit_type(caller: McpResourceReader, *, unitType: str) -> Any:" in src
+    assert "def _expand_uri(template: str, values: dict[str, Any]) -> str:" in src
+    ns = _exec_module(src)
+    reader = _FakeReader("ok")
+    assert asyncio.run(ns["read_dimension_by_unit_type"](reader, unitType="Delivery Unit")) == "ok"
+    assert reader.reads == [("dc", "dimension://by-unit-type/Delivery%20Unit")]
+    with pytest.raises(TypeError):
+        asyncio.run(ns["read_dimension_by_unit_type"](reader, "positional"))
+
+
+def test_template_optional_query_variable_omitted():
+    src = codegen.render_module("dc", [], resource_templates=[_UNITS_SEARCH])
+    assert (
+        "async def read_units_search(caller: McpResourceReader, *, unit: str, "
+        "page: str | None = None, limit: str | None = None) -> Any:"
+    ) in src
+    ns = _exec_module(src)
+    reader = _FakeReader()
+    asyncio.run(ns["read_units_search"](reader, unit="u1"))
+    asyncio.run(ns["read_units_search"](reader, unit="u1", limit="5"))
+    assert [uri for _, uri in reader.reads] == ["units://u1/search", "units://u1/search?limit=5"]
+
+
+def test_template_input_overrides_keyed_by_raw_variable():
+    tpl = {"uriTemplate": "rec://{record.id}"}
+    shapes = {"rec://{record.id}": {"kind": "resource_template", "input_overrides": {"record.id": "int"}}}
+    src = codegen.render_module("dc", [], shapes=shapes, resource_templates=[tpl])
+    assert "async def read_rec(caller: McpResourceReader, *, record_id: int) -> Any:" in src
+    ns = _exec_module(src)
+    reader = _FakeReader()
+    asyncio.run(ns["read_rec"](reader, record_id=5))
+    assert reader.reads == [("dc", "rec://5")]
+
+
+def test_template_variable_named_caller_is_renamed():
+    tpl = {"uriTemplate": "x://{caller}/{name}"}
+    src = codegen.render_module("dc", [], resource_templates=[tpl])
+    assert "async def read_x(caller: McpResourceReader, *, caller_: str, name: str) -> Any:" in src
+    ns = _exec_module(src)
+    reader = _FakeReader()
+    asyncio.run(ns["read_x"](reader, caller_="a", name="n"))
+    assert reader.reads == [("dc", "x://a/n")]
+
+
+def test_resource_unwrap_and_model_emit_dig_and_typeddict():
+    shapes = {
+        "risk://dictionary": {
+            "kind": "resource",
+            "unwrap": ["data"],
+            "return_model": "RiskDictionary",
+            "fields": {"version": "int"},
+        },
+        "dimension://by-unit-type/{unitType}": {
+            "kind": "resource_template",
+            "unwrap": ["items"],
+            "return_container": "list",
+            "return_model": "Dimension",
+            "fields": {"code": "str"},
+        },
+    }
+    src = codegen.render_module("dc", [], shapes=shapes, resources=[_RISK_DICT], resource_templates=[_DIM_BY_UNIT])
+    ast.parse(src)
+    assert "import json\nfrom typing import Any, TypedDict, cast" in src
+    assert "class RiskDictionary(TypedDict, total=False):\n    version: int" in src
+    assert "class Dimension(TypedDict, total=False):\n    code: str" in src
+    assert "def _dig(obj: Any" in src
+    assert "def _dig_list(obj: Any" in src
+    assert "-> RiskDictionary:" in src
+    assert "-> list[Dimension]:" in src
+    ns = _exec_module(src)
+    got = asyncio.run(ns["read_risk_dictionary"](_FakeReader({"data": {"version": 3}})))
+    assert got == {"version": 3}
+    got = asyncio.run(ns["read_dimension_by_unit_type"](_FakeReader({"items": [{"code": "A"}]}), unitType="P"))
+    assert got == [{"code": "A"}]
+
+
+def test_resource_unwrap_without_model_returns_dug_value():
+    shapes = {"risk://dictionary": {"kind": "resource", "unwrap": ["data"]}}
+    src = codegen.render_module("dc", [], shapes=shapes, resources=[_RISK_DICT])
+    assert "import json\nfrom typing import Any\n" in src
+    assert "    return _dig(result, ('data', ))" in src
+
+
+def test_resource_discriminator_ignored_with_warning(capsys):
+    shapes = {"risk://dictionary": {"kind": "resource", **_GET_ENTITY_DISC_SHAPE}}
+    src = codegen.render_module("dc", [], shapes=shapes, resources=[_RISK_DICT])
+    ast.parse(src)
+    assert "@overload" not in src
+    assert "async def read_risk_dictionary(caller: McpResourceReader) -> Any:" in src
+    err = capsys.readouterr().err
+    assert "risk://dictionary" in err
+    assert "discriminator" in err
+
+
+def test_resources_only_module_imports_only_reader_protocol():
+    src = codegen.render_module("dc", [], resources=[_RISK_DICT])
+    assert "from mcpgen.seam import McpResourceReader\n" in src
+    assert "McpCaller" not in src.split('"""', 2)[2]
+
+
+def test_tools_and_resources_module_imports_both_protocols_and_orders_accessors_last():
+    tools = [{"name": "zeta", "description": "x", "inputSchema": {}}]
+    src = codegen.render_module("dc", tools, resources=[_RISK_DICT], resource_templates=[_DIM_BY_UNIT])
+    ast.parse(src)
+    assert "from mcpgen.seam import McpCaller, McpResourceReader\n" in src
+    assert src.index("async def zeta(") < src.index("async def read_dimension_by_unit_type(")
+    # Statics before templates.
+    assert src.index("async def read_risk_dictionary(") < src.index("async def read_dimension_by_unit_type(")
+
+
+def test_malformed_template_skipped_with_warning(capsys):
+    bad = {"uriTemplate": "bad://{unclosed", "name": "bad"}
+    src = codegen.render_module("dc", [], resources=[_RISK_DICT], resource_templates=[bad, _DIM_BY_UNIT])
+    ast.parse(src)
+    assert "bad://" not in src
+    assert "async def read_dimension_by_unit_type(" in src
+    err = capsys.readouterr().err
+    assert "bad://{unclosed" in err
+    # Only malformed templates: nothing resource-related is emitted.
+    tools = [{"name": "whoami", "description": "x", "inputSchema": {}}]
+    assert codegen.render_module("dc", tools, resource_templates=[bad]) == codegen.render_module("dc", tools)
+
+
+def test_resource_docstring_and_uri_are_injection_safe():
+    evil = 'x"""\nimport os\nos.system("echo pwned")\n"""'
+    resources = [{"uri": 'evil://a"b\\c', "description": evil, "mimeType": 'text/plain"""\nimport os'}]
+    templates = [{"uriTemplate": 'evil://t"""/{v}', "description": evil}]
+    src = codegen.render_module("dc", [], resources=resources, resource_templates=templates)
+    tree = ast.parse(src)
+    assert not any(isinstance(n, ast.Import) and n.names[0].name == "os" for n in tree.body)
+    ns = _exec_module(src)
+    assert "os" not in ns
+    fns = [v for k, v in ns.items() if k.startswith("read_")]
+    assert len(fns) == 2
+    for fn in fns:
+        assert evil.strip() in fn.__doc__
+    reader = _FakeReader()
+    static = next(f for f in fns if "Resource: " in f.__doc__)
+    asyncio.run(static(reader))
+    assert reader.reads == [("dc", 'evil://a"b\\c')]
+
+
+def test_render_resource_direct_calls_default_to_derived_name():
+    assert codegen.render_resource(_RISK_DICT).startswith("async def read_risk_dictionary(")
+    assert codegen.render_resource(_RISK_DICT, "custom").startswith("async def custom(")
+    src = codegen.render_resource_template(_DIM_BY_UNIT)
+    assert src.startswith("async def read_dimension_by_unit_type(")
+    with pytest.raises(codegen.UriTemplateError):
+        codegen.render_resource_template({"uriTemplate": "x://{"})
+
+
+def test_probe_skeleton_kind_only_when_given():
+    assert "kind" not in codegen.probe_skeleton("whoami", [{}], [{}])["whoami"]
+    sk = codegen.probe_skeleton("risk://dictionary", [{}], [{}], kind="resource")
+    assert sk["risk://dictionary"]["kind"] == "resource"
+    sk = codegen.probe_skeleton("d://{x}", [{"x": "1"}], [{}], kind="resource_template")
+    assert sk["d://{x}"]["kind"] == "resource_template"
+    assert sk["d://{x}"]["probed_args"] == {"x": "1"}

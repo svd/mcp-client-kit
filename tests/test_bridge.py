@@ -11,6 +11,7 @@ no pytest-asyncio dependency needed).
 from __future__ import annotations
 
 import asyncio
+import base64
 import errno as _errno
 import io
 import itertools
@@ -35,11 +36,14 @@ if sys.version_info < (3, 11):  # pragma: no cover - version-gated
 
 import httpx
 import pytest
+from mcp import types as mcp_types
 from mcp.client.auth import OAuthRegistrationError
 from mcp.shared.auth import OAuthClientMetadata, OAuthToken
+from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
 from mcpgen import _bridge
+from mcpgen.seam import McpCaller, McpResourceReader
 
 
 @pytest.fixture(autouse=True)
@@ -4722,6 +4726,7 @@ def _fake_session_factory(captured: dict):
         captured.update(kwargs)
         s = MagicMock()
         s.list_tools = AsyncMock(return_value=MagicMock(tools=[]))
+        s.get_server_capabilities = MagicMock(return_value=None)
         yield s
 
     return fake_session
@@ -5045,7 +5050,7 @@ def test_connected_reuses_session_across_calls_and_returns_results():
     async def fake_session(server, **kwargs):
         s = MagicMock()
 
-        async def call_tool(tool, arguments):
+        async def call_tool(tool, arguments, read_timeout_seconds=None):
             calls.append(tool)
             return MagicMock(content=[SimpleNamespace(type="text", text=json.dumps({"tool": tool}))])
 
@@ -5122,7 +5127,7 @@ def test_connected_concurrent_calls_are_not_serialized():
     async def fake_session(server, **kwargs):
         s = MagicMock()
 
-        async def call_tool(tool, arguments):
+        async def call_tool(tool, arguments, read_timeout_seconds=None):
             nonlocal in_flight, peak
             in_flight += 1
             peak = max(peak, in_flight)
@@ -5146,6 +5151,60 @@ def test_connected_concurrent_calls_are_not_serialized():
 
     asyncio.run(run())
     assert peak >= 2
+
+
+def _timeout_recording_session(recorded: list):
+    """A fake ``session()`` whose call_tool records its ``read_timeout_seconds``."""
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        s = MagicMock()
+
+        async def call_tool(tool, arguments, read_timeout_seconds=None):
+            recorded.append(read_timeout_seconds)
+            return MagicMock(content=[SimpleNamespace(type="text", text="{}")])
+
+        s.call_tool = call_tool
+        yield s
+
+    return fake_session
+
+
+@pytest.mark.parametrize("block", [False, True], ids=["one-shot", "connected"])
+def test_call_timeout_reaches_call_tool_as_a_timedelta(block):
+    from datetime import timedelta
+
+    recorded: list = []
+
+    async def run():
+        with patch("mcpgen._bridge.session", _timeout_recording_session(recorded)):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py", call_timeout=2.5)
+            if block:
+                async with caller.connected():
+                    await caller.call("demo", "greet", {})
+            else:
+                await caller.call("demo", "greet", {})
+
+    asyncio.run(run())
+    assert recorded == [timedelta(seconds=2.5)]
+
+
+@pytest.mark.parametrize("block", [False, True], ids=["one-shot", "connected"])
+def test_call_without_call_timeout_leaves_the_sdk_unbounded(block):
+    """The default, which generated wrappers get through the seam, sets no read timeout."""
+    recorded: list = []
+
+    async def run():
+        with patch("mcpgen._bridge.session", _timeout_recording_session(recorded)):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            if block:
+                async with caller.connected():
+                    await caller.call("demo", "greet", {})
+            else:
+                await caller.call("demo", "greet", {})
+
+    asyncio.run(run())
+    assert recorded == [None]
 
 
 def test_connected_open_failure_propagates_to_the_caller():
@@ -5374,6 +5433,666 @@ def test_parse_multiple_python_repr_blocks():
     """The ast.literal_eval fallback applies per block, not just to the first."""
     blocks = [{"type": "text", "text": "{'a': 1}"}, {"type": "text", "text": "{'b': 2}"}]
     assert _bridge.parse(blocks) == [{"a": 1}, {"b": 2}]
+
+
+# ---------------------------------------------------------------------------
+# Resources: parse_resource, normalize_resource_uri, read_resource
+# ---------------------------------------------------------------------------
+
+
+def _text_contents(text: str, uri: str = "demo://config") -> mcp_types.TextResourceContents:
+    return mcp_types.TextResourceContents(uri=uri, text=text, mimeType="application/json")
+
+
+def _blob_contents(data: bytes, uri: str = "demo://logo") -> mcp_types.BlobResourceContents:
+    return mcp_types.BlobResourceContents(uri=uri, blob=base64.b64encode(data).decode(), mimeType="image/png")
+
+
+def test_parse_resource_json_text():
+    assert _bridge.parse_resource([_text_contents('{"a": 1, "b": [2]}')]) == {"a": 1, "b": [2]}
+
+
+def test_parse_resource_python_repr_text():
+    """Text contents go through the same literal_eval fallback as tool results."""
+    assert _bridge.parse_resource([_text_contents("{'a': 1}")]) == {"a": 1}
+
+
+def test_parse_resource_plain_text():
+    assert (
+        _bridge.parse_resource([_text_contents("# Risk dictionary\n\nsee below")]) == "# Risk dictionary\n\nsee below"
+    )
+
+
+def test_parse_resource_blob_is_decoded_bytes():
+    payload = b"\x89PNG\r\n\x1a\n\x00\xff"
+    result = _bridge.parse_resource([_blob_contents(payload)])
+    assert isinstance(result, bytes)
+    assert result == payload
+
+
+def test_parse_resource_several_contents_fold_into_a_list():
+    contents = [_text_contents('{"a": 1}'), _text_contents("plain"), _blob_contents(b"\x00\x01")]
+    assert _bridge.parse_resource(contents) == [{"a": 1}, "plain", b"\x00\x01"]
+
+
+def test_parse_resource_empty_raises():
+    with pytest.raises(ValueError, match="no contents"):
+        _bridge.parse_resource([])
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('{"a": 1}', {"a": 1}),
+        ("{'a': 1}", {"a": 1}),
+        ("42", 42),
+        ("OK", "OK"),
+        ("__import__('os')", "__import__('os')"),
+    ],
+)
+def test_parse_text_chain(text, expected):
+    """JSON, then literal_eval, then the string itself — for tool blocks and resource text alike."""
+    assert _bridge._parse_text(text) == expected
+    assert _bridge._parse_one({"type": "text", "text": text}) == expected
+
+
+def test_parse_resource_blob_tolerates_line_wrapped_base64():
+    wrapped = base64.encodebytes(b"\x00" * 100).decode()  # MIME style: newline every 76 chars
+    assert "\n" in wrapped
+    blob = mcp_types.BlobResourceContents(uri="demo://logo", blob=wrapped)
+    assert _bridge.parse_resource([blob]) == b"\x00" * 100
+
+
+@pytest.mark.parametrize("bad", ["_-_-", "not base64!", "QUJ"])
+def test_parse_resource_blob_rejects_invalid_base64(bad):
+    """URL-safe alphabet or garbage raises instead of decoding to the wrong bytes."""
+    blob = mcp_types.BlobResourceContents(uri="demo://logo", blob=bad)
+    with pytest.raises(ValueError):
+        _bridge.parse_resource([blob])
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Dimension://ALL", "dimension://ALL"),
+        ("risk://dictionary", "risk://dictionary"),
+        ("dimension://by-unit-type/Delivery Unit", "dimension://by-unit-type/Delivery%20Unit"),
+        ("dimension://by-unit-type/Delivery%20Unit", "dimension://by-unit-type/Delivery%20Unit"),
+    ],
+)
+def test_normalize_resource_uri_matches_the_sdk(raw, expected):
+    assert _bridge.normalize_resource_uri(raw) == expected
+    # The SDK's own Resource model normalizes the same way; keys must agree with it.
+    assert str(mcp_types.Resource(uri=raw, name="n").uri) == expected
+
+
+def test_normalize_resource_uri_rejects_a_non_uri():
+    with pytest.raises(ValueError):
+        _bridge.normalize_resource_uri("not a uri")
+
+
+def _resource_session(contents: list | None = None):
+    """A mock session answering both call_tool and read_resource (JSON text by default)."""
+    if contents is None:
+        contents = [_text_contents('{"k": "v"}')]
+    s = _make_mock_session({"ok": True})
+    s.read_resource = AsyncMock(return_value=mcp_types.ReadResourceResult(contents=contents))
+    return s
+
+
+def _read_through_caller(uri: str, contents: list | None = None) -> tuple:
+    """Run a one-shot ``read_resource`` against a fake session; return (result, log, sessions)."""
+    log: list = []
+    sessions: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        log.append(("enter", server))
+        s = _resource_session(contents)
+        sessions.append(s)
+        try:
+            yield s
+        finally:
+            log.append(("exit", server))
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            return await caller.read_resource("demo", uri)
+
+    return asyncio.run(run()), log, sessions
+
+
+def test_read_resource_one_shot_opens_and_closes_a_session():
+    result, log, sessions = _read_through_caller("demo://config")
+    assert result == {"k": "v"}
+    assert log == [("enter", "demo"), ("exit", "demo")]
+    sessions[0].read_resource.assert_awaited_once()
+
+
+def test_read_resource_rejects_an_invalid_uri_before_opening_a_session():
+    """A bad URI must not cost a subprocess spawn, handshake or OAuth round-trip."""
+    opened: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        opened.append(server)
+        yield _resource_session()
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            await caller.read_resource("demo", "not a uri")
+
+    with pytest.raises(ValueError):
+        asyncio.run(run())
+    assert opened == []
+
+
+def test_read_resource_with_empty_contents_raises():
+    with pytest.raises(ValueError, match="no contents"):
+        _read_through_caller("demo://config", contents=[])
+
+
+def test_read_resource_reuses_the_block_session_alongside_a_tool_call():
+    log: list = []
+    sessions: list = []
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        log.append(("enter", server))
+        s = _resource_session()
+        sessions.append(s)
+        try:
+            yield s
+        finally:
+            log.append(("exit", server))
+
+    async def run():
+        with patch("mcpgen._bridge.session", fake_session):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                tool = await caller.call("demo", "greet", {})
+                res = await caller.read_resource("demo", "demo://config")
+                return tool, res
+
+    assert asyncio.run(run()) == ({"ok": True}, {"k": "v"})
+    assert log == [("enter", "demo"), ("exit", "demo")]
+    assert len(sessions) == 1
+    sessions[0].call_tool.assert_awaited_once()
+    sessions[0].read_resource.assert_awaited_once()
+
+
+def test_read_resource_passes_a_normalized_anyurl_to_the_sdk():
+    _, _, sessions = _read_through_caller("Dimension://by-unit-type/Delivery Unit")
+    (uri,), _ = sessions[0].read_resource.call_args
+    assert isinstance(uri, AnyUrl)
+    assert str(uri) == "dimension://by-unit-type/Delivery%20Unit"
+
+
+def test_read_resource_decodes_a_blob():
+    result, _, _ = _read_through_caller("demo://logo", contents=[_blob_contents(b"\x00\xffbin")])
+    assert result == b"\x00\xffbin"
+
+
+def _anyio_like_session(s, log: list, *, exit_error: BaseException | None = None):
+    """A fake ``session`` CM that wraps a body exception the way anyio 4 does.
+
+    With mcp 1.27 an exception raised inside a one-shot session body leaves the
+    stdio/HTTP transport's task groups as ``ExceptionGroup(ExceptionGroup(exc))``.
+    *exit_error* is raised on a clean exit instead, like a transport task failing.
+    """
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        log.append(("enter", server))
+        try:
+            yield s
+        except BaseException as exc:
+            log.append(("exit", server))
+            inner = BaseExceptionGroup("unhandled errors in a TaskGroup", [exc])
+            raise BaseExceptionGroup("unhandled errors in a TaskGroup", [inner]) from None
+        log.append(("exit", server))
+        if exit_error is not None:
+            raise exit_error
+
+    return fake_session
+
+
+def _unknown_resource() -> McpError:
+    return McpError(mcp_types.ErrorData(code=-32002, message="Unknown resource: demo://missing"))
+
+
+def test_read_resource_one_shot_raises_a_read_error_bare():
+    """A failed read surfaces as itself, not inside the transport's nested ExceptionGroup."""
+    log: list = []
+    s = _resource_session()
+    s.read_resource = AsyncMock(side_effect=_unknown_resource())
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, log)):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").read_resource("demo", "demo://missing")
+
+    with pytest.raises(McpError, match="Unknown resource"):
+        asyncio.run(run())
+    assert log == [("enter", "demo"), ("exit", "demo")]
+
+
+def test_read_resource_one_shot_leaves_interrupts_to_the_session():
+    """Only ``Exception`` is carried out of the session; an interrupt-class error unwinds through it."""
+
+    class _Interrupt(BaseException):
+        pass
+
+    s = _resource_session()
+    s.read_resource = AsyncMock(side_effect=_Interrupt())
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, [])):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").read_resource("demo", "demo://config")
+
+    with pytest.raises(BaseExceptionGroup) as excinfo:
+        asyncio.run(run())
+    assert excinfo.group_contains(_Interrupt)
+
+
+def test_read_resource_one_shot_session_exit_failure_wins():
+    """A transport failure raised as the session closes propagates, chaining the read error as context."""
+    transport = ExceptionGroup("unhandled errors in a TaskGroup", [RuntimeError("502 Bad Gateway")])
+    read_error = _unknown_resource()
+    s = _resource_session()
+    s.read_resource = AsyncMock(side_effect=read_error)
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, [], exit_error=transport)):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").read_resource("demo", "demo://config")
+
+    with pytest.raises(ExceptionGroup) as excinfo:
+        asyncio.run(run())
+    assert excinfo.value is transport
+    assert excinfo.value.__context__ is read_error
+
+
+def test_read_resource_block_raises_a_read_error_bare():
+    """Inside ``connected()`` the read error reaches the caller directly, as before."""
+    s = _resource_session()
+    s.read_resource = AsyncMock(side_effect=_unknown_resource())
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, [])):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            async with caller.connected():
+                with pytest.raises(McpError, match="Unknown resource"):
+                    await caller.read_resource("demo", "demo://missing")
+
+    asyncio.run(run())
+
+
+def test_read_resource_result_returns_the_unparsed_result():
+    """``read_resource_result`` keeps every content with its uri and mimeType."""
+    contents = [_text_contents('{"a": 1}'), _blob_contents(b"\x00\x01")]
+    log: list = []
+    s = _resource_session(contents)
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, log)):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            one_shot = await caller.read_resource_result("demo", "Demo://config")
+            async with caller.connected():
+                in_block = await caller.read_resource_result("demo", "demo://config")
+            return one_shot, in_block
+
+    one_shot, in_block = asyncio.run(run())
+    assert isinstance(one_shot, mcp_types.ReadResourceResult)
+    assert one_shot.contents == contents
+    assert in_block.contents == contents
+    (uri,), _ = s.read_resource.call_args_list[0]
+    assert str(uri) == "demo://config"
+
+
+def test_read_resource_result_rejects_an_invalid_uri_before_opening_a_session():
+    log: list = []
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(_resource_session(), log)):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").read_resource_result("demo", "not a uri")
+
+    with pytest.raises(ValueError):
+        asyncio.run(run())
+    assert log == []
+
+
+# ---------------------------------------------------------------------------
+# call_tool_result / _parse_tool_result
+# ---------------------------------------------------------------------------
+
+
+def _tool_result(text: str, *, is_error: bool = False) -> mcp_types.CallToolResult:
+    return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=text)], isError=is_error)
+
+
+def _tool_session(result: mcp_types.CallToolResult | None = None, recorded: list | None = None) -> MagicMock:
+    s = MagicMock()
+
+    async def call_tool(tool, arguments, read_timeout_seconds=None):
+        if recorded is not None:
+            recorded.append((tool, arguments, read_timeout_seconds))
+        return result if result is not None else _tool_result('{"ok": true}')
+
+    s.call_tool = call_tool
+    return s
+
+
+@pytest.mark.parametrize("is_error", [False, True], ids=["ok", "isError"])
+def test_call_tool_result_returns_the_unparsed_result(is_error):
+    """One-shot and in-block alike, the SDK result comes back as is, ``isError`` included."""
+    result = _tool_result('{"code": "validation_error"}', is_error=is_error)
+    log: list = []
+    recorded: list = []
+    s = _tool_session(result, recorded)
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, log)):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+            one_shot = await caller.call_tool_result("demo", "search", {"q": "x"})
+            async with caller.connected():
+                in_block = await caller.call_tool_result("demo", "search", {"q": "x"})
+            return one_shot, in_block
+
+    one_shot, in_block = asyncio.run(run())
+    assert one_shot is result
+    assert in_block is result
+    assert [r[:2] for r in recorded] == [("search", {"q": "x"})] * 2
+    assert log == [("enter", "demo"), ("exit", "demo")] * 2
+
+
+@pytest.mark.parametrize("block", [False, True], ids=["one-shot", "connected"])
+@pytest.mark.parametrize(("call_timeout", "expected"), [(2.5, 2.5), (None, None)])
+def test_call_tool_result_passes_the_call_timeout(block, call_timeout, expected):
+    from datetime import timedelta
+
+    recorded: list = []
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(_tool_session(recorded=recorded), [])):
+            caller = _bridge.McpBridgeCaller(cmd="python srv.py", call_timeout=call_timeout)
+            if block:
+                async with caller.connected():
+                    await caller.call_tool_result("demo", "greet", {})
+            else:
+                await caller.call_tool_result("demo", "greet", {})
+
+    asyncio.run(run())
+    assert [r[2] for r in recorded] == [None if expected is None else timedelta(seconds=expected)]
+
+
+def test_call_tool_result_one_shot_raises_a_call_error_bare():
+    """A failed call surfaces as itself, not inside the transport's nested ExceptionGroup."""
+    log: list = []
+    s = MagicMock()
+    s.call_tool = AsyncMock(side_effect=McpError(mcp_types.ErrorData(code=-32602, message="Unknown tool: nope")))
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, log)):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").call_tool_result("demo", "nope", {})
+
+    with pytest.raises(McpError, match="Unknown tool"):
+        asyncio.run(run())
+    assert log == [("enter", "demo"), ("exit", "demo")]
+
+
+@pytest.mark.parametrize("is_error", [False, True], ids=["ok", "isError"])
+def test_parse_tool_result_is_what_call_returns(is_error):
+    """``_parse_tool_result`` of the raw result equals ``call()``'s payload, error or not."""
+    result = mcp_types.CallToolResult(
+        content=[
+            mcp_types.TextContent(type="text", text='{"a": 1}'),
+            mcp_types.ImageContent(type="image", data="aGk=", mimeType="image/png"),
+        ],
+        isError=is_error,
+    )
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(_tool_session(result), [])):
+            return await _bridge.McpBridgeCaller(cmd="python srv.py").call("demo", "t", {})
+
+    assert _bridge._parse_tool_result(result) == asyncio.run(run())
+    assert _bridge._parse_tool_result(_tool_result('{"a": 1}')) == {"a": 1}
+
+
+def test_bridge_caller_satisfies_both_seam_protocols():
+    caller = _bridge.McpBridgeCaller(cmd="python srv.py")
+    assert isinstance(caller, McpCaller)
+    assert isinstance(caller, McpResourceReader)
+
+
+# ---------------------------------------------------------------------------
+# Resources: list_resource_inventory
+# ---------------------------------------------------------------------------
+
+
+class _ListingSession:
+    """Fake ClientSession serving paginated resources/list and resources/templates/list.
+
+    *resource_pages* / *template_pages* map the request cursor (None for the first
+    page) to ``(items, next_cursor)``. A *templates_error* is raised by every
+    templates request instead of answering it.
+    """
+
+    def __init__(
+        self,
+        *,
+        resources_capability: bool = True,
+        resource_pages: dict | None = None,
+        template_pages: dict | None = None,
+        resources_error: Exception | None = None,
+        templates_error: Exception | None = None,
+    ) -> None:
+        self._caps = mcp_types.ServerCapabilities(
+            resources=mcp_types.ResourcesCapability() if resources_capability else None
+        )
+        self._resource_pages = resource_pages or {None: ([], None)}
+        self._template_pages = template_pages or {None: ([], None)}
+        self._resources_error = resources_error
+        self._templates_error = templates_error
+        self.requests: list[tuple[str, str | None]] = []
+
+    def get_server_capabilities(self):
+        return self._caps
+
+    @staticmethod
+    def _cursor(params) -> str | None:
+        assert params is None or isinstance(params, mcp_types.PaginatedRequestParams)
+        return None if params is None else params.cursor
+
+    async def list_resources(self, *, params=None):
+        cursor = self._cursor(params)
+        self.requests.append(("resources/list", cursor))
+        if self._resources_error is not None:
+            raise self._resources_error
+        items, next_cursor = self._resource_pages[cursor]
+        return mcp_types.ListResourcesResult(resources=items, nextCursor=next_cursor)
+
+    async def list_resource_templates(self, *, params=None):
+        cursor = self._cursor(params)
+        self.requests.append(("resources/templates/list", cursor))
+        if self._templates_error is not None:
+            raise self._templates_error
+        items, next_cursor = self._template_pages[cursor]
+        return mcp_types.ListResourceTemplatesResult(resourceTemplates=items, nextCursor=next_cursor)
+
+
+def _res(uri: str, name: str = "r", **kw) -> mcp_types.Resource:
+    return mcp_types.Resource(uri=uri, name=name, **kw)
+
+
+def _tpl(uri_template: str, name: str = "t", **kw) -> mcp_types.ResourceTemplate:
+    return mcp_types.ResourceTemplate(uriTemplate=uri_template, name=name, **kw)
+
+
+def _mcp_error(code: int, message: str = "boom") -> McpError:
+    return McpError(mcp_types.ErrorData(code=code, message=message))
+
+
+def test_inventory_without_resources_capability_sends_no_requests():
+    s = _ListingSession(resources_capability=False, resource_pages={None: ([_res("demo://x")], None)})
+    assert asyncio.run(_bridge.list_resource_inventory(s)) == ([], [])
+    assert s.requests == []
+
+
+def test_inventory_without_server_capabilities_sends_no_requests():
+    s = _ListingSession()
+    s.get_server_capabilities = lambda: None
+    assert asyncio.run(_bridge.list_resource_inventory(s)) == ([], [])
+    assert s.requests == []
+
+
+def test_inventory_statics_false_sends_no_resources_list():
+    s = _ListingSession(
+        resource_pages={None: ([_res("demo://a")], None)},
+        template_pages={None: ([_tpl("demo://t/{x}")], None)},
+    )
+    resources, templates = asyncio.run(_bridge.list_resource_inventory(s, statics=False))
+    assert resources == []
+    assert [t["uriTemplate"] for t in templates] == ["demo://t/{x}"]
+    assert s.requests == [("resources/templates/list", None)]
+
+
+def test_preview_reads_only_the_first_page_of_each_list():
+    s = _ListingSession(
+        resource_pages={None: ([_res("Demo://a")], "c1"), "c1": ([_res("demo://b")], None)},
+        template_pages={None: ([_tpl("demo://t/{x}")], None)},
+    )
+    resources, more_resources, templates, more_templates = asyncio.run(_bridge.preview_resource_inventory(s))
+    assert [r["uri"] for r in resources] == ["demo://a"]
+    assert more_resources is True
+    assert [t["uriTemplate"] for t in templates] == ["demo://t/{x}"]
+    assert more_templates is False
+    assert s.requests == [("resources/list", None), ("resources/templates/list", None)]
+
+
+def test_preview_statics_false_and_no_capability():
+    s = _ListingSession(template_pages={None: ([_tpl("demo://t/{x}")], "t1")})
+    assert asyncio.run(_bridge.preview_resource_inventory(s, statics=False))[:2] == ([], False)
+    assert s.requests == [("resources/templates/list", None)]
+
+    bare = _ListingSession(resources_capability=False)
+    assert asyncio.run(_bridge.preview_resource_inventory(bare)) == ([], False, [], False)
+    assert bare.requests == []
+
+
+def test_preview_treats_templates_method_not_found_as_empty():
+    s = _ListingSession(templates_error=_mcp_error(mcp_types.METHOD_NOT_FOUND))
+    assert asyncio.run(_bridge.preview_resource_inventory(s)) == ([], False, [], False)
+
+
+def test_inventory_returns_plain_dicts():
+    s = _ListingSession(
+        resource_pages={
+            None: (
+                [_res("risk://dictionary", "risk_dictionary", mimeType="application/json", _meta={"k": 1})],
+                None,
+            )
+        },
+        template_pages={None: ([_tpl("dimension://by-unit-type/{unitType}", "dims", description="By type")], None)},
+    )
+    resources, templates = asyncio.run(_bridge.list_resource_inventory(s))
+    assert resources == [
+        {"uri": "risk://dictionary", "name": "risk_dictionary", "mimeType": "application/json", "_meta": {"k": 1}}
+    ]
+    assert templates == [
+        {"uriTemplate": "dimension://by-unit-type/{unitType}", "name": "dims", "description": "By type"}
+    ]
+    json.dumps([resources, templates])  # JSON-safe as returned
+
+
+def test_inventory_follows_cursors():
+    s = _ListingSession(
+        resource_pages={
+            None: ([_res("demo://a")], "c1"),
+            "c1": ([_res("demo://b")], "c2"),
+            "c2": ([_res("demo://c")], None),
+        },
+        template_pages={
+            None: ([_tpl("demo://t/{x}")], "t1"),
+            "t1": ([_tpl("demo://u/{y}")], None),
+        },
+    )
+    resources, templates = asyncio.run(_bridge.list_resource_inventory(s))
+    assert [r["uri"] for r in resources] == ["demo://a", "demo://b", "demo://c"]
+    assert [t["uriTemplate"] for t in templates] == ["demo://t/{x}", "demo://u/{y}"]
+    assert s.requests == [
+        ("resources/list", None),
+        ("resources/list", "c1"),
+        ("resources/list", "c2"),
+        ("resources/templates/list", None),
+        ("resources/templates/list", "t1"),
+    ]
+
+
+def test_inventory_raises_on_a_repeated_cursor():
+    s = _ListingSession(
+        resource_pages={
+            None: ([_res("demo://a")], "c1"),
+            "c1": ([_res("demo://b")], "c2"),
+            "c2": ([_res("demo://c")], "c1"),
+        }
+    )
+    with pytest.raises(ValueError, match="repeated.*c1"):
+        asyncio.run(_bridge.list_resource_inventory(s))
+
+
+def test_inventory_stops_at_the_page_cap(monkeypatch):
+    monkeypatch.setattr(_bridge, "_MAX_LIST_PAGES", 3)
+    pages = {None: ([_res("demo://p0")], "c1")} | {f"c{i}": ([_res(f"demo://p{i}")], f"c{i + 1}") for i in range(1, 10)}
+    s = _ListingSession(resource_pages=pages)
+    with pytest.raises(ValueError, match="3 pages"):
+        asyncio.run(_bridge.list_resource_inventory(s))
+    assert len(s.requests) == 3
+
+
+def test_inventory_treats_templates_method_not_found_as_empty():
+    s = _ListingSession(
+        resource_pages={None: ([_res("demo://a")], None)},
+        templates_error=_mcp_error(mcp_types.METHOD_NOT_FOUND, "Method not found"),
+    )
+    resources, templates = asyncio.run(_bridge.list_resource_inventory(s))
+    assert [r["uri"] for r in resources] == ["demo://a"]
+    assert templates == []
+
+
+def test_inventory_propagates_other_templates_errors():
+    s = _ListingSession(templates_error=_mcp_error(mcp_types.INTERNAL_ERROR))
+    with pytest.raises(McpError) as exc_info:
+        asyncio.run(_bridge.list_resource_inventory(s))
+    assert exc_info.value.error.code == mcp_types.INTERNAL_ERROR
+
+
+def test_inventory_propagates_resources_method_not_found():
+    """Only the templates list is optional; a server advertising resources must list them."""
+    s = _ListingSession(resources_error=_mcp_error(mcp_types.METHOD_NOT_FOUND))
+    with pytest.raises(McpError):
+        asyncio.run(_bridge.list_resource_inventory(s))
+
+
+def test_inventory_normalizes_resource_uris():
+    """The function normalizes itself rather than trusting the listing's models to have done it."""
+    raw = "Dimension://by-unit-type/Delivery Unit"
+
+    class _RawResource:
+        uri = raw
+
+        def model_dump(self, **kwargs):
+            return {"uri": raw, "name": "dims"}
+
+    s = _ListingSession()
+
+    async def list_resources(*, params=None):
+        return SimpleNamespace(resources=[_RawResource()], nextCursor=None)
+
+    s.list_resources = list_resources
+    resources, _ = asyncio.run(_bridge.list_resource_inventory(s))
+    assert resources == [{"uri": "dimension://by-unit-type/Delivery%20Unit", "name": "dims"}]
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,240 @@
 # Changelog
 
-## [Unreleased] — 0.11.0
+## [Unreleased] — 0.12.0
+
+## [0.11.0] — 2026-11-03
+
+### Added
+
+- **Generated modules read MCP resources.** Servers put reference data their tools depend on
+  into resources — a dictionary a tool's description says to read first, a template such as
+  `dimension://by-unit-type/{unitType}` — and generated code could not reach any of it.
+  `codegen` now lists resources in the same session as tools and emits one `read_*` accessor
+  per static resource and resource template, after the tool wrappers. Names come from the
+  URI, not the server's non-unique `name`: `risk://dictionary` → `read_risk_dictionary`,
+  `dimension://by-unit-type/{unitType}` → `read_dimension_by_unit_type(caller, *, unitType:
+  str)`; a name taken by a tool gets a `_2` suffix. Templates expand at runtime (RFC 6570
+  levels 1–4, scalar values), and `?`/`&` variables are optional. Each docstring carries a
+  stable `Resource: <uri>` or `Resource template: <template>` line. Text contents decode as
+  tool text does (JSON, then a Python literal, then the string), a blob to `bytes`, several
+  contents to a list, and no contents raise `ValueError`. `--resources {all,templates,none}`
+  picks the scope; above 50 static resources `codegen` warns that the server may list its
+  data as resources.
+
+- **`McpResourceReader`**, a second Protocol in `mcpgen.seam` (exported from `mcpgen`):
+  `async def read_resource(server, uri) -> Any`. Accessors take it as their first argument.
+  `McpCaller` is untouched, so a custom caller keeps satisfying every module without
+  accessors. `McpBridgeCaller` implements both, one-shot or inside `connected()`, where a
+  resource read and a tool call share one session; a read error reaches the caller as a bare
+  `McpError`, not an exception group.
+
+- **`mcpgen list <server> --resources`** prints `{"resources": [...], "resourceTemplates":
+  [...]}`, trimmed to `uri`/`uriTemplate`, `name`, `title`, `description`, `mimeType`, and
+  `size`, so an icon's `data:` URI or vendor `_meta` cannot flood the output.
+
+- **`mcpgen read <server> <uri> --out FILE`**, the resource twin of `call`: one text content is
+  written verbatim, one blob as raw bytes, several contents as a JSON array. A template
+  target is expanded from `--args`. Errors exit `1` with a one-line message.
+
+- **`mcpgen probe <server> <target> --resource`** reads a resource through `read_resource`,
+  the path the accessors take, so the part records the shape they return. A template target
+  is keyed by the template string, with each `--args` supplying one read's variables; a
+  static URI is keyed by its normalized form and takes no `--args`. Entries carry `kind`, a
+  blob's shape is `"bytes"`, and `--save-raw` base64-encodes it. Resource shape entries
+  accept `unwrap`, `return_model`, `return_container`, `fields`, and `input_overrides`
+  (keyed by raw variable name), but no discriminators.
+
+- **`mcpgen check` detects resource drift.** Manifests gain optional `resources` and
+  `resource_templates` sections. An added or removed resource or template, or a `mimeType`
+  change, exits `1`; a `name` or `description` change is an advisory. `check --resources
+  {all,templates,none}` overrides the scope, which otherwise follows the manifest's
+  `resource_scope` — written by `codegen --resources templates` or `none` — or, without one,
+  the sections it tracks. `--update` writes the sections it listed. An explicit `--resources`
+  is recorded — `templates` or `none` writes `resource_scope` and drops the sections outside
+  it, `all` removes the key; without it a recorded scope and the stored sections are kept.
+
+- **Both skills handle resources.** `generate-mcp-wrappers` lists them in step 2a, selects
+  templates and API-like statics while logging data-like lists as skipped, probes with real
+  variable values, and hands the accessors to the runner. `generate-mcp-runner` finds
+  accessors by their `Resource:` docstring line, includes them by default with template
+  variables from `verify.json`, and places one before any tool whose description says to
+  read it first.
+
+- **`probe` and `call` time out a tool that never answers.** A tool that waits for a human,
+  such as Playwright's `browser_annotate`, hung `probe` forever. Both commands now bound each
+  tool call with `--timeout SECONDS` (default 60; `0` waits forever); on expiry they exit `1`
+  with `[probe] timeout: no answer within 60s (raise with --timeout)` (or `[call] timeout: …`)
+  and write no part file or `--out` file. `codegen --probe` takes the same flag. The bound is
+  the SDK's per-request read timeout, so the session still closes normally and a stdio
+  server's process tree is still terminated; the server is not told to cancel the call. It
+  does not cover connecting or the `initialize` handshake, nor a `probe --resource` read,
+  which notes on stderr that an explicit `--timeout` does not apply. `codegen --probe` also
+  reports a tool error in one line instead of a traceback. In code it is
+  `McpBridgeCaller(call_timeout=...)`; the default `None` leaves generated wrappers unbounded.
+  The `generate-mcp-wrappers` skill skips tools whose description says they wait for user
+  input, confirmation or a pick in the browser as **interactive**, logged under
+  `mutating-skipped`, and records a timed-out tool as unprobed with cause `timeout`;
+  `generate-mcp-runner` leaves interactive tools out of `run.py`.
+
+- **`McpBridgeCaller.call_tool_result(server, tool, arguments)`** returns the SDK's unparsed
+  `CallToolResult`, `isError` included, for code that must tell a tool's reported failure
+  from its answer; `call()` parses both alike. Session handling and `call_timeout` are
+  `call()`'s, but a call error in a one-shot session reaches the caller as a bare `McpError`,
+  not an exception group.
+
+### Changed
+
+- **Manifests gain resource sections on the next regenerate.** `codegen` defaults to
+  `--resources all`, so every manifest gains `resources` and `resource_templates` sections on
+  its next run. For a server with no resources, or without the resources capability, both are
+  written as `{}`: tracked and empty. Against a server with resources the module also gains
+  `read_*` accessors; for one without, the module is byte-identical. `format_version` stays
+  `1` and earlier mcpgen versions ignore the new keys, so a pinned CI job does not break.
+  `--resources none` keeps the module byte-identical; its manifest adds only
+  `"resource_scope": "none"`.
+
+- **`check` against a manifest with no resource section and no recorded scope** prints an
+  advisory ("live resources are not tracked by the stored manifest; re-run with `--update` to
+  track them, or with `--resources none --update` to stop listing them") and exits `0`. It
+  reads only the first page of each resource list for this, with a 10 s timeout, and a
+  failure there is an advisory too. Any other resource listing — a tracked manifest, a
+  recorded scope, an explicit `--resources`, or `--update` — is strict, and a failure exits
+  `2`. A manifest from `codegen --resources none` records the scope, so `check` lists no
+  resources for it and prints no advisory.
+
+- **Plain `mcpgen list` also asks for resources.** When the server declares the resources
+  capability, `list` reads the first page of each resource list in the same session, bounded
+  by a 10 s timeout, and prints a stderr hint such as `2 resource(s) and 1+ resource
+  template(s) available`. Its stdout is unchanged, and a resource failure becomes a stderr
+  note, never a failed `list`. An `McpError` from `tools/list` that arrives wrapped in an
+  exception group now exits `1` with a one-line message instead of a traceback.
+
+- **`codegen` reports an `McpError` as a one-line error and exits `1`** instead of a
+  traceback. A failed resource listing adds a hint to retry with `--resources none`. A
+  shapes entry that matches no listed resource or template, or has an unknown `kind`, warns
+  instead of being dropped silently.
+
+- **`merge` counts entries, not tools**, since shapes files now hold resource entries too
+  (`wrote … (N entry(ies))`). Carried-forward resource entries are checked against the
+  manifest's resource sections rather than its tools; where the section is untracked, merge
+  prints a count of unchecked entries instead of flagging each one as a retired tool.
+
+- **`probe` refuses to overwrite a part file that holds another key.** On a
+  case-insensitive filesystem `Search` and `search` (or `demo://x/Users` and
+  `demo://x/users`) share one part file, and the second probe used to drop the first
+  silently. It now exits `1` before any live call and says to merge first. Keys too long for
+  a filename are cut short and end in a sha256 suffix; tool part names are unchanged.
+
+- **A lone `const` parameter is typed as a `Literal`.** `{"type": "string", "const": "x"}`,
+  which rendered as `str`, and `{"const": "x"}`, which rendered as `Any`, both become
+  `Literal['x']` on the next regenerate, so a caller passing any other value now fails type
+  checking. A `null` or float `const` keeps the old type.
+
+- **The plugin's engine floor rises to `mcpgen >= 0.11.0`** in both skills' step 0. The skills
+  now instruct `list --resources` and `probe --resource`, which 0.10.0 does not have, and
+  generated runners call `McpBridgeCaller.read_resource`.
+
+- **`call` exits `1` on a result the tool flagged `isError`.** It still writes the error body
+  to `--out`, as evidence, then prints `[call] tool returned isError: <text>` (the first 300
+  characters of the error text, whitespace collapsed and credentials redacted) and exits `1`
+  where it exited `0`. A result with no content, or a body `call` cannot parse or serialise,
+  writes nothing. A script that read the `--out` file only after a zero exit now sees the
+  failure.
+
+- **`generate-mcp-wrappers` records why each tool went unprobed.** `session-overview.md` lists
+  them under `## unprobed` as tool, cause and detail, the cause one of `id-gated` (with the
+  blocking argument and the producer tool that would mint it), `entitlement-gated` (quoting
+  the server's class, such as `tool_error_class: entitlement_required`), `empty store`,
+  `tool error`, `timeout`, or the residue `inconclusive`; interactive and mutating skips stay
+  under `## mutating-skipped`. Tools that needed an id, a plan the account lacks, or data the
+  store did not hold were all logged alike as inconclusive.
+
+- **A deprecated tool's fixed notice counts as observed.** A tool that returns the same prose
+  whatever the args, such as a deprecation or "moved to …" notice, is a `NOT_JSON` observation
+  with `_observed_shape: "str"` and an `-> Any` wrapper, noted as deprecated in
+  `session-overview.md`, not an unprobed or inconclusive tool.
+
+- **Both skills resolve `mcpgen` to one absolute path.** Step 0 turns each candidate —
+  `mcpgen` on `PATH`, `uv run mcpgen`, `.venv/bin/mcpgen`, and the runner's handed-over value —
+  into the path of the executable it would run before checking the version, and later blocks
+  paste that path in for `<mcpgen>`. Agents that kept `uv run mcpgen` in a shell variable ran
+  every probe of a batch wrong under `zsh`, where an unquoted `$c` does not word-split.
+  `session-overview.md` now also records a failed batch or command, with its error, when a
+  retry succeeded.
+
+### Fixed
+
+- **A union-typed input param no longer crashes `list`.** A param declared
+  `"type": ["string", "null"]` — legal JSON Schema, emitted by real servers for a nullable
+  arg — raised `TypeError: unhashable type: 'list'` in discriminator detection, which
+  `mcpgen list` runs on every tool, so one such param broke listing for the whole server.
+  Such a param is now skipped and never becomes a discriminator candidate.
+
+- **`probe` no longer records a tool's error as its shape.** A tool reports its own failure
+  as a result flagged `isError` — Notion answers a tool its plan lacks with
+  `{"code": "validation_error", …, "additional_data": {"tool_error_class":
+  "entitlement_required"}}` — and `probe` parsed that body, recorded its keys as
+  `_observed_shape` and exited `0`, bait for a `TypedDict` of the error. `probe` and
+  `codegen --probe` now exit `1` with `[probe] tool returned isError: <text>` (`[codegen] …`),
+  the first 300 characters of the error text, whitespace collapsed and credentials redacted,
+  and write no part file, `--save-raw` file, module or manifest. A result with `isError`
+  false or absent is parsed as before. `McpBridgeCaller.call`, and so every generated
+  wrapper, still returns an `isError` result's content like any other. The
+  `generate-mcp-wrappers` skill records such a tool as unprobed, citing the printed text,
+  and keeps `return_model: null` shapes for error bodies a tool does not flag.
+
+- **`call` reports a tool error in one line.** A server-side `McpError`, or any failure that
+  escaped the session as an exception group, printed a group traceback. `call` now handles it
+  as `probe` does: `[call] error: <cause>` and exit `1`, auth failures through the usual
+  re-login hint, and still no `--out` file.
+
+- **A second probe no longer counts as evidence for `list[T]`.** Plugin 0.5.0's
+  `generate-mcp-wrappers` skill let a `fields` entry claim `list[str]` on the strength of the
+  saved raw payload *or* a second probe. `summarize_shape` samples only the first element of
+  every probe, so `['a', 7]` and `['b', {}]` both summarize as `['str', '...x2']` and two
+  probes can agree on an element type neither list has. The skill and `shape-spec.md` now
+  require the `--save-raw` payload, checked element by element; without it the field stays a
+  bare `list`.
+
+- **A renamed return model now reaches the wrapper that caused the rename.** When two shape
+  entries shared a `return_model` name with different `fields`, `codegen` emitted
+  `KnowledgeGraph_2` but still annotated and cast the second wrapper to `KnowledgeGraph`, so
+  the new class went unused and the wrapper promised the wrong keys. Tools, discriminated
+  variants and resource accessors now return the class emitted for them, and an entry whose
+  fields match an existing `_N` model reuses it instead of emitting another. The collision
+  warning names the tool, variant or URI involved. Resources made this easier to hit: a tool
+  and a resource serving the same entity often pick the same name.
+
+- **A closed `anyOf`/`oneOf` parameter is typed as a `Literal`, not `Any`.** Zod and pydantic
+  express a value set as a union of `const` branches, or as pydantic's
+  `Optional[Literal[...]]`: `anyOf: [{"type": "string", "enum": ["a", "b"]}, {"type":
+  "null"}]`. `codegen` punted every union to `Any`, so such a parameter rendered as `policy:
+  Any | None = None`. A union whose branches each carry a `const` or a non-empty `enum`
+  (whatever other keys sit beside it) or are `{"type": "null"}` now renders as
+  `Literal['a', 'b']`, plus `| None` when a branch allows null. A union with an open branch,
+  a float value, or any `allOf` stays `Any`.
+
+- **Generated modules import exactly the `typing` names they use.** The `Literal` import was
+  gated on a top-level `enum` or one inside `items`, so `list[list[Literal[...]]]` and a
+  `Literal` written into a tool's or resource template's `input_overrides` or a model's
+  `fields` referenced `Literal` without importing it, while a float-only `enum`, which renders
+  as `float`, imported it unused. A discriminator entry imported `Literal`, `TypedDict`,
+  `cast` and `overload` even when no `@overload` was emitted. `codegen` now reads the names
+  off the rendered code: `Literal`, `TypedDict`, `cast` and `overload` are imported only when
+  used as bare names, so a docstring, `typing.Literal[...]` or a tool parameter named `cast`
+  does not count. `Any` is always imported.
+
+- **A field seen only as null is typed `Any | None`, not `None`.** A single probe records a
+  null as `"NoneType"` in `_observed_shape`, and for a tool with an `unwrap` path the `fields`
+  are written by hand from it, so `"NoneType"`, `"None"` or `"null"` reached `codegen`, which
+  rendered `x: NoneType` (an undefined name) or `x: None` (a key that rejects every real
+  value). `codegen` now rewrites a `fields` value that admits only None (`None | None` and
+  `Optional[None]` too, and JSON null) to `Any | None` and lists it among the normalized type
+  strings on stderr; `T | None` is left alone. `NoneType` inside an annotation, as in
+  `list[NoneType]`, becomes `None`. A discriminator variant's `fields` and `return_model` are
+  now normalized too; they were skipped. So a variant model that differed from another model
+  only in these spellings now shares its name instead of being emitted again with a `_2`
+  suffix.
 
 ## [0.10.0] — 2026-09-09
 

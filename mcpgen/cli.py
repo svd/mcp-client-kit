@@ -12,17 +12,29 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import hashlib
 import json
 import os
+import re
 import shutil
 import sys
-from datetime import datetime
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote as _url_quote
 
+import anyio
+from mcp.shared.exceptions import McpError
+from mcp.types import CallToolResult, EmbeddedResource, ReadResourceResult, TextContent, TextResourceContents
+
 from . import _bridge, codegen, discovery
 from . import manifest as manifest_mod
+
+if sys.version_info < (3, 11):  # pragma: no cover - version-gated
+    from exceptiongroup import BaseExceptionGroup
 
 
 async def _list_tools(
@@ -36,7 +48,14 @@ async def _list_tools(
     cred_backend: str | None = None,
     creds_path: Path | None = None,
     env: dict[str, str] | None = None,
+    on_session: Callable[[Any], Awaitable[None]] | None = None,
 ) -> list[dict]:
+    """List the server's tools as plain dicts.
+
+    *on_session*, when given, is awaited with the initialized session after
+    ``tools/list``, before the session closes, so a caller can issue further
+    list requests over the same connection and OAuth handshake.
+    """
     async with _bridge.session(
         server,
         cmd=cmd,
@@ -49,6 +68,8 @@ async def _list_tools(
         env=env,
     ) as s:
         result = await s.list_tools()
+        if on_session is not None:
+            await on_session(s)
     tools = []
     for t in result.tools:
         raw_annotations = getattr(t, "annotations", None)
@@ -64,6 +85,278 @@ async def _list_tools(
     return tools
 
 
+PREVIEW_TIMEOUT = 10.0
+"""Seconds a non-strict ``_list_inventory`` waits for its resource requests.
+
+Bounds the ``resources/list`` / ``resources/templates/list`` round trips only:
+opening the session, ``tools/list`` and closing the session (on HTTP, a DELETE
+under httpx's own 30s timeout) are outside it.
+"""
+
+
+class ResourceListingFailed(Exception):
+    """A strict ``_list_inventory`` could not list resources.
+
+    Raised for an ``McpError`` / ``ValueError`` from the listing itself and for
+    a transport failure while it ran, such as an HTTP 502 on ``resources/list``
+    failing the transport's per-request task, which would otherwise escape as
+    an ExceptionGroup. The message reads ``could not list resources: <cause>``
+    with the cause already ``_bridge._describe``d; the original is chained as
+    ``__cause__``.
+    """
+
+
+@dataclass
+class Inventory:
+    """A server's tools plus, when collected, its resources and resource templates.
+
+    ``None`` means "not collected" (manifest: untracked, never compared); ``[]``
+    means collected and empty. The remaining fields are set only by a non-strict
+    ``_list_inventory``: ``*_truncated`` when the server offered pages beyond the
+    first, and ``resource_error`` when the resource listing failed or timed out.
+    """
+
+    tools: list[dict]
+    resources: list[dict] | None = None
+    templates: list[dict] | None = None
+    resources_truncated: bool = False
+    templates_truncated: bool = False
+    resource_error: BaseException | None = None
+
+
+def _leaves(exc: BaseException) -> list[BaseException]:
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for inner in exc.exceptions for leaf in _leaves(inner)]
+    return [exc]
+
+
+def _auth_leaf(exc: BaseException) -> BaseException | None:
+    """The first leaf of *exc* when every leaf is ``ReauthenticationRequired`` / ``LoginWontHelp``."""
+    leaves = _leaves(exc)
+    if all(isinstance(leaf, (_bridge.ReauthenticationRequired, _bridge.LoginWontHelp)) for leaf in leaves):
+        return leaves[0]
+    return None
+
+
+def _check_reportable(group: BaseExceptionGroup) -> None:
+    """Return when *group*, escaping a one-shot session, is an error to report; raise otherwise.
+
+    A session that fails while opening (a stdio server crashing on startup, a
+    failed HTTP ``initialize``) or in a transport task (``ReauthenticationRequired``
+    from a mid-request 401) surfaces as the transport's ExceptionGroup, never
+    as the bare error. An interrupt re-raises the group unchanged. An auth-only
+    group raises its leaf for ``main()``'s auth handler. A group of nothing but
+    ``McpError`` / ``ValueError`` returns: the caller prints
+    ``_bridge._describe(group)`` and exits 1. Anything else is a bug and
+    re-raises the group, to traceback.
+    """
+    if _bridge._carries_interrupt(group):
+        raise group
+    auth = _auth_leaf(group)
+    if auth is not None:
+        raise auth from group
+    if not all(isinstance(leaf, (McpError, ValueError)) for leaf in _leaves(group)):
+        raise group
+
+
+class ToolReportedError(Exception):
+    """A ``tools/call`` result flagged ``isError``: the tool ran and reported a failure.
+
+    The protocol carries a tool's own failure in the result rather than as a JSON-RPC
+    error, so ``McpBridgeCaller.call`` returns it like an answer. ``probe`` and
+    ``codegen --probe`` must not record its shape; ``call`` still writes it.
+    *result* is the unparsed result, which may have no content at all, and
+    ``excerpt`` its text for a one-line report (see ``_tool_error_excerpt``).
+    """
+
+    def __init__(self, result: CallToolResult) -> None:
+        self.result = result
+        self.excerpt = _tool_error_excerpt(result)
+        super().__init__(self.excerpt)
+
+
+TOOL_ERROR_EXCERPT = 300
+"""Characters of an ``isError`` result's text that ``probe``, ``codegen`` and ``call`` print."""
+
+
+def _tool_error_excerpt(result: CallToolResult) -> str:
+    """*result*'s text, redacted, whitespace collapsed and cut at ``TOOL_ERROR_EXCERPT`` characters.
+
+    The text is that of its text blocks and embedded text resources, joined. It is
+    server text bound for stderr, so it passes through ``_bridge._redact_secret_text``
+    like every other error line. Only a prefix four times the excerpt is read, so a
+    multi-megabyte body is never split whole. The redaction patterns accept a quoted
+    member cut off at the end of that prefix, except the Python-repr one when the cut
+    falls just after a backslash, so trailing backslashes are stripped first.
+    Collapsing keeps a pretty-printed JSON body on the marker line.
+    """
+    texts = []
+    for item in result.content:
+        if isinstance(item, TextContent):
+            texts.append(item.text)
+        elif isinstance(item, EmbeddedResource) and isinstance(item.resource, TextResourceContents):
+            texts.append(item.resource.text)
+    head = " ".join(texts)[: TOOL_ERROR_EXCERPT * 4].rstrip("\\")
+    text = " ".join(_bridge._redact_secret_text(head, pydantic_frames=False).split())
+    if not text:
+        return "(no text content)"
+    if len(text) > TOOL_ERROR_EXCERPT:
+        return text[:TOOL_ERROR_EXCERPT] + "…"
+    return text
+
+
+def _tool_payload(result: CallToolResult) -> Any:
+    """*result* parsed as ``McpBridgeCaller.call`` parses it; raises ``ToolReportedError`` when ``isError``."""
+    if result.isError:
+        raise ToolReportedError(result)
+    return _bridge._parse_tool_result(result)
+
+
+CALL_TIMEOUT = 60.0
+"""Default seconds ``probe``, ``call`` and ``codegen --probe`` wait for a tool's answer (``--timeout``).
+
+Bounds the ``tools/call`` round trip only (see ``McpBridgeCaller``): opening
+the session, its ``initialize`` handshake and closing it are outside it, as is
+a ``probe --resource`` read.
+"""
+
+_REQUEST_TIMEOUT = 408
+_REQUEST_TIMEOUT_PREFIX = "Timed out while waiting for response to "
+"""How the SDK's read-timeout ``McpError`` reads: this code and a message with this prefix.
+
+A server can send a JSON-RPC error with code 408 too, so the code alone would report a
+server's own error as our timeout. Both come from ``BaseSession.send_request`` in mcp 1.27.2
+and are not part of its API: re-check them when the SDK is upgraded.
+"""
+
+
+def _timed_out(exc: BaseException) -> bool:
+    """True when *exc*, or any leaf of it, is the SDK's read-timeout ``McpError``."""
+    return any(
+        isinstance(leaf, McpError)
+        and leaf.error.code == _REQUEST_TIMEOUT
+        and leaf.error.message.startswith(_REQUEST_TIMEOUT_PREFIX)
+        for leaf in _leaves(exc)
+    )
+
+
+def _call_timeout_of(ns: argparse.Namespace) -> float | None:
+    """The tool-call timeout *ns* asks for: ``CALL_TIMEOUT`` when unset, None for ``0``."""
+    seconds = getattr(ns, "timeout", None)
+    if seconds is None:
+        return CALL_TIMEOUT
+    return seconds or None
+
+
+def _report_call_failure(command: str, exc: BaseException, timeout: float | None) -> int:
+    """Print why a live call or read for *command* (``probe``, ``call``, ``codegen``) failed; return exit status 1.
+
+    *exc* is an ``McpError`` from the call or read itself, which
+    ``call_tool_result`` and ``read_resource`` re-raise bare, or the transport's
+    group escaping a session that failed while opening or closing. A group goes
+    through ``_check_reportable`` first, so interrupts, auth failures and bugs
+    raise instead of printing. *timeout* is the read timeout the call ran under
+    (None for none); when it expired the line names ``--timeout``, otherwise it
+    is ``_bridge._describe(exc)``.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        _check_reportable(exc)
+    if timeout is not None and _timed_out(exc):
+        print(f"[{command}] timeout: no answer within {timeout:g}s (raise with --timeout)", file=sys.stderr)
+    else:
+        print(f"[{command}] error: {_bridge._describe(exc)}", file=sys.stderr)
+    return 1
+
+
+async def _list_inventory(server: str, *, scope: str, strict: bool = True, **conn: Any) -> Inventory:
+    """List tools and, per *scope*, resources/templates over one session.
+
+    *scope* is ``all`` (resources and templates), ``templates`` (templates only:
+    no ``resources/list`` is sent and ``resources`` stays ``None``) or ``none``
+    (no resource requests).
+
+    Goes through the module-global ``_list_tools``, so a test that patches it
+    never runs the hook and gets ``resources=None, templates=None``.
+
+    Strict (the default) lists every page. Non-strict is for a hint and must
+    never cost the tools listing: it reads only the first page of each list and
+    gives up on the resource requests after ``PREVIEW_TIMEOUT`` seconds.
+
+    How a resource failure surfaces depends on where it happens:
+
+    - ``McpError`` / ``ValueError`` from the listing (an error response,
+      pydantic validation, a pagination fault) is caught inside the hook, so it
+      never reaches the transport's ExceptionGroup. Strict raises it as
+      ``ResourceListingFailed`` after the session closes; non-strict records it
+      on ``resource_error``.
+    - A transport failure: the hook is cancelled from outside (an HTTP 502 fails
+      the transport's per-request task, whose task group then cancels the
+      session body) or sees ``anyio.BrokenResourceError`` /
+      ``ClosedResourceError``. Strict raises ``ResourceListingFailed``;
+      non-strict records it and lists the tools again in a fresh session
+      without the hook.
+    - If every leaf of the failure is ``ReauthenticationRequired`` /
+      ``LoginWontHelp``, that leaf is raised in both modes, for ``main()``'s
+      auth handler.
+    - Anything else the hook raises is a bug and propagates, as do interrupts, a
+      failure before the hook ran (a tools failure), and a failure while
+      closing the session after the hook finished (which fails a tools-only
+      listing just the same; the resources are not reported as unlisted).
+    """
+    if scope not in manifest_mod.RESOURCE_SCOPES:
+        raise ValueError(f"unknown resource scope {scope!r}; expected one of {', '.join(manifest_mod.RESOURCE_SCOPES)}")
+    inv = Inventory(tools=[])
+    # How the hook ended: None (never ran), "finished", "raised", or "transport"
+    # (cancelled from outside, or a broken/closed stream inside).
+    hook_outcome: str | None = None
+
+    async def _collect(s: Any) -> None:
+        nonlocal hook_outcome
+        hook_outcome = "raised"
+        statics = scope == "all"
+        try:
+            if strict:
+                resources, templates = await _bridge.list_resource_inventory(s, statics=statics)
+            else:
+                with anyio.move_on_after(PREVIEW_TIMEOUT) as deadline:
+                    preview = await _bridge.preview_resource_inventory(s, statics=statics)
+                if deadline.cancelled_caught:
+                    inv.resource_error = TimeoutError(f"no answer within {PREVIEW_TIMEOUT:g}s")
+                    hook_outcome = "finished"
+                    return
+                resources, inv.resources_truncated, templates, inv.templates_truncated = preview
+        except (McpError, ValueError) as exc:
+            inv.resource_error = exc
+            hook_outcome = "finished"
+            return
+        except (anyio.BrokenResourceError, anyio.ClosedResourceError, anyio.get_cancelled_exc_class()):
+            # Our own deadline is absorbed by move_on_after above, so a
+            # cancellation reaching here was requested from outside the hook.
+            hook_outcome = "transport"
+            raise
+        inv.resources = resources if statics else None
+        inv.templates = templates
+        hook_outcome = "finished"
+
+    try:
+        inv.tools = await _list_tools(server, on_session=None if scope == "none" else _collect, **conn)
+    except BaseException as exc:
+        if hook_outcome is None or _bridge._carries_interrupt(exc):
+            raise
+        auth = _auth_leaf(exc)
+        if auth is not None:
+            raise auth from exc
+        if hook_outcome != "transport":
+            raise
+        if strict:
+            raise ResourceListingFailed(f"could not list resources: {_bridge._describe(exc)}") from exc
+        inv = Inventory(tools=await _list_tools(server, on_session=None, **conn), resource_error=exc)
+    if strict and inv.resource_error is not None:
+        err = inv.resource_error
+        raise ResourceListingFailed(f"could not list resources: {_bridge._describe(err)}") from err
+    return inv
+
+
 async def _probe(
     server: str,
     tool: str,
@@ -77,11 +370,49 @@ async def _probe(
     cred_backend: str | None = None,
     creds_path: Path | None = None,
     env: dict[str, str] | None = None,
+    call_timeout: float | None = None,
 ) -> tuple[Any, int, Any]:
     """Return `(observed_shape, observed_byte_size, raw_payload)` for one live probe call.
 
     The raw payload is kept so `probe --save-raw` can persist it without a
     second live call against a rate-limited server (see cli `_cmd_probe`).
+    *call_timeout* is ``McpBridgeCaller``'s. A result flagged ``isError`` has no
+    shape to observe and raises ``ToolReportedError``.
+    """
+    caller = _bridge.McpBridgeCaller(
+        cmd=cmd,
+        url=url,
+        bearer=bearer,
+        client_name=client_name,
+        config_path=config_path,
+        cred_backend=cred_backend,
+        creds_path=creds_path,
+        env=env,
+        call_timeout=call_timeout,
+    )
+    raw = _tool_payload(await caller.call_tool_result(server, tool, args))
+    size = len(json.dumps(raw, default=str, ensure_ascii=False).encode("utf-8"))
+    return codegen.summarize_shape(raw), size, raw
+
+
+async def _probe_resource(
+    server: str,
+    uri: str,
+    *,
+    cmd: str | None = None,
+    url: str | None = None,
+    bearer: str | None = None,
+    client_name: str | None = None,
+    config_path: str | None = None,
+    cred_backend: str | None = None,
+    creds_path: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[Any, int, Any]:
+    """`_probe` for a resource: `(observed_shape, observed_byte_size, raw_payload)` of one read.
+
+    Reads through ``read_resource``, the path generated accessors take, so the
+    shape is of the parsed value they return. A blob arrives as ``bytes``, which
+    ``summarize_shape`` records as ``"bytes"`` and whose size is its length.
     """
     caller = _bridge.McpBridgeCaller(
         cmd=cmd,
@@ -93,9 +424,19 @@ async def _probe(
         creds_path=creds_path,
         env=env,
     )
-    raw = await caller.call(server, tool, args)
-    size = len(json.dumps(raw, default=str, ensure_ascii=False).encode("utf-8"))
+    raw = await caller.read_resource(server, uri)
+    if isinstance(raw, bytes):
+        size = len(raw)
+    else:
+        size = len(json.dumps(raw, default=_raw_default, ensure_ascii=False).encode("utf-8"))
     return codegen.summarize_shape(raw), size, raw
+
+
+def _raw_default(obj: Any) -> Any:
+    """``json.dumps`` fallback for raw payloads: base64 for bytes, ``str`` for anything else."""
+    if isinstance(obj, bytes):
+        return base64.b64encode(obj).decode("ascii")
+    return str(obj)
 
 
 async def _call(
@@ -111,7 +452,37 @@ async def _call(
     cred_backend: str | None = None,
     creds_path: Path | None = None,
     env: dict[str, str] | None = None,
+    call_timeout: float | None = None,
 ) -> Any:
+    """The parsed payload of one live tool call; raises ``ToolReportedError`` when it is flagged ``isError``."""
+    caller = _bridge.McpBridgeCaller(
+        cmd=cmd,
+        url=url,
+        bearer=bearer,
+        client_name=client_name,
+        config_path=config_path,
+        cred_backend=cred_backend,
+        creds_path=creds_path,
+        env=env,
+        call_timeout=call_timeout,
+    )
+    return _tool_payload(await caller.call_tool_result(server, tool, args))
+
+
+async def _read_resource(
+    server: str,
+    uri: str,
+    *,
+    cmd: str | None = None,
+    url: str | None = None,
+    bearer: str | None = None,
+    client_name: str | None = None,
+    config_path: str | None = None,
+    cred_backend: str | None = None,
+    creds_path: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> ReadResourceResult:
+    """Read *uri* and return the unparsed result, for `read`'s per-content output."""
     caller = _bridge.McpBridgeCaller(
         cmd=cmd,
         url=url,
@@ -122,7 +493,61 @@ async def _call(
         creds_path=creds_path,
         env=env,
     )
-    return await caller.call(server, tool, args)
+    return await caller.read_resource_result(server, uri)
+
+
+def _json_object_arg(raw: str) -> dict:
+    """Parse one ``--args`` value, which must be a JSON object; raises ``ValueError``."""
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--args must be valid JSON ({exc})") from None
+    if not isinstance(value, dict):
+        raise ValueError(f"--args must be a JSON object, got {type(value).__name__}: {raw}")
+    return value
+
+
+def _static_args_error(target: str) -> ValueError:
+    """The error for --args given with *target*, a static resource URI."""
+    return ValueError(f"--args applies to a URI template only; {target!r} has no {{variable}}")
+
+
+def _resource_uri(target: str, values: dict | None) -> str:
+    """The normalized URI that `read` / `probe --resource` reads for *target*.
+
+    A target containing ``{`` is a URI template, expanded with *values* keyed by
+    raw variable name: every required variable must be given, no unknown one may
+    be, and values must be scalars. A static URI takes no values: *values* is
+    ``None`` unless ``--args`` was passed, and passing it is an error. Raises
+    ``ValueError`` (``codegen.UriTemplateError`` for a malformed template).
+    """
+    if "{" not in target:
+        if values is not None:
+            raise _static_args_error(target)
+        return _normalized_uri(target)
+    variables = codegen.uri_template_variables(target)
+    values = values or {}
+    names = [name for name, _required in variables]
+    unknown = sorted(set(values) - set(names))
+    if unknown:
+        raise ValueError(
+            f"unknown variable(s) {', '.join(unknown)} for {target!r}; the template has: {', '.join(names)}"
+        )
+    missing = [name for name, required in variables if required and values.get(name) is None]
+    if missing:
+        raise ValueError(f"missing required variable(s) {', '.join(missing)} for {target!r}; pass them in --args")
+    nested = sorted(name for name, value in values.items() if isinstance(value, (dict, list)))
+    if nested:
+        raise ValueError(f"variable(s) {', '.join(nested)} must be a string, number, boolean or null")
+    return _normalized_uri(codegen.expand_uri_template(target, values))
+
+
+def _normalized_uri(uri: str) -> str:
+    try:
+        return _bridge.normalize_resource_uri(uri)
+    except ValueError:
+        # pydantic's multi-line ValidationError text adds nothing for a CLI user.
+        raise ValueError(f"not a valid resource URI: {uri!r}") from None
 
 
 def _server_stem(server: str) -> str:
@@ -167,7 +592,17 @@ def _parse_env(ns: argparse.Namespace) -> dict[str, str] | None:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write *text* to *path* atomically via a pid-unique temp file + os.replace.
+    """Write *text* to *path* atomically; see ``_atomic_write``."""
+    _atomic_write(path, lambda tmp: tmp.write_text(text))
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write *data* to *path* atomically and byte for byte; see ``_atomic_write``."""
+    _atomic_write(path, lambda tmp: tmp.write_bytes(data))
+
+
+def _atomic_write(path: Path, write: Callable[[Path], object]) -> None:
+    """Stage *path* through *write* into a pid-unique temp file, then os.replace it.
 
     Safe on all OS (Windows, macOS, Linux) — os.replace is atomic when src and
     dst are on the same filesystem, which is always true here.  Using the pid in
@@ -178,7 +613,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
     try:
-        tmp.write_text(text)
+        write(tmp)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -194,6 +629,26 @@ def _parts_dir(target: Path) -> Path:
     e.g. acme.shapes.json  →  acme.shapes.json.parts/
     """
     return target.with_name(target.name + ".parts")
+
+
+_PART_NAME_MAX = 200
+"""Longest part file stem; leaves room for ``.json`` and ``_atomic_write``'s temp suffix under 255 bytes."""
+
+
+def _part_filename(key: str) -> str:
+    """The ``.parts/`` file name for the shapes entry *key*: a tool name, resource URI or template.
+
+    The key is URL-quoted, so the ``:`` and ``/`` of a URI stay inside the
+    directory. A quoted key longer than ``_PART_NAME_MAX`` (a long URI template)
+    is cut short and ends in the sha256 of the whole key, which keeps two long
+    keys with a common prefix apart. MCP tool names are far shorter, so a tool's
+    part name is its plain quoted name.
+    """
+    name = _url_quote(key, safe="")
+    if len(name) > _PART_NAME_MAX:
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        name = name[: _PART_NAME_MAX - len(digest) - 1] + "-" + digest
+    return name + ".json"
 
 
 def _merge_manifest_path(ns: argparse.Namespace, target: Path) -> Path | None:
@@ -223,35 +678,121 @@ def _merge_manifest_path(ns: argparse.Namespace, target: Path) -> Path | None:
     return candidates[0] if doc.get("server") == ns.server else None
 
 
+# shapes.json `kind` → the manifest section that lists entries of that kind.
+_MANIFEST_SECTION_FOR_KIND = {kind: section for section, kind in manifest_mod._RESOURCE_SECTIONS}
+
+
+def _stale_entries(carried: list[str], merged: dict, manifest_doc: Any) -> tuple[list[str], list[str]] | None:
+    """Split *carried* shapes keys into `(stale, unchecked)` against *manifest_doc*.
+
+    Returns None when the manifest has no `tools` dict.  A key naming a
+    manifest tool is a tool entry whatever it looks like: MCP tool names may
+    contain `:`.  Otherwise an entry whose `kind` is `resource` or
+    `resource_template` is looked up in that kind's section, and an untagged
+    key containing `:` in both sections, since codegen applies an untagged
+    entry to either kind.  Every other key is a tool entry and is stale when
+    absent from `tools`.
+
+    A resource entry is stale only when every section it could live in is
+    present in the manifest and none lists it.  When one of those sections is
+    missing, resources were not collected, so the entry is unchecked rather
+    than stale.
+
+    Known gap: a retired tool whose name contains `:` reads as an untagged
+    resource entry, so while the resource sections are untracked it is
+    reported as unchecked, not stale.  Probe always sets `kind`, so untagged
+    `:` keys come only from hand edits or tools with such names.
+    """
+    if not isinstance(manifest_doc, dict) or not isinstance(manifest_doc.get("tools"), dict):
+        return None
+    tools = manifest_doc["tools"]
+    stale: list[str] = []
+    unchecked: list[str] = []
+    for key in carried:
+        if key in tools:
+            continue
+        entry = merged.get(key)
+        kind = entry.get("kind") if isinstance(entry, dict) else None
+        if kind in _MANIFEST_SECTION_FOR_KIND:
+            names = [_MANIFEST_SECTION_FOR_KIND[kind]]
+        elif ":" in key:
+            names = list(_MANIFEST_SECTION_FOR_KIND.values())
+        else:
+            stale.append(key)
+            continue
+        sections = [manifest_doc.get(name) for name in names]
+        if any(isinstance(s, dict) and key in s for s in sections):
+            continue
+        if all(isinstance(s, dict) for s in sections):
+            stale.append(key)
+        else:
+            unchecked.append(key)
+    return stale, unchecked
+
+
+_OPTIONAL_RE = re.compile(r"Optional\[(.*)\]")
+
+
+def _is_null_only(annotation: str) -> bool:
+    """True when *annotation* admits nothing but None: ``None``, ``None | None``, ``Optional[None]``."""
+    m = _OPTIONAL_RE.fullmatch(annotation.strip())
+    inner = m.group(1) if m else annotation
+    return all(member.strip() == "None" for member in inner.split("|"))
+
+
 def _normalize_shapes(shapes: dict) -> list[str]:
     """Normalize type-annotation strings in *shapes* in-place.
 
     Rewrites JSON/TS-cased tokens (``any``→``Any``, ``null``→``None``, etc.)
-    found in ``fields``, ``input_overrides``, and ``return_model`` values.
-    Returns a list of change descriptions suitable for a stderr report.
+    found in an entry's ``fields``, ``input_overrides``, and ``return_model``
+    values, and in each discriminator variant's ``fields`` and ``return_model``
+    (codegen reads ``input_overrides`` from the entry only). A ``fields`` value
+    that admits only None (``None``, ``null``, ``NoneType | None``,
+    ``Optional[None]``, or JSON null) becomes ``Any | None``: it records a field
+    seen only as null, and a TypedDict field annotated ``None`` would reject
+    every real value. A ``fields``, ``input_overrides`` or ``variants`` value
+    that is not an object is skipped, left for codegen to use or reject.
+    ``_observed_shape`` is left as recorded. Returns a list of change
+    descriptions suitable for a stderr report.
     """
     changes: list[str] = []
-    for spec in shapes.values():
-        if not isinstance(spec, dict):
-            continue
-        for fname, ftype in list((spec.get("fields") or {}).items()):
-            if isinstance(ftype, str):
-                new = codegen.normalize_annotation(ftype)
-                if new != ftype:
-                    spec["fields"][fname] = new
-                    changes.append(f"'{ftype}'→'{new}'")
-        for pname, ptype in list((spec.get("input_overrides") or {}).items()):
-            if isinstance(ptype, str):
-                new = codegen.normalize_annotation(ptype)
-                if new != ptype:
-                    spec["input_overrides"][pname] = new
-                    changes.append(f"'{ptype}'→'{new}'")
+
+    def _entry(spec: dict, *, overrides: bool) -> None:
+        fields = spec.get("fields")
+        if isinstance(fields, dict):
+            for fname, ftype in list(fields.items()):
+                if ftype is None or isinstance(ftype, str):
+                    new = "None" if ftype is None else codegen.normalize_annotation(ftype)
+                    if _is_null_only(new):
+                        new = "Any | None"
+                    if new != ftype:
+                        fields[fname] = new
+                        shown = "null" if ftype is None else f"'{ftype}'"
+                        changes.append(f"{shown}→'{new}'")
+        input_overrides = spec.get("input_overrides")
+        if overrides and isinstance(input_overrides, dict):
+            for pname, ptype in list(input_overrides.items()):
+                if isinstance(ptype, str):
+                    new = codegen.normalize_annotation(ptype)
+                    if new != ptype:
+                        input_overrides[pname] = new
+                        changes.append(f"'{ptype}'→'{new}'")
         rm = spec.get("return_model")
         if isinstance(rm, str):
             new = codegen.normalize_annotation(rm)
             if new != rm:
                 spec["return_model"] = new
                 changes.append(f"'{rm}'→'{new}'")
+
+    for spec in shapes.values():
+        if not isinstance(spec, dict):
+            continue
+        _entry(spec, overrides=True)
+        variants = spec.get("variants")
+        if isinstance(variants, dict):
+            for variant in variants.values():
+                if isinstance(variant, dict):
+                    _entry(variant, overrides=False)
     return changes
 
 
@@ -279,7 +820,7 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
                     shapes = codegen.merge_skeletons(skeletons)
                     changes = _normalize_shapes(shapes)
                     print(
-                        f"[codegen] shapes: {parts_d}/ ({len(shapes)} tool(s), "
+                        f"[codegen] shapes: {parts_d}/ ({len(shapes)} entry(ies), "
                         "in-memory merge — run `mcpgen merge` to persist)",
                         file=sys.stderr,
                     )
@@ -293,7 +834,7 @@ def _load_shapes(ns: argparse.Namespace) -> dict | None:
         return None
     shapes = json.loads(path.read_text())
     changes = _normalize_shapes(shapes)
-    print(f"[codegen] shapes: {path} ({len(shapes)} tool(s))", file=sys.stderr)
+    print(f"[codegen] shapes: {path} ({len(shapes)} entry(ies))", file=sys.stderr)
     if changes:
         print(
             f"[codegen] shapes: normalized {len(changes)} type string(s): " + ", ".join(changes),
@@ -321,6 +862,11 @@ def _manifest_path(ns: argparse.Namespace) -> Path | None:
     return out.with_name(out.stem + ".mcpgen.json")
 
 
+# Above this many static resources, `codegen` suggests a narrower --resources
+# scope: a server that lists its data as resources gets one accessor per item.
+_STATIC_RESOURCE_WARN = 50
+
+
 def _cmd_codegen(ns: argparse.Namespace) -> int:
     cmd = getattr(ns, "stdio", None)
     conn = dict(
@@ -332,12 +878,39 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
         creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
+    scope = getattr(ns, "resource_scope", "all")
     try:
-        tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
+        inv = asyncio.run(_list_inventory(ns.server, scope=scope, cmd=cmd, **conn))
+    except ResourceListingFailed as exc:
+        print(f"[codegen] error: {exc}", file=sys.stderr)
+        print(
+            "[codegen] hint: retry with `--resources none` to generate the tool wrappers without resource accessors",
+            file=sys.stderr,
+        )
+        return 1
     except (FileNotFoundError, ValueError) as exc:
         print(f"[codegen] error: {exc}", file=sys.stderr)
         return 1
+    except McpError as exc:
+        print(f"[codegen] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+    except BaseExceptionGroup as exc:
+        _check_reportable(exc)
+        print(f"[codegen] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+    tools = inv.tools
     print(f"[codegen] {ns.server}: {len(tools)} tools", file=sys.stderr)
+    if inv.resources:
+        print(f"[codegen] {ns.server}: {len(inv.resources)} resource(s)", file=sys.stderr)
+        if len(inv.resources) > _STATIC_RESOURCE_WARN:
+            print(
+                f"[codegen] ⚠  {len(inv.resources)} static resources listed, one accessor each; if the server "
+                "lists its data as resources, regenerate with `--resources templates` (templates only) "
+                "or `--resources none`",
+                file=sys.stderr,
+            )
+    if inv.templates:
+        print(f"[codegen] {ns.server}: {len(inv.templates)} resource template(s)", file=sys.stderr)
 
     shapes = _load_shapes(ns)
 
@@ -345,16 +918,28 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
     if ns.probe:
         args = json.loads(ns.probe_args) if ns.probe_args else {}
         print(f"[codegen] probing {ns.probe}({args}) …", file=sys.stderr)
+        timeout = _call_timeout_of(ns)
         try:
-            shape, _size, _raw = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, **conn))
+            shape, _size, _raw = asyncio.run(_probe(ns.server, ns.probe, args, cmd=cmd, call_timeout=timeout, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[codegen] error: {exc}", file=sys.stderr)
             return 1
+        except ToolReportedError as exc:
+            print(f"[codegen] tool returned isError: {exc.excerpt}", file=sys.stderr)
+            return 1
+        except (McpError, BaseExceptionGroup) as exc:
+            return _report_call_failure("codegen", exc, timeout)
         shape_json = json.dumps(shape, indent=2)
         probe_note = f"\nObserved response shape of {ns.probe!r} (keys/types/nesting only):\n" + shape_json
 
     source = codegen.render_module(
-        ns.server, tools, shapes=shapes, probe_note=probe_note, embed_schema=getattr(ns, "embed_schema", False)
+        ns.server,
+        tools,
+        shapes=shapes,
+        probe_note=probe_note,
+        embed_schema=getattr(ns, "embed_schema", False),
+        resources=inv.resources,
+        resource_templates=inv.templates,
     )
     if ns.out:
         Path(ns.out).write_text(source)
@@ -364,9 +949,68 @@ def _cmd_codegen(ns: argparse.Namespace) -> int:
 
     target = _manifest_path(ns)
     if target is not None:
-        _atomic_write_text(target, manifest_mod.dumps(manifest_mod.build(ns.server, tools)))
-        print(f"[codegen] wrote {target} ({len(tools)} tool(s))", file=sys.stderr)
+        _atomic_write_text(
+            target,
+            manifest_mod.dumps(
+                manifest_mod.build(ns.server, tools, inv.resources, inv.templates, resource_scope=scope)
+            ),
+        )
+        counts = [f"{len(tools)} tool(s)"]
+        if inv.resources:
+            counts.append(f"{len(inv.resources)} resource(s)")
+        if inv.templates:
+            counts.append(f"{len(inv.templates)} resource template(s)")
+        print(f"[codegen] wrote {target} ({', '.join(counts)})", file=sys.stderr)
     return 0
+
+
+def _resource_probe_plan(target: str, raw_args: list[str]) -> tuple[str, str, list[dict], list[str]]:
+    """Resolve a `probe --resource` target into `(key, kind, args_list, uris)`.
+
+    A template (a target containing ``{``) is keyed by the template string as
+    given, and each --args value is one probe's variables, recorded as its
+    probed_args. A static URI is keyed by its normalized form and takes no
+    --args, so it is probed once with ``{}``. Every URI is resolved before the
+    first live read. Raises ``ValueError``.
+    """
+    if "{" in target:
+        args_list = [_json_object_arg(a) for a in raw_args] or [{}]
+        return target, "resource_template", args_list, [_resource_uri(target, v) for v in args_list]
+    if raw_args:
+        raise _static_args_error(target)
+    uri = _resource_uri(target, None)
+    return uri, "resource", [{}], [uri]
+
+
+def _refuse_part_collision(part: Path, key: str, server: str) -> bool:
+    """Print the refusal and return True when *part* holds another key (see ``_part_collision``)."""
+    other = _part_collision(part, key)
+    if other is None:
+        return False
+    print(
+        f"[probe] error: refusing to overwrite {part}: it holds {other!r}, whose part file name "
+        f"matches {key!r} on this case-insensitive filesystem. Run `mcpgen merge {server}` to "
+        f"consolidate it first, or delete the part if {other!r} is gone.",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _part_collision(part: Path, key: str) -> str | None:
+    """The key already stored in *part* when it is not *key*, else ``None``.
+
+    Part names are case-preserving, but a case-insensitive filesystem (macOS,
+    Windows defaults) maps ``demo://x/Users`` and ``demo://x/users`` to one
+    file, and writing the second would silently drop the first. A missing or
+    unreadable part holds nothing worth keeping.
+    """
+    try:
+        doc = json.loads(part.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or not doc or key in doc:
+        return None
+    return next(iter(doc))
 
 
 def _cmd_probe(ns: argparse.Namespace) -> int:
@@ -377,12 +1021,26 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     sequence and the observed shapes are deep-merged so the skeleton reflects
     the union of all responses (nullable fields, key-presence variance, etc.).
 
+    With --resource the target is a resource URI or URI template, read through
+    ``read_resource`` instead of called; see ``_resource_probe_plan`` for the
+    entry key and what --args means there. Resource entries carry ``kind`` and
+    get no discriminator advisory.
+
     The deterministic part: top-level scalars → fields; unwrap, types, and
     deep-nest decisions are the skill's judgment (see SKILL.md step 4).
     """
     cmd = getattr(ns, "stdio", None)
     raw_args_list: list[str] = ns.args or []
-    args_list: list[dict] = [json.loads(a) for a in raw_args_list] if raw_args_list else [{}]
+    kind: str | None = None
+    if getattr(ns, "resource", False):
+        try:
+            key, kind, args_list, uris = _resource_probe_plan(ns.tool, raw_args_list)
+        except ValueError as exc:
+            print(f"[probe] error: {exc}", file=sys.stderr)
+            return 1
+    else:
+        key = ns.tool
+        args_list = [json.loads(a) for a in raw_args_list] if raw_args_list else [{}]
     n = len(args_list)
 
     save_raw = getattr(ns, "save_raw", None)
@@ -397,7 +1055,19 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
             )
             return 1
 
-    print(f"[probe] {ns.server}.{ns.tool} ({n} probe(s)) …", file=sys.stderr)
+    part: Path | None = None
+    if ns.emit_shape:
+        part = _parts_dir(Path(ns.emit_shape)) / _part_filename(key)
+        # Checked before any live call, so a refused write costs no probe, and
+        # again before the write for a concurrent probe of a case-twin key.
+        if _refuse_part_collision(part, key, ns.server):
+            return 1
+
+    label = f"{ns.server}.{ns.tool}" if kind is None else f"{ns.server} {key}"
+    print(f"[probe] {label} ({n} probe(s)) …", file=sys.stderr)
+    timeout = _call_timeout_of(ns)
+    if kind is not None and getattr(ns, "timeout", None) is not None:
+        print("[probe] note: --timeout does not apply to resource reads, which are not bounded", file=sys.stderr)
 
     conn = dict(
         url=ns.url,
@@ -412,26 +1082,36 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
     sizes = []
     raws: list[Any] = []
     for i, args in enumerate(args_list):
-        print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
+        if kind is None:
+            print(f"[probe]   [{i + 1}/{n}] args={args}", file=sys.stderr)
+        else:
+            print(f"[probe]   [{i + 1}/{n}] {uris[i]} args={args}", file=sys.stderr)
         # one session per probe (prototype); pooling is out of scope
         try:
-            shape, size, raw = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, **conn))
+            if kind is None:
+                shape, size, raw = asyncio.run(_probe(ns.server, ns.tool, args, cmd=cmd, call_timeout=timeout, **conn))
+            else:
+                shape, size, raw = asyncio.run(_probe_resource(ns.server, uris[i], cmd=cmd, **conn))
         except (FileNotFoundError, ValueError) as exc:
             print(f"[probe] error: {exc}", file=sys.stderr)
             return 1
+        except ToolReportedError as exc:
+            print(f"[probe] tool returned isError: {exc.excerpt}", file=sys.stderr)
+            return 1
+        except (McpError, BaseExceptionGroup) as exc:
+            return _report_call_failure("probe", exc, timeout if kind is None else None)
         shapes.append(shape)
         sizes.append(size)
         raws.append(raw)
 
-    skeleton = codegen.probe_skeleton(ns.tool, args_list, shapes, observed_bytes=sizes)
+    skeleton = codegen.probe_skeleton(key, args_list, shapes, observed_bytes=sizes, kind=kind)
     out = json.dumps(skeleton, indent=2)
-    if ns.emit_shape:
-        target = Path(ns.emit_shape)
-        parts_d = _parts_dir(target)
-        part = parts_d / (_url_quote(ns.tool, safe="") + ".json")
+    if part is not None:
+        if _refuse_part_collision(part, key, ns.server):
+            return 1
         _atomic_write_text(part, out + "\n")
         print(f"[probe] wrote part {part}", file=sys.stderr)
-        print(f"[probe] run `mcpgen merge {ns.server}` to consolidate into {target}", file=sys.stderr)
+        print(f"[probe] run `mcpgen merge {ns.server}` to consolidate into {ns.emit_shape}", file=sys.stderr)
     else:
         sys.stdout.write(out + "\n")
 
@@ -439,10 +1119,10 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
         if len(raws) == 1 and isinstance(raws[0], str):
             text = raws[0]
         elif len(raws) == 1:
-            text = json.dumps(raws[0], indent=2, default=str)
+            text = json.dumps(raws[0], indent=2, default=_raw_default)
         else:
             text = json.dumps(
-                [{"args": a, "raw": r} for a, r in zip(args_list, raws, strict=True)], indent=2, default=str
+                [{"args": a, "raw": r} for a, r in zip(args_list, raws, strict=True)], indent=2, default=_raw_default
             )
         raw_target = Path(save_raw)
         _atomic_write_text(raw_target, text + "\n")
@@ -453,6 +1133,10 @@ def _cmd_probe(ns: argparse.Namespace) -> int:
             "into a committed file.",
             file=sys.stderr,
         )
+
+    if kind is not None:
+        # A resource's variables pick which resource is read, not a response variant.
+        return 0
 
     try:
         _DISCRIMINATOR_KEYS = {"entitytype", "type", "kind", "category", "entity_type", "objecttype", "resourcetype"}
@@ -484,7 +1168,8 @@ def _cmd_call(ns: argparse.Namespace) -> int:
     Use it for bootstrapping (e.g. call a no-arg whoami first to get real ids)
     or inspecting a tool's actual output.  The --out file is required to avoid
     flooding model context with large payloads; use a *.probe-raw.json name
-    so it stays git-ignored.
+    so it stays git-ignored. A result flagged ``isError`` exits 1; see
+    ``_call_tool_error`` for what it writes.
     """
     cmd = getattr(ns, "stdio", None)
     try:
@@ -502,21 +1187,112 @@ def _cmd_call(ns: argparse.Namespace) -> int:
         env=_parse_env(ns),
     )
 
+    timeout = _call_timeout_of(ns)
     print(f"[call] {ns.server}.{ns.tool} (live) …", file=sys.stderr)
     try:
-        raw = asyncio.run(_call(ns.server, ns.tool, args, cmd=cmd, **conn))
+        raw = asyncio.run(_call(ns.server, ns.tool, args, cmd=cmd, call_timeout=timeout, **conn))
+    except ToolReportedError as exc:
+        return _call_tool_error(exc, Path(ns.out))
     except (FileNotFoundError, ValueError) as exc:
         print(f"[call] error: {exc}", file=sys.stderr)
         return 1
+    except (McpError, BaseExceptionGroup) as exc:
+        return _report_call_failure("call", exc, timeout)
 
-    text = raw if isinstance(raw, str) else json.dumps(raw, indent=2)
-    out = Path(ns.out)
+    _write_call_payload(Path(ns.out), _call_payload_text(raw))
+    return 0
+
+
+def _call_payload_text(raw: Any) -> str:
+    """What `call --out` writes for the parsed payload *raw*, before the final newline."""
+    return raw if isinstance(raw, str) else json.dumps(raw, indent=2)
+
+
+def _write_call_payload(out: Path, text: str) -> None:
     _atomic_write_text(out, text + "\n")
-
     kb = len(text.encode()) / 1024
     print(f"[call] wrote raw payload ({kb:.1f} KB) to {out}", file=sys.stderr)
     print(
         "[call] ⚠  raw payload may contain real ids/PII — use a *.probe-raw.json name (git-ignored).",
+        file=sys.stderr,
+    )
+
+
+def _call_tool_error(exc: ToolReportedError, out: Path) -> int:
+    """`call`'s handling of a result flagged ``isError``: write its body to *out*, report, return 1.
+
+    The body is written as a successful payload would be, as evidence. A body that
+    cannot be written that way — no content, text the parse chain rejects (an
+    unhashable ``literal_eval`` key, nesting past the recursion limit) or a parsed
+    value ``json.dumps`` cannot serialise — writes nothing and notes the exception
+    type; the marker still prints.
+    """
+    try:
+        text = _call_payload_text(_bridge._parse_tool_result(exc.result))
+    except (ValueError, TypeError, RecursionError) as unwritable:
+        print(f"[call] note: body not written ({type(unwritable).__name__})", file=sys.stderr)
+    else:
+        _write_call_payload(out, text)
+    print(f"[call] tool returned isError: {exc.excerpt}", file=sys.stderr)
+    return 1
+
+
+def _read_output(result: ReadResourceResult) -> bytes:
+    """The bytes `read --out` writes for one ``resources/read`` result.
+
+    A single text content is its text, verbatim; a single blob is its decoded
+    bytes. Several contents are a JSON array of the contents as the server sent
+    them, so each keeps its own uri and mimeType. Raises ``ValueError`` for no
+    contents or invalid base64.
+    """
+    contents = result.contents
+    if not contents:
+        raise ValueError("MCP resource read returned no contents")
+    if len(contents) > 1:
+        dumps = [c.model_dump(mode="json", by_alias=True, exclude_none=True) for c in contents]
+        return (json.dumps(dumps, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    item = contents[0]
+    if isinstance(item, TextResourceContents):
+        return item.text.encode("utf-8")
+    return _bridge.parse_resource([item])
+
+
+def _cmd_read(ns: argparse.Namespace) -> int:
+    """Read one resource live and write its contents to --out.
+
+    The resource-side twin of `call`: the payload goes to a file, never to
+    stdout. A URI template target is expanded from --args first.
+    """
+    cmd = getattr(ns, "stdio", None)
+    conn = dict(
+        url=ns.url,
+        bearer=ns.bearer,
+        client_name=ns.client_name,
+        config_path=ns.config,
+        cred_backend=ns.cred_backend,
+        creds_path=_creds_path(ns),
+        env=_parse_env(ns),
+    )
+    try:
+        values = _json_object_arg(ns.args) if ns.args is not None else None
+        uri = _resource_uri(ns.uri, values)
+        print(f"[read] {ns.server} {uri} (live) …", file=sys.stderr)
+        data = _read_output(asyncio.run(_read_resource(ns.server, uri, cmd=cmd, **conn)))
+        out = Path(ns.out)
+        _atomic_write_bytes(out, data)
+    except (OSError, ValueError) as exc:
+        print(f"[read] error: {exc}", file=sys.stderr)
+        return 1
+    except McpError as exc:
+        print(f"[read] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+    except BaseExceptionGroup as exc:
+        _check_reportable(exc)
+        print(f"[read] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+    print(f"[read] wrote {len(data) / 1024:.1f} KB to {out}", file=sys.stderr)
+    print(
+        "[read] ⚠  resource contents may contain real ids/PII — use a *.probe-raw.json name (git-ignored).",
         file=sys.stderr,
     )
     return 0
@@ -552,7 +1328,7 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
     base: dict = {}
     if target.is_file():
         base = json.loads(target.read_text())
-        print(f"[merge] base: {target} ({len(base)} tool(s))", file=sys.stderr)
+        print(f"[merge] base: {target} ({len(base)} entry(ies))", file=sys.stderr)
 
     part_skeletons = [json.loads(p.read_text()) for p in parts]
     merged = codegen.merge_skeletons([base] + part_skeletons)
@@ -591,7 +1367,7 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
         merged, scrubbed_tools = codegen.scrub_skeletons(merged)
         if scrubbed_tools:
             print(
-                f"[merge] scrubbed probed_args for {len(scrubbed_tools)} tool(s): {', '.join(scrubbed_tools)}",
+                f"[merge] scrubbed probed_args for {len(scrubbed_tools)} entry(ies):{', '.join(scrubbed_tools)}",
                 file=sys.stderr,
             )
             print(
@@ -600,12 +1376,12 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
             )
 
     _atomic_write_text(target, json.dumps(merged, indent=2) + "\n")
-    print(f"[merge] wrote {target} ({len(merged)} tool(s))", file=sys.stderr)
+    print(f"[merge] wrote {target} ({len(merged)} entry(ies))", file=sys.stderr)
 
     if verify_map:
         _atomic_write_text(verify_target, json.dumps(verify_map, indent=2) + "\n")
         print(
-            f"[merge] wrote {verify_target} ({len(verify_map)} tool(s))"
+            f"[merge] wrote {verify_target} ({len(verify_map)} entry(ies))"
             " — ⚠  raw args/PII, git-ignored (verify sidecar)",
             file=sys.stderr,
         )
@@ -614,8 +1390,8 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
         verify_target.unlink()
         print(f"[merge] removed {verify_target} (all entries stale)", file=sys.stderr)
 
-    # Stale-entry advisory.  Merge is offline by contract — it makes no
-    # tools/list call — so it cannot know the server's current tool set.  It
+    # Stale-entry advisory.  Merge is offline by contract — it makes no list
+    # calls — so it cannot know the server's current inventory.  It
     # cross-checks entries that were carried forward unprobed against the last
     # recorded manifest instead, and only warns: dropping on this evidence
     # would silently delete hand-edited shape specs.
@@ -623,23 +1399,20 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
     carried = sorted(set(merged) - probed_now)
     if carried:
         manifest_p = _merge_manifest_path(ns, target)
-        manifest_tools: set[str] | None = None
+        manifest_doc: Any = None
         manifest_name = ""
         if manifest_p is not None and manifest_p.is_file():
             manifest_name = manifest_p.name
             try:
-                doc = json.loads(manifest_p.read_text())
-                tools_obj = doc.get("tools")
-                if isinstance(tools_obj, dict):
-                    manifest_tools = set(tools_obj)
+                manifest_doc = json.loads(manifest_p.read_text())
             except (OSError, json.JSONDecodeError):
-                manifest_tools = None
-        if manifest_tools is not None:
-            stale = [t for t in carried if t not in manifest_tools]
+                manifest_doc = None
+        checked = _stale_entries(carried, merged, manifest_doc)
+        if checked is not None:
+            stale, unchecked = checked
             if stale:
                 print(
-                    f"[merge] ⚠  {len(stale)} shapes entry(ies) name tools absent from "
-                    f"{manifest_name}: {', '.join(stale)}",
+                    f"[merge] ⚠  {len(stale)} shapes entry(ies) absent from {manifest_name}: {', '.join(stale)}",
                     file=sys.stderr,
                 )
                 print(
@@ -647,14 +1420,22 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
                     "Remove them by hand if the server no longer exposes them.",
                     file=sys.stderr,
                 )
+            if unchecked:
+                # Count only, like the no-manifest line below: these are
+                # undetectable, not suspect.
+                print(
+                    f"[merge] {len(unchecked)} resource entry(ies) not checked: "
+                    f"{manifest_name} does not track resources. Run `mcpgen codegen` to record them.",
+                    file=sys.stderr,
+                )
         else:
-            # No manifest: retired tools are undetectable here.  Carrying entries
-            # forward unprobed is the normal partial-re-probe case (re-probing one
-            # tool on a 40-tool server carries 39), so report the count only —
-            # enumerating names would make every partial merge noisy.
+            # No manifest: retired entries are undetectable here.  Carrying
+            # entries forward unprobed is the normal partial-re-probe case
+            # (re-probing one tool on a 40-tool server carries 39), so report the
+            # count only — enumerating names would make every partial merge noisy.
             print(
-                f"[merge] {len(carried)} entry(ies) carried forward unprobed; no tool manifest "
-                "beside the shapes file, so retired tools cannot be detected. "
+                f"[merge] {len(carried)} entry(ies) carried forward unprobed; no inventory manifest "
+                "beside the shapes file, so retired entries cannot be detected. "
                 "Run `mcpgen codegen` to write one.",
                 file=sys.stderr,
             )
@@ -741,8 +1522,25 @@ def _cmd_discover(ns: argparse.Namespace) -> int:
     return 0
 
 
+# Fields `list --resources` prints per entry, in this order. Everything else the
+# server sends is dropped: `icons[].src` may be a whole data: URI, and `_meta` /
+# `annotations` / vendor extras are not part of the inventory mcpgen acts on.
+_LISTED_RESOURCE_FIELDS = ("uri", "name", "title", "description", "mimeType", "size")
+_LISTED_TEMPLATE_FIELDS = ("uriTemplate", "name", "title", "description", "mimeType")
+
+
+def _pick(entry: dict, fields: tuple[str, ...]) -> dict:
+    return {key: entry[key] for key in fields if key in entry}
+
+
 def _cmd_list(ns: argparse.Namespace) -> int:
-    """Print the tool inventory as JSON [{name, description}] for a server."""
+    """Print the tool inventory as JSON [{name, description}] for a server.
+
+    With --resources, print {"resources": [...], "resourceTemplates": [...]}
+    instead. Without it, the first page of each resource list is read in the
+    same session, non-strict, only to print a stderr hint when the server has
+    any; a resource failure there becomes a stderr note, never a failed `list`.
+    """
     cmd = getattr(ns, "stdio", None)
     conn = dict(
         url=ns.url,
@@ -753,11 +1551,29 @@ def _cmd_list(ns: argparse.Namespace) -> int:
         creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
+    want_resources = getattr(ns, "resources", False)
     try:
-        tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
-    except (FileNotFoundError, ValueError) as exc:
+        inv = asyncio.run(_list_inventory(ns.server, scope="all", strict=want_resources, cmd=cmd, **conn))
+    except ResourceListingFailed as exc:
         print(f"[list] error: {exc}", file=sys.stderr)
         return 1
+    except (FileNotFoundError, ValueError, McpError) as exc:
+        print(f"[list] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+    except BaseExceptionGroup as exc:
+        _check_reportable(exc)
+        print(f"[list] error: {_bridge._describe(exc)}", file=sys.stderr)
+        return 1
+
+    if want_resources:
+        payload = {
+            "resources": [_pick(r, _LISTED_RESOURCE_FIELDS) for r in inv.resources or []],
+            "resourceTemplates": [_pick(t, _LISTED_TEMPLATE_FIELDS) for t in inv.templates or []],
+        }
+        sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+        return 0
+
+    tools = inv.tools
 
     def _entry(t: dict) -> dict:
         entry = {"name": t["name"], "description": t.get("description") or ""}
@@ -781,6 +1597,18 @@ def _cmd_list(ns: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    if inv.resource_error is not None:
+        print(f"[list] note: could not list resources: {_bridge._describe(inv.resource_error)}", file=sys.stderr)
+    elif inv.resources or inv.templates or inv.resources_truncated or inv.templates_truncated:
+        # Counts come from the first page only; "N+" marks a list with more pages.
+        n_resources = f"{len(inv.resources or [])}{'+' if inv.resources_truncated else ''}"
+        n_templates = f"{len(inv.templates or [])}{'+' if inv.templates_truncated else ''}"
+        print(
+            f"[list] {n_resources} resource(s) and {n_templates} resource template(s) available; "
+            "re-run with `--resources` to list them",
+            file=sys.stderr,
+        )
+
     return 0
 
 
@@ -793,8 +1621,29 @@ CHECK_DRIFT = 1
 CHECK_ERROR = 2
 
 
+def _tracked_sections(stored: Any) -> set[str]:
+    """The resource sections (`resources`, `resource_templates`) the stored manifest tracks."""
+    if not isinstance(stored, dict):
+        return set()
+    return {section for section, _kind in manifest_mod._RESOURCE_SECTIONS if section in stored}
+
+
+def _check_scope(tracked: set[str]) -> str:
+    """The resource scope `check` lists with for a manifest that records no `resource_scope`.
+
+    Such a manifest was written with the default `all`, or by an mcpgen that
+    did not record the scope, so the scope follows the *tracked* sections: only
+    `resource_templates` means `templates`, so a server that lists its data as
+    resources is not paged through. Anything else is `all`, including a
+    manifest that tracks neither section, which predates resource tracking:
+    its live resources show up as untracked advisories, `--update` starts
+    tracking them and `--resources none --update` records the opt-out.
+    """
+    return "templates" if tracked == {"resource_templates"} else "all"
+
+
 def _cmd_check(ns: argparse.Namespace) -> int:
-    """Compare a server's live tool inventory against a stored manifest."""
+    """Compare a server's live tool and resource inventory against a stored manifest."""
     manifest_path = Path(ns.manifest) if ns.manifest else Path(f"{ns.server}.mcpgen.json")
 
     def _fail(message: str) -> int:
@@ -827,25 +1676,89 @@ def _cmd_check(ns: argparse.Namespace) -> int:
         creds_path=_creds_path(ns),
         env=_parse_env(ns),
     )
-    # No probing: tools/list only. `check` never calls a tool and never touches
-    # the shape-spec sidecar.
     try:
-        tools = asyncio.run(_list_tools(ns.server, cmd=cmd, **conn))
+        recorded_scope = manifest_mod.stored_scope(stored)
+    except ValueError as exc:
+        return _fail(f"{manifest_path}: {exc}")
+    # --resources wins over the scope the manifest records, which wins over
+    # the scope inferred from its sections. --update writes the scope chosen by
+    # the flag or the manifest, never an inferred one, so an older manifest
+    # stays byte-identical.
+    explicit_scope = getattr(ns, "resource_scope", None)
+    tracked = _tracked_sections(stored)
+    scope = explicit_scope or recorded_scope or _check_scope(tracked)
+    write_scope = explicit_scope or recorded_scope or "all"
+    # A manifest that tracks no resources compares none, so without --update or
+    # a chosen scope the listing only feeds the untracked advisory: a non-strict
+    # first-page preview is enough, and its failure is an advisory rather than
+    # an error. Everything else lists strictly.
+    preview = not tracked and explicit_scope is None and recorded_scope is None and not getattr(ns, "update", False)
+    # No probing: tools/list and the resource lists only. `check` never calls a
+    # tool, never reads a resource and never touches the shape-spec sidecar.
+    try:
+        inv = asyncio.run(_list_inventory(ns.server, scope=scope, strict=not preview, cmd=cmd, **conn))
+    except ResourceListingFailed as exc:
+        return _fail(str(exc))
     except Exception as exc:  # transport, auth, config — all operational
-        return _fail(f"{type(exc).__name__}: {exc}")
+        return _fail(_bridge._describe(exc))
 
     try:
-        live = manifest_mod.build(ns.server, tools)
-        report = manifest_mod.diff(stored, live)
+        live = manifest_mod.build(ns.server, inv.tools, inv.resources, inv.templates, resource_scope=write_scope)
+        report = replace(manifest_mod.diff(stored, live), resource_scope=scope)
     except ValueError as exc:
         return _fail(str(exc))
+    if preview:
+        # A truncated first page can be empty; the list still has entries.
+        truncated = {"resource": inv.resources_truncated, "resource_template": inv.templates_truncated}
+        untracked = [
+            kind
+            for _section, kind in manifest_mod._RESOURCE_SECTIONS
+            if kind in report.resources_untracked or truncated[kind]
+        ]
+        error = inv.resource_error
+        report = replace(
+            report,
+            resources_untracked=untracked,
+            resources_error=None if error is None else f"could not list resources: {_bridge._describe(error)}",
+        )
 
     updated = False
+    # What the "[check] updated" line reports beyond the accepted changes.
+    notes: list[str] = []
     if getattr(ns, "update", False):
         # The only write path outside `codegen`, and it requires the explicit
-        # flag. Nothing above this line ever touches the manifest file.
-        _atomic_write_text(manifest_path, manifest_mod.dumps(live))
+        # flag. Nothing above this line ever touches the manifest file. A
+        # resource section the live inventory did not collect was not compared.
+        # Under an explicit --resources it lies outside the scope being
+        # recorded and is dropped, so the manifest tracks what `codegen` with
+        # that scope would; otherwise the stored one is carried over.
+        accepted_manifest = dict(live)
+        newly_tracked: list[str] = []
+        stopped_tracking: list[str] = []
+        for section, kind in manifest_mod._RESOURCE_SECTIONS:
+            if section not in live and section in stored:
+                if explicit_scope is None:
+                    accepted_manifest[section] = stored[section]
+                else:
+                    stopped_tracking.append(manifest_mod._UNTRACKED_LABEL[kind])
+            elif section in live and section not in stored:
+                newly_tracked.append(manifest_mod._UNTRACKED_LABEL[kind])
+        if newly_tracked:
+            notes.append(f"now tracking {' and '.join(newly_tracked)}")
+        # Compared on the key, not its value: a stored "all" is valid but never
+        # written back, so dropping it is a change too.
+        if write_scope != "all" and write_scope != recorded_scope:
+            notes.append(f"recorded resource_scope {write_scope}")
+        elif write_scope == "all" and recorded_scope is not None:
+            notes.append("removed resource_scope")
+        if stopped_tracking:
+            notes.append(f"stopped tracking {' and '.join(stopped_tracking)}")
+        _atomic_write_text(manifest_path, manifest_mod.dumps(accepted_manifest))
         updated = True
+        # A section written above is tracked from now on; the report says so via
+        # "now tracking" instead of advising the update that just happened.
+        written = {kind for section, kind in manifest_mod._RESOURCE_SECTIONS if section in accepted_manifest}
+        report = replace(report, resources_untracked=[k for k in report.resources_untracked if k not in written])
 
     if getattr(ns, "json", False):
         payload = manifest_mod.to_json(report)
@@ -855,9 +1768,17 @@ def _cmd_check(ns: argparse.Namespace) -> int:
     else:
         sys.stdout.write(manifest_mod.render_text(report) + "\n")
         if updated:
-            accepted = len(report.added) + len(report.removed) + len(report.changed)
+            accepted = (
+                len(report.added)
+                + len(report.removed)
+                + len(report.changed)
+                + len(report.resources_added)
+                + len(report.resources_removed)
+                + len(report.resources_changed)
+            )
             verb = "created" if bootstrapping else "updated"
-            sys.stdout.write(f"[check] {verb} {manifest_path} (accepted {accepted} change(s))\n")
+            note = "".join(f"; {n}" for n in notes)
+            sys.stdout.write(f"[check] {verb} {manifest_path} (accepted {accepted} change(s){note})\n")
 
     if updated:
         return CHECK_OK
@@ -1033,6 +1954,34 @@ def _callback_timeout(value: str) -> float:
     return seconds
 
 
+_MAX_CALL_TIMEOUT = timedelta.max.days * 86400.0
+"""The largest --timeout the SDK's ``timedelta`` read timeout can hold."""
+
+
+def _call_timeout(value: str) -> float:
+    """argparse type for --timeout: non-negative seconds a ``timedelta`` can hold; 0 waits forever.
+
+    The value stays as given; ``_call_timeout_of`` maps 0 to None and an absent flag to
+    ``CALL_TIMEOUT``, so a flag the user did not pass stays distinguishable.
+    """
+    seconds = _callback_timeout(value)
+    if seconds > _MAX_CALL_TIMEOUT:
+        raise argparse.ArgumentTypeError(f"too large for a timeout (0 waits forever), got {value!r}")
+    return seconds
+
+
+def _add_timeout_arg(p: argparse.ArgumentParser) -> None:
+    """The --timeout flag of the commands that make a live tool call (``codegen`` with ``--probe``)."""
+    p.add_argument(
+        "--timeout",
+        type=_call_timeout,
+        metavar="SECONDS",
+        help=f"how long to wait for the tool's answer before giving up (default: {CALL_TIMEOUT:g}). "
+        "0 waits forever. Bounds tool calls only: not connecting, the initialize handshake "
+        "or a resource read. codegen uses it only with --probe",
+    )
+
+
 def _add_conn_args(p: argparse.ArgumentParser) -> None:
     """Inline server-connection args shared by all commands (override config)."""
     p.add_argument("--url", help="server URL inline; enables OAuth without a config entry")
@@ -1081,6 +2030,7 @@ def main(argv: list[str] | None = None) -> int:
     cg.add_argument("--shapes", help="shape-spec JSON sidecar (default: <server>.shapes.json beside --out)")
     cg.add_argument("--probe", help="tool to call live and record response shape (docstring note only)")
     cg.add_argument("--probe-args", help="JSON args for --probe (default: {})")
+    _add_timeout_arg(cg)
     cg.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     cg.add_argument(
         "--embed-schema",
@@ -1099,17 +2049,37 @@ def main(argv: list[str] | None = None) -> int:
         dest="no_manifest",
         help="do not write a tool-inventory manifest",
     )
+    cg.add_argument(
+        "--resources",
+        dest="resource_scope",
+        choices=manifest_mod.RESOURCE_SCOPES,
+        default="all",
+        help="resources to generate accessors for and track in the manifest: all (default), "
+        "templates (resource templates only; static resources are neither listed nor tracked) "
+        "or none (a tools-only module and manifest). A scope other than all is recorded in the manifest, "
+        "so `mcpgen check` lists the same resources",
+    )
     _add_conn_args(cg)
     cg.set_defaults(func=_cmd_codegen)
 
-    pr = sub.add_parser("probe", help="live-call a tool and emit a shape-spec skeleton")
+    pr = sub.add_parser(
+        "probe", help="live-call a tool, or read a resource with --resource, and emit a shape-spec skeleton"
+    )
     pr.add_argument("server", help="server name (e.g. acme) or URL")
-    pr.add_argument("tool", help="tool to call live")
+    pr.add_argument("tool", metavar="target", help="tool to call live; with --resource, a resource URI or URI template")
+    pr.add_argument(
+        "--resource",
+        action="store_true",
+        help="read the target as a resource through read_resource, the generated accessors' path. "
+        "A target containing '{' is a URI template; the part is keyed by the template, "
+        "else by the normalized URI",
+    )
     pr.add_argument(
         "--args",
         action="append",
         metavar="JSON",
-        help="JSON args for one probe call; repeat for multi-probe (default: {})",
+        help="JSON args for one probe call; repeat for multi-probe (default: {}). "
+        "With --resource: one probe's URI template variables (template targets only)",
     )
     pr.add_argument("--emit-shape", help="write skeleton to this path (default: stdout)")
     pr.add_argument(
@@ -1117,9 +2087,11 @@ def main(argv: list[str] | None = None) -> int:
         dest="save_raw",
         metavar="FILE",
         help="also write the untruncated raw payload here; the name MUST end in "
-        ".probe-raw.json (git-ignored). Multi-probe writes a JSON array of {args, raw}",
+        ".probe-raw.json (git-ignored). Multi-probe writes a JSON array of {args, raw}; "
+        "bytes are base64-encoded",
     )
     pr.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    _add_timeout_arg(pr)
     _add_conn_args(pr)
     pr.set_defaults(func=_cmd_probe)
 
@@ -1131,8 +2103,29 @@ def main(argv: list[str] | None = None) -> int:
         "--out", required=True, metavar="FILE", help="write raw payload here; use a *.probe-raw.json name — git-ignored"
     )
     cl.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    _add_timeout_arg(cl)
     _add_conn_args(cl)
     cl.set_defaults(func=_cmd_call)
+
+    rd = sub.add_parser("read", help="live-read a resource and write its contents to --out")
+    rd.add_argument("server", help="server name (e.g. acme) or URL")
+    rd.add_argument("uri", help="resource URI, or a URI template such as 'demo://records/{id}' (expanded from --args)")
+    rd.add_argument(
+        "--args",
+        metavar="JSON",
+        default=None,
+        help="JSON object of URI template variables, keyed by the template's variable names; a template target only",
+    )
+    rd.add_argument(
+        "--out",
+        required=True,
+        metavar="FILE",
+        help="write the contents here: one text content verbatim, one blob as raw bytes, "
+        "several as a JSON array. Use a *.probe-raw.json name for text — git-ignored",
+    )
+    rd.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
+    _add_conn_args(rd)
+    rd.set_defaults(func=_cmd_read)
 
     mg = sub.add_parser("merge", help="consolidate per-tool probe parts into <server>.shapes.json")
     mg.add_argument("server", help="server name (e.g. acme) or URL")
@@ -1168,16 +2161,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     mg.set_defaults(func=_cmd_merge)
 
-    ls = sub.add_parser("list", help="list tools for a server as JSON [{name, description}]")
+    ls = sub.add_parser(
+        "list",
+        help="list tools for a server as JSON [{name, description}]; with --resources, its resources instead",
+    )
     ls.add_argument("server", help="server name (e.g. acme) or URL")
     ls.add_argument("--schema", action="store_true", help="include raw inputSchema JSON per tool")
+    ls.add_argument(
+        "--resources",
+        action="store_true",
+        help='print resources and resource templates as JSON {"resources": [...], "resourceTemplates": [...]} '
+        "instead of tools (--schema is ignored)",
+    )
     ls.add_argument("--stdio", metavar="CMD", help="use stdio transport: 'python server.py' (no auth)")
     _add_conn_args(ls)
     ls.set_defaults(func=_cmd_list)
 
     ck = sub.add_parser(
         "check",
-        help="compare a server's live tool inventory against a stored manifest",
+        help="compare a server's live tool and resource inventory against a stored manifest",
         description="Exit codes: 0 = no drift, 1 = drift, 2 = operational/config/auth error.",
     )
     ck.add_argument("server", help="server name (e.g. acme) or URL")
@@ -1192,6 +2194,16 @@ def main(argv: list[str] | None = None) -> int:
         "--update",
         action="store_true",
         help="accept the live inventory and rewrite the manifest (never happens without this flag)",
+    )
+    ck.add_argument(
+        "--resources",
+        dest="resource_scope",
+        choices=manifest_mod.RESOURCE_SCOPES,
+        default=None,
+        help="resources to list and compare: all, templates or none (default: the scope `codegen --resources` "
+        "recorded in the manifest; for a manifest that records none, templates when it tracks only resource "
+        "templates, else all). With --update an explicit --resources is recorded and a section outside it is "
+        "dropped; without it a recorded scope and the stored sections are kept",
     )
     _add_conn_args(ck)
     ck.set_defaults(func=_cmd_check)

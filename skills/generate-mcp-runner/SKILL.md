@@ -12,8 +12,9 @@ one that a template cannot produce because it needs semantic understanding of th
 their return shapes, and the server's domain.
 
 The output is a standalone async script: connection boilerplate (from a proven skeleton),
-then one block per read-only tool — real args, discriminated variants called once each,
-and print statements that surface something meaningful from each response shape.
+then one block per read-only tool and per resource accessor — real args, discriminated
+variants called once each, and print statements that surface something meaningful from
+each response shape.
 
 **Invoke as:** "generate runner for radar", "generate runner for github", "runner for time".
 
@@ -23,9 +24,9 @@ Artifacts already produced by `generate-mcp-wrappers` for `<server>` output dir 
 
 | Artifact | Path | Purpose |
 |---|---|---|
-| Wrapper module | `<server>/<server>.py` | function names, signatures (`async def <tool>(caller, *, <kwargs>) -> <Model\|Any>`), return annotations, module-level `SERVER` |
+| Wrapper module | `<server>/<server>.py` | function names, signatures (`async def <tool>(caller, *, <kwargs>) -> <Model\|Any>`), return annotations, module-level `SERVER`; `read_*` resource accessors |
 | Shape-spec | `<server>/<server>.shapes.json` | `return_model`, `return_container`, `discriminator`+`variants`, `fields`, `probed_args` (scrubbed) |
-| Verify sidecar | `<server>/<server>.verify.json` | **gold source**: real pre-scrub `probed_args`, gitignored, present locally |
+| Verify sidecar | `<server>/<server>.verify.json` | **gold source**: real pre-scrub `probed_args` (a template's variables under its template string), gitignored, present locally |
 | Server descriptions | `<mcpgen> list <server>` | tool purpose, workflow ordering |
 
 ## Connection skeleton selection
@@ -77,42 +78,60 @@ block** — replace it with the actual tool call sequence you derive in steps 4�
 
 ### 0. Read the hand-off, then resolve the CLI
 
-Start from whatever the caller passed in — the **resolved `mcpgen` invocation**, server
-name, output dir, connection source (config path or direct transport params), and
-transport+auth kind. Any caller (the user, `generate-mcp-wrappers` step 7, or another
-skill/agent) may hand these off. For whatever was not passed, determine it from context
-(how the wrappers were generated, any `servers.json` entry, or the original `codegen`
-invocation). The invocation comes first because the check below runs on it.
+Start from whatever the caller passed in — the **resolved `mcpgen` path**, server name,
+output dir, connection source (config path or direct transport params), and transport+auth
+kind. Any caller (the user, `generate-mcp-wrappers` step 7, or another skill/agent) may hand
+these off. For whatever was not passed, determine it from context (how the wrappers were
+generated, any `servers.json` entry, or the original `codegen` invocation). The path comes
+first because the check below runs on it.
 
-`$MCPGEN` does not survive between tool invocations. State the invocation you settle on
-once in your report, then substitute that literal string wherever a block below writes
-`<mcpgen>`.
+`<mcpgen>` is the absolute path the check below prints, pasted in literally. `$MCPGEN` does
+not survive between tool invocations, and `uv run mcpgen` held in a variable or shell function
+of your own does not word-split in `zsh`, so a bare `$c` runs the wrong command. State the
+path once in your report, then substitute it wherever a block below writes `<mcpgen>`.
 
-Requires `mcpgen >= 0.10.0` (install: see README) — one floor across the plugin, the same
-number `generate-mcp-wrappers` step 0 states, so a chained run and a standalone one gate
-identically. The floor guarantees the symbols `runner_templates/` import: `http_oauth.py`
-needs `LoginWontHelp`, and an engine without it produces a `run.py` that dies with
-`ImportError` on the first line that matters.
+Requires `mcpgen >= 0.11.0` (install: see README). Do not proceed on an older one.
 
 The command is often not on `PATH`: in a `uv`-managed project it lives inside the venv.
 Try each candidate in turn and keep the first that both answers **and** meets the floor —
-an outdated `mcpgen` on `PATH` must not shadow a current one in the venv:
+an outdated `mcpgen` on `PATH` must not shadow a current one in the venv. Each candidate is
+first resolved to the absolute path of the executable it would run, and the floor check runs
+on that path, so what the loop settles on is always one word:
 
 ```bash
-min=0.10.0; MCPGEN=
-# First candidate is the caller's invocation — drop it when none was handed over.
+min=0.11.0; MCPGEN=
+vkey() {  # PEP 440 version -> dotted key that sort -V orders correctly
+  local r s
+  r=${1%%[!0-9.]*}; r=${r%.}; s=${1#"$r"}; s=${s#.}
+  case $s in
+    '')   s=4.0 ;;
+    dev*) s=0.${s#dev} ;;
+    a*)   s=1.${s#a} ;;
+    b*)   s=2.${s#b} ;;
+    rc*)  s=3.${s#rc} ;;
+    post*) s=5.${s#post} ;;
+    *)    return 1 ;;
+  esac
+  printf '%s.%s\n' "$r" "$s" | grep -E '^[0-9]+(\.[0-9]+)+$'
+}
+mkey=$(vkey "$min")
+# First candidate is the caller's path — drop it when none was handed over.
 for c in "<handed-over>" "mcpgen" "uv run mcpgen" ".venv/bin/mcpgen"; do
   [ -n "$c" ] || continue
-  out=$(eval "$c --version" 2>/dev/null) || continue
+  case $c in
+    "uv run mcpgen")
+      p=$(uv run python -c 'import shutil; print(shutil.which("mcpgen") or "")' 2>/dev/null) ;;
+    /*)  p=$c ;;
+    */*) p=$PWD/$c ;;
+    *)   p=$(command -v "$c") ;;
+  esac
+  case $p in /*) [ -x "$p" ] || continue ;; *) continue ;; esac
+  out=$("$p" --version 2>/dev/null) || continue
   ver=$(printf '%s\n' "$out" | awk '{print $2}')
-  base=${ver%%[!0-9.]*}; base=${base%.}
-  printf '%s' "$base" | grep -Eq '^[0-9]+(\.[0-9]+)+$' || continue
-  if [ "$base" = "$min" ] && [ "$base" != "$ver" ]; then
-    echo "skipping $c ($ver is a pre-release of $min)"; continue
-  fi
-  [ "$(printf '%s\n%s\n' "$min" "$base" | sort -V | head -n 1)" = "$min" ] || \
-    { echo "skipping $c ($ver < $min)"; continue; }
-  MCPGEN="$c"; break
+  key=$(vkey "$ver") || { echo "skipping $p (unparsable version '$ver')"; continue; }
+  [ "$(printf '%s\n%s\n' "$mkey" "$key" | sort -V | head -n 1)" = "$mkey" ] || \
+    { echo "skipping $p ($ver < $min)"; continue; }
+  MCPGEN=$p; break
 done
 [ -n "$MCPGEN" ] || { echo "no mcpgen >= $min found on any invocation"; exit 1; }
 echo "resolved: $MCPGEN ($ver)"
@@ -124,17 +143,18 @@ Three things the loop depends on:
   `--version` call settles the common case, since a caller that resolved an invocation
   almost always resolved a good one. Checking it anyway is what covers the callers that
   gated nothing — a user who names an invocation by hand, or a skill with no floor of its
-  own — for whom an unchecked string reintroduces the `ImportError` this floor exists to
-  prevent. A candidate that fails the floor falls through to the probe rather than aborting.
-- **`eval` for two-word invocations.** A bare `$c` does not word-split in `zsh`, so the
-  `uv run mcpgen` form never matches without it.
-- **The comparison runs on `$base`, the release part alone.** `${ver%%[!0-9.]*}` trims from
-  the first character that is neither digit nor dot and `${base%.}` drops the dot a `.devN`
-  suffix leaves behind, so `0.10.0rc1` and `0.10.0.dev1` both reduce to `0.10.0`. That split
-  lets a newer pre-release through (`0.11.0.dev1` clears the floor) while rejecting a
-  pre-release *of the floor itself* — `sort -V` alone orders `0.10.0.dev1` above `0.10.0`,
-  and a clone parked there can predate the commit that made `0.10.0` worth gating on. The
-  `$`-anchored `grep` is what makes the trim load-bearing.
+  own — for whom an unchecked string would skip the floor. A candidate that fails the floor
+  falls through to the probe rather than aborting.
+- **Every candidate becomes one absolute path before it runs.** An absolute path is taken
+  as is and a relative one is anchored to `$PWD`; `uv run mcpgen` becomes the path `uv run`
+  would execute, found by `shutil.which` inside the project environment; a bare name goes
+  through `command -v`, which prints nothing usable for an alias or a shell function. Anything
+  that is not then an absolute path to an executable file is skipped, so a hand-off in any
+  other form — `uvx mcpgen`, say — falls through to the probe.
+- **`vkey` orders versions the PEP 440 way.** `sort -V` alone puts `0.11.0.dev1` above
+  `0.11.0`. `vkey` splits the release part from the suffix and appends a rank, so `.devN` <
+  `aN` < `bN` < `rcN` < final < `.postN`. The `$`-anchored `grep` rejects any suffix the ranks
+  do not cover rather than letting it through as its own prefix.
 
 ### 1. Locate artifacts
 
@@ -148,12 +168,18 @@ Find for `<server>`:
 
 The output dir is whichever one step 0 settled on, passed or derived.
 
-### 2. Enumerate tools
+### 2. Enumerate tools and resource accessors
 
 Read every `async def` signature from `<server>/<server>.py`. For each tool collect:
 - function name (as called: `module.<fn>(caller, **kwargs)`)
 - parameter names, types, and defaults
 - return annotation (`-> Model`, `-> list[Model]`, `-> Any`)
+
+**Resource accessors** are the functions whose docstring holds a `Resource: <uri>` or
+`Resource template: <template>` line; their first parameter is typed `McpResourceReader`.
+Identify them by that line, not by the `read_` prefix: a tool may be named `read_file`,
+and an accessor whose name collides with one gets a `_2` suffix. Record each accessor's
+URI or template string, which keys its `shapes.json` and `verify.json` entries.
 
 Cross-check tool descriptions by running:
 ```bash
@@ -171,9 +197,17 @@ create, update, delete, remove, send, set, write, post, patch, put,
 cancel, approve, submit, assign
 ```
 
-**Default: emit only read-only tools.** Mutating tools are skipped by default. List the
-skipped tools in a `# Skipped mutating tools: ...` comment at the top of `main()`. They
-are opt-in via explicit extra instruction (e.g. "include the export tools", "add create_entity").
+A tool whose description says it waits for a user — for input, a confirmation, a pick in the
+browser — is **interactive**: skip it like a mutating tool. `run.py`'s calls have no timeout,
+so it would wait forever.
+
+Resource accessors are never mutating: reading a resource cannot change the server. Include
+every accessor by default, except those the hand-off names as skipped data resources.
+
+**Default: emit only read-only tools.** Mutating and interactive tools are skipped by default.
+List both in the `# Skipped mutating tools: ...` comment at the top of `main()` (the comment
+keeps that name). They are opt-in via explicit extra instruction (e.g. "include the export
+tools", "add create_entity").
 
 ### 4. Choose args per tool
 
@@ -194,6 +228,16 @@ is `true` in the shape entry, note that the user must supply real args.
 Derive from the wrapper signature: required params get representative minimal values
 (`entityType=1`, `query={"operator":"AND","conditions":[]}`, `size=1`, string params get
 `"<value>"`). Non-required params are omitted. Clearly comment that these are synthetic.
+
+**Resource accessors.** A static accessor takes no arguments beyond `caller`. A template
+accessor takes its variables as keyword arguments: read them from the `verify.json` entry
+keyed by the template string, a `{"<variable>": value}` dict, or the first dict of a list.
+The keys are the template's raw variable names; pass each under the accessor's parameter
+name, read from the accessor's signature rather than derived. The two differ where codegen
+sanitized the name: `unit.type` → `unit_type`, and a name that would shadow something gets
+a trailing `_` — the body's names `caller`, `uri`, and `cast` (`caller_`), module names such
+as `SERVER` and `_dig` (`SERVER_`), and Python keywords (`class_`). The fallbacks match the
+tools': scrubbed `shapes.json.probed_args`, then a commented synthetic value.
 
 **Discriminated tools** (shape entry has `discriminator` + `variants`):  
 Emit **one call per probed variant**. The `verify.json` list for that tool contains one
@@ -221,6 +265,10 @@ pattern:
 Cluster discriminated-tool variants together (all `query_radar(entityType=1/2/3)` blocks
 adjacent). Let the server's semantic context override the generic order — a tool description
 often tells you exactly what it depends on.
+
+Resource accessors go with the metadata (slot 2) unless a tool names one: when a tool's
+description says to read a resource first ("read `risk://dictionary` before calling"),
+place that accessor immediately before the tool.
 
 ### 6. Emit `<server>/run.py`
 
@@ -252,7 +300,7 @@ one connection lifecycle.
 | `return_container == "list"` | `print(f"<tool>: {len(result)} item(s)")` |
 | dict with known `fields` | Drill into 1–2 top-level scalar fields: `print(f"<tool>: id={result.get('id')!r}  name={result.get('name')!r}")` |
 | nested dict, `total` / `count` present | Include pagination info: `print(f"... total={result.get('total')}")` |
-| `-> Any` / scalar | `print(f"<tool>: {type(result).__name__}")` |
+| `-> Any` / scalar (a blob resource prints `bytes`) | `print(f"<tool>: {type(result).__name__}")` |
 
 Use a distinct variable name per call (`me`, `glossary`, `filters`, `fv`, `persons`, etc.)
 rather than reusing `result` — it makes the script readable as a flow.
@@ -269,13 +317,28 @@ rather than reusing `result` — it makes the script readable as a flow.
         print(f"<tool>(2): {len(v2)} record(s)")
 ```
 
-**d. Skipped tools comment** — before the first call inside the `connected()` block:
+**d. Resource accessor blocks** — same form, with the URI or template in the comment:
+
+```python
+        # read_risk_dictionary -> Any  (resource risk://dictionary)
+        risks = await <module>.read_risk_dictionary(caller)
+        print(f"read_risk_dictionary: {type(risks).__name__}")
+
+        # read_dimension_by_unit_type -> list[Dimension]  (template dimension://by-unit-type/{unitType})
+        dims = await <module>.read_dimension_by_unit_type(caller, unitType="PROJECT")
+        print(f"read_dimension_by_unit_type: {len(dims)} item(s)")
+```
+
+`McpBridgeCaller` implements both seams, so the one `caller` serves tool wrappers and
+accessors, inside the same `connected()` block.
+
+**e. Skipped tools comment** — before the first call inside the `connected()` block:
 
 ```python
         # Skipped mutating tools: create_entity, update_entity, delete_entity
 ```
 
-**e. Docstring** — the file-level `"""..."""` from the chosen skeleton already documents
+**f. Docstring** — the file-level `"""..."""` from the chosen skeleton already documents
 the transport and usage. Keep it; update the URL/cmd if the skeleton uses a placeholder.
 
 ### 7. Validate statically
@@ -295,7 +358,7 @@ documents how to run it manually. Auto-run may be added via explicit extra instr
 
 ## Defaults (apply unless overridden by extra instructions)
 
-- **Tool scope**: read-only tools only.
+- **Tool scope**: read-only tools, plus every resource accessor not named as skipped.
 - **Call count**: one call per tool; one call per probed variant for discriminated tools.
 - **Args source**: verify.json → shapes.json.probed_args → schema-minimal.
 - **Output path**: `<server>/run.py`.
@@ -329,4 +392,6 @@ args, and ordering — do not ask for permission to apply them. Examples:
   Only replace the placeholder block (`$demo_calls` region and the `$`-variables).
 - **`run.py` must import the generated module**, not `mcpgen` directly for tool calls.
   The `await module.<fn>(caller, ...)` form is the only supported call site; never call
-  `caller.call(SERVER, "raw-tool-name", {...})` from `run.py`.
+  `caller.call(SERVER, "raw-tool-name", {...})` or `caller.read_resource(SERVER, "<uri>")`
+  from `run.py`. The accessor expands the template and applies the shape; a raw read skips
+  both.
