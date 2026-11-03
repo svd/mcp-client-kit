@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Annotated, Any, TypeVar
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
+import anyio
 import httpx
 from mcp import ClientSession
 from mcp.client.auth import OAuthClientProvider, OAuthRegistrationError, TokenStorage
@@ -2357,6 +2358,9 @@ def parse_resource(contents: Sequence[TextResourceContents | BlobResourceContent
 _MAX_LIST_PAGES = 1000
 """Upper bound on pages fetched for one listing; a server that never stops paging fails loudly."""
 
+LIST_PAGE_TIMEOUT = 60.0
+"""Seconds ``_list_all_pages`` waits for each page; ``ClientSession`` sets no read timeout of its own."""
+
 
 async def _list_all_pages(fetch: Callable[..., Awaitable[Any]], field: str) -> list:
     """Collect *field* from every page of a paginated MCP list request.
@@ -2364,13 +2368,18 @@ async def _list_all_pages(fetch: Callable[..., Awaitable[Any]], field: str) -> l
     The first request carries no params, as the SDK's own no-argument call does.
     An absent or empty ``nextCursor`` ends the listing. A cursor the server has
     already handed out, or more than ``_MAX_LIST_PAGES`` pages, raises
-    ``ValueError`` rather than looping forever.
+    ``ValueError`` rather than looping forever. A page that takes longer than
+    ``LIST_PAGE_TIMEOUT`` raises ``TimeoutError``; the bound is per page, so a
+    long listing that keeps answering is not cut short.
     """
     items: list = []
     seen: set[str] = set()
     params: PaginatedRequestParams | None = None
     for _ in range(_MAX_LIST_PAGES):
-        page = await fetch(params=params)
+        with anyio.move_on_after(LIST_PAGE_TIMEOUT) as deadline:
+            page = await fetch(params=params)
+        if deadline.cancelled_caught:
+            raise TimeoutError(f"MCP server sent no {field} page within {LIST_PAGE_TIMEOUT:g}s")
         items.extend(getattr(page, field))
         cursor = page.nextCursor
         if not cursor:

@@ -191,7 +191,7 @@ def test_list_tools_surfaces_readonly_hint_annotation():
     tool = _mock_tool("whoami", "Return caller identity", annotations=annotations)
 
     mock_session = MagicMock()
-    mock_session.list_tools = AsyncMock(return_value=MagicMock(tools=[tool]))
+    mock_session.list_tools = AsyncMock(return_value=MagicMock(tools=[tool], nextCursor=None))
 
     @asynccontextmanager
     async def fake_session(server, **kwargs):
@@ -203,12 +203,57 @@ def test_list_tools_surfaces_readonly_hint_annotation():
     assert result[0]["annotations"] == {"readOnlyHint": True}
 
 
+def test_list_tools_follows_cursors():
+    """Every `tools/list` page is read, following `nextCursor` until the server stops paging."""
+    pages = {
+        None: ([_mock_tool("a", "A")], "c1"),
+        "c1": ([_mock_tool("b", "B")], None),
+    }
+    cursors = []
+
+    async def list_tools(*, params=None):
+        cursor = None if params is None else params.cursor
+        cursors.append(cursor)
+        items, next_cursor = pages[cursor]
+        return MagicMock(tools=items, nextCursor=next_cursor)
+
+    mock_session = MagicMock()
+    mock_session.list_tools = list_tools
+
+    @asynccontextmanager
+    async def fake_session(server, **kwargs):
+        yield mock_session
+
+    with patch("mcpgen.cli._bridge.session", fake_session):
+        result = asyncio.run(_list_tools("acme"))
+
+    assert [t["name"] for t in result] == ["a", "b"]
+    assert cursors == [None, "c1"]
+
+
+def test_list_reports_a_tools_page_timeout(capsys, monkeypatch):
+    """A `tools/list` page that never arrives fails `list` with a one-line error, not a hang."""
+    monkeypatch.setattr(_bridge, "LIST_PAGE_TIMEOUT", 0.05)
+    fake = _FakeSessions()
+
+    async def never(*, params=None):
+        await anyio.sleep_forever()
+
+    fake.session.list_tools = never
+
+    with patch("mcpgen.cli._bridge.session", fake):
+        rc = _cmd_list(_ns("acme"))
+
+    assert rc == 1
+    assert capsys.readouterr().err == "[list] error: TimeoutError: MCP server sent no tools page within 0.05s\n"
+
+
 def test_list_tools_annotations_absent_is_none():
     """A tool with no annotations object surfaces annotations: None (not dropped)."""
     tool = _mock_tool("get_user", "Get user", annotations=None)
 
     mock_session = MagicMock()
-    mock_session.list_tools = AsyncMock(return_value=MagicMock(tools=[tool]))
+    mock_session.list_tools = AsyncMock(return_value=MagicMock(tools=[tool], nextCursor=None))
 
     @asynccontextmanager
     async def fake_session(server, **kwargs):
@@ -323,7 +368,7 @@ class _FakeSessions:
         self.live = False
         self.close_with: BaseException | None = None
         self.session = MagicMock()
-        self.session.list_tools = AsyncMock(return_value=MagicMock(tools=list(tools)))
+        self.session.list_tools = AsyncMock(return_value=MagicMock(tools=list(tools), nextCursor=None))
         self.session.get_server_capabilities = MagicMock(return_value=capabilities)
         self._tg = None
 
@@ -470,6 +515,22 @@ def test_list_inventory_wraps_listing_error(exc):
 
     assert caught.value.__cause__ is exc
     assert str(caught.value).startswith(f"could not list resources: {type(exc).__name__}: ")
+
+
+def test_list_inventory_strict_reports_a_resource_page_timeout(monkeypatch):
+    """A `resources/list` page that never arrives fails a strict listing instead of hanging it."""
+    monkeypatch.setattr(_bridge, "LIST_PAGE_TIMEOUT", 0.05)
+    fake = _FakeSessions(capabilities=mcp_types.ServerCapabilities(resources=mcp_types.ResourcesCapability()))
+
+    async def never(*, params=None):
+        await anyio.sleep_forever()
+
+    fake.session.list_resources = never
+
+    with patch("mcpgen.cli._bridge.session", fake), pytest.raises(ResourceListingFailed) as caught:
+        asyncio.run(_list_inventory("acme", scope="all"))
+
+    assert str(caught.value) == "could not list resources: TimeoutError: MCP server sent no resources page within 0.05s"
 
 
 def test_list_tools_hook_failure_propagates():

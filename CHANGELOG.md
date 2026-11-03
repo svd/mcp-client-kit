@@ -2,6 +2,22 @@
 
 ## [Unreleased] — 0.12.0
 
+## [0.11.1] — 2026-11-03
+
+### Fixed
+
+- **Tool listing reads every `tools/list` page.** `list`, `codegen` and `check` read only the
+  first page and ignored `nextCursor`, so a server that paginates its tools got wrappers and a
+  manifest for the first page alone. They now follow the cursor to the last page, with the
+  repeated-cursor and 1000-page guards the resource listings already had.
+
+- **A listing page that never arrives no longer hangs the command.** `ClientSession` sets no
+  read timeout, so a server that never answered `tools/list`, `resources/list` or
+  `resources/templates/list` hung `list`, `list --resources`, `codegen` and `check`. Each
+  page now gets 60 s; past that the command exits `1` with `[list] error: TimeoutError: MCP
+  server sent no tools page within 60s` (or `could not list resources: …` for a resource
+  list). The bound is per page, so a long listing that keeps answering runs to the end.
+
 ## [0.11.0] — 2026-11-03
 
 ### Added
