@@ -23,6 +23,7 @@ names the endpoint `_pre_flight_refresh` later renews against.
 from __future__ import annotations
 
 import json
+import math
 import secrets
 import time
 from collections.abc import AsyncIterator
@@ -47,6 +48,7 @@ from mcp.types import LATEST_PROTOCOL_VERSION
 
 from mcpgen._bridge import (
     _CALLBACK_TIMEOUT,
+    _ENV_REF,
     DEFAULT_CREDS_PATH,
     FileTokenStorage,
     LoginWontHelp,
@@ -64,7 +66,7 @@ from mcpgen._bridge import (
     _user_agent_hook,
     package_version,
     resolve_cred_backend,
-    servers,
+    server_config,
 )
 
 _PENDING_FORMAT = 1
@@ -204,6 +206,105 @@ class LoginResult:
     tools_count: int | None = None
 
 
+_STATIC_AUTH_METHODS = frozenset({"none", "client_secret_post"})
+"""Token-endpoint auth methods a pre-registered client may use. `client_secret_basic` is
+left out because `_pre_flight_refresh` authenticates in the form body: a client the
+authorization server holds to Basic would log in once and then fail every refresh."""
+
+
+@dataclass(frozen=True, repr=False)
+class StaticClient:
+    """An OAuth client registered with the authorization server ahead of time.
+
+    For authorization servers that refuse Dynamic Client Registration — commonly for a
+    redirect URI that is not a loopback address. `redirect_uris` are the URIs it was
+    registered with; when given, `begin_login()` refuses any other. `token_endpoint_auth_method`
+    defaults to `client_secret_post` with a secret and `none` without. `issuer`, when
+    given, is the authorization server the client belongs to: `begin_login()` refuses a
+    server whose discovered issuer differs, rather than send the secret to it. `repr()`
+    omits the secret.
+    """
+
+    client_id: str
+    client_secret: str | None = None
+    redirect_uris: tuple[str, ...] = ()
+    token_endpoint_auth_method: str | None = None
+    issuer: str | None = None
+
+    def __repr__(self) -> str:
+        secret = ", client_secret=<hidden>" if self.client_secret else ""
+        return f"StaticClient(client_id={self.client_id!r}{secret}, redirect_uris={self.redirect_uris!r})"
+
+    __str__ = __repr__
+
+    @property
+    def auth_method(self) -> str:
+        return self.token_endpoint_auth_method or ("client_secret_post" if self.client_secret else "none")
+
+    def _client_info(self, redirect_uri: str) -> OAuthClientInformationFull:
+        if not self.client_id:
+            raise ValueError("a static client needs a client_id")
+        if self.auth_method not in _STATIC_AUTH_METHODS:
+            raise ValueError(
+                f"static client token_endpoint_auth_method must be one of {sorted(_STATIC_AUTH_METHODS)}, "
+                f"got {self.auth_method!r}"
+            )
+        if self.auth_method == "client_secret_post" and not self.client_secret:
+            raise ValueError("token_endpoint_auth_method client_secret_post needs a client_secret")
+        return OAuthClientInformationFull(
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            redirect_uris=[redirect_uri],  # type: ignore[list-item]  # Pydantic coerces str→AnyUrl
+            token_endpoint_auth_method=self.auth_method,  # type: ignore[arg-type]  # checked above
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+        )
+
+    def _redirect_spelling(self, redirect_uri: str) -> str:
+        """The spelling of *redirect_uri* to send: the registered one it matches, verbatim.
+
+        Matching is on pydantic's canonical form, so `https://h.example` and
+        `https://h.example/` are one URI here; what goes on the wire is what was registered.
+        With no registered URIs, the caller's own spelling is sent.
+        """
+        if not self.redirect_uris:
+            return redirect_uri
+        wanted = _canonical_uri(redirect_uri)
+        for registered in self.redirect_uris:
+            if _canonical_uri(registered) == wanted:
+                return registered
+        raise ValueError(
+            f"redirect_uri {redirect_uri!r} is not one the static client {self.client_id!r} "
+            f"is registered with: {list(self.redirect_uris)}"
+        )
+
+    @classmethod
+    def _from_config(cls, raw: dict) -> StaticClient:
+        for member in ("client_id", "client_secret"):
+            # A `${VAR}` still here is one whose VAR is unset (`_expand_env_refs`).
+            unresolved = _ENV_REF.search(raw.get(member) or "")
+            if unresolved:
+                # Names the variable, never the value: this is a secret's slot.
+                raise ValueError(
+                    f"oauthClient {member} refers to ${{{unresolved.group(1)}}}, which is not set in the environment"
+                )
+        redirect_uris = raw.get("redirect_uris") or []
+        if not isinstance(redirect_uris, list) or not all(isinstance(u, str) for u in redirect_uris):
+            raise ValueError(f"oauthClient redirectUris must be a list of strings, got {redirect_uris!r}")
+        return cls(
+            client_id=raw["client_id"],
+            client_secret=raw.get("client_secret"),
+            redirect_uris=tuple(redirect_uris),
+            token_endpoint_auth_method=raw.get("token_endpoint_auth_method"),
+            issuer=raw.get("issuer"),
+        )
+
+
+def _canonical_uri(uri: str) -> str:
+    """*uri* the way a registration stores it (pydantic's AnyUrl spelling)."""
+    return str(OAuthClientMetadata(redirect_uris=[uri]).redirect_uris[0])  # type: ignore[list-item,index]
+
+
 def callback_state(callback_url: str) -> str | None:
     """The `state` parameter of a redirect URL: the key to look up its pending login by."""
     values = parse_qs(urlparse(callback_url).query).get("state")
@@ -255,7 +356,16 @@ class _BeginProvider(OAuthClientProvider):
     in mcp 1.27 — the endpoint, the resource indicator and the scope rules — because that
     method keeps the PKCE verifier in a local and so cannot be reused for a round that
     completes elsewhere.
+
+    *redirect_uri* is sent as given. The metadata's copy has been through pydantic's
+    `AnyUrl`, which adds a slash to a bare host and lower-cases it; a pre-registered
+    client's URI has to go out in the spelling the operator registered, since an
+    authorization server may compare it as a plain string (RFC 6749 §3.1.2.3).
     """
+
+    def __init__(self, *, redirect_uri: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._redirect_uri = redirect_uri
 
     async def _perform_authorization(self) -> httpx.Request:
         ctx = self.context
@@ -270,7 +380,7 @@ class _BeginProvider(OAuthClientProvider):
         params = {
             "response_type": "code",
             "client_id": ctx.client_info.client_id,
-            "redirect_uri": str(ctx.client_metadata.redirect_uris[0]),
+            "redirect_uri": self._redirect_uri,
             "state": state,
             "code_challenge": pkce.code_challenge,
             "code_challenge_method": "S256",
@@ -373,14 +483,6 @@ def _validate_redirect_uri(redirect_uri: str) -> None:
         raise ValueError(f"redirect_uri must not carry a fragment, got {redirect_uri!r}")
 
 
-def _resolve_server_url(server_name: str, url: str | None, config_path: str | Path | None) -> str:
-    known = servers(config_path=config_path)
-    server_url = url or known.get(server_name)
-    if server_url is None:
-        raise ValueError(f"Unknown server {server_name!r}. Pass url= or add it to config. Known: {list(known)}")
-    return server_url
-
-
 def _stored_entry(storage: FileTokenStorage, server_name: str) -> dict:
     """The server's current entry, or {} when the store is absent or unreadable.
 
@@ -442,6 +544,7 @@ async def begin_login(
     config_path: str | Path | None = None,
     ttl: float | None = None,
     reuse_registration: bool = True,
+    client: StaticClient | None = None,
 ) -> PendingLogin:
     """Start an OAuth login whose redirect lands on *redirect_uri*; no browser, no listener.
 
@@ -455,52 +558,84 @@ async def begin_login(
         the pending login.
     url / client_name / config_path: as in `login()`.
     ttl: seconds until the pending login expires; None uses 300 (the same bound as
-        `login()`'s callback wait). Must be positive.
+        `login()`'s callback wait). Must be positive and finite.
     reuse_registration: reuse the stored client registration when its `redirect_uris`
         holds *redirect_uri* and the authorization server has not moved. False always
         registers anew.
+    client: a pre-registered client to use instead of registering one; None falls back
+        to the server's "oauthClient" config block, then to registration.
 
-    Raises OAuthRegistrationError when registration is refused, and LoginWontHelp when
-    the server does not ask for OAuth at all.
+    Raises OAuthRegistrationError when registration is refused, LoginWontHelp when the
+    server does not ask for OAuth at all, and RuntimeError when the OS keychain refused the
+    write that stores the pending login (nothing was stored).
     """
     _validate_redirect_uri(redirect_uri)
     lifetime = _CALLBACK_TIMEOUT if ttl is None else ttl
-    if lifetime <= 0:
-        raise ValueError(f"ttl must be positive, got {ttl!r}")
-    server_url = _resolve_server_url(server_name, url, config_path)
+    if not math.isfinite(lifetime) or lifetime <= 0:
+        raise ValueError(f"ttl must be a positive finite number, got {ttl!r}")
+    known, configured = server_config(server_name, config_path=config_path)
+    server_url = url or known.get(server_name)
+    if server_url is None:
+        raise ValueError(f"Unknown server {server_name!r}. Pass url= or add it to config. Known: {list(known)}")
     path = Path(creds_path)
     storage = FileTokenStorage(server_name, path, backend=resolve_cred_backend(cred_backend))
     backend = storage._backend  # concrete ("auto" resolved), before a keyring fallback can flip it
 
     metadata = _client_metadata(server_name, redirect_uri, client_name)
     canonical_uri = str(metadata.redirect_uris[0])  # type: ignore[index]  # set just above
+    if client is None and configured and (url is None or url == known.get(server_name)):
+        # Not for an overridden url=: the configured client belongs to the configured
+        # server's authorization server, and its secret must not go to another one.
+        client = StaticClient._from_config(configured)
     entry = _stored_entry(storage, server_name)
-    reused = _reusable_registration(entry, canonical_uri) if reuse_registration else None
+    reused: OAuthClientInformationFull | None
+    send_uri = canonical_uri  # a registration made here is for the canonical spelling
+    if client is not None:
+        send_uri = client._redirect_spelling(redirect_uri)
+        reused = client._client_info(canonical_uri)
+    else:
+        reused = _reusable_registration(entry, canonical_uri) if reuse_registration else None
 
-    async with _oauth_client() as client:
+    async with _oauth_client() as http:
         staging = _StagingStorage(client_info=reused)
-        provider = _BeginProvider(server_url=server_url, client_metadata=metadata, storage=staging)
+        provider = _BeginProvider(
+            server_url=server_url, client_metadata=metadata, storage=staging, redirect_uri=send_uri
+        )
         try:
-            ready = await _drive_until_authorization(client, provider, server_url)
+            ready = await _drive_until_authorization(http, provider, server_url)
             # A registration belongs to the authorization server that issued it. When the
             # server's URL was overridden or its AS moved, the stored client_id means nothing
             # to the AS just discovered, so register there instead.
             stored_endpoint = entry.get("token_endpoint")
-            if reused is not None and stored_endpoint and provider._get_token_endpoint() != stored_endpoint:
+            if (
+                client is None
+                and reused is not None
+                and stored_endpoint
+                and provider._get_token_endpoint() != stored_endpoint
+            ):
                 metadata = _client_metadata(server_name, redirect_uri, client_name)
                 staging = _StagingStorage()
-                provider = _BeginProvider(server_url=server_url, client_metadata=metadata, storage=staging)
-                ready = await _drive_until_authorization(client, provider, server_url)
+                provider = _BeginProvider(
+                    server_url=server_url, client_metadata=metadata, storage=staging, redirect_uri=send_uri
+                )
+                ready = await _drive_until_authorization(http, provider, server_url)
         except OAuthRegistrationError as exc:
             # `from None`: the explained text is redacted; the original may quote a secret.
             raise _explain_registration_error(exc) from None
 
     ctx = provider.context
+    if client is not None and client.issuer:
+        discovered = str(ctx.oauth_metadata.issuer) if ctx.oauth_metadata else None
+        if discovered is None or discovered.rstrip("/") != client.issuer.rstrip("/"):
+            raise LoginWontHelp(
+                f"The static client {client.client_id!r} belongs to issuer {client.issuer!r}, but "
+                f"{server_url} is served by {discovered or 'an authorization server with no metadata'}."
+            )
     assert ctx.client_info is not None  # _BeginProvider refuses to stop without one
     return PendingLogin(
         server_name=server_name,
         server_url=server_url,
-        redirect_uri=canonical_uri,
+        redirect_uri=send_uri,
         authorization_url=ready.authorization_url,
         state=ready.state,
         expires_at=time.time() + lifetime,
@@ -567,6 +702,10 @@ def _restore_provider(pending: PendingLogin, staging: _StagingStorage) -> OAuthC
         ctx.protected_resource_metadata = ProtectedResourceMetadata.model_validate(pending.protected_resource_metadata)
     ctx.auth_server_url = pending.auth_server_url
     ctx.protocol_version = pending.protocol_version
+    # The token request has to repeat the authorization request's redirect_uri exactly
+    # (RFC 6749 §4.1.3); see `_BeginProvider` for why that may not be the AnyUrl spelling.
+    # A plain assignment: the model does not validate on assignment, so the string stays as is.
+    ctx.client_metadata.redirect_uris = [pending.redirect_uri]  # type: ignore[list-item]
     return provider
 
 

@@ -256,6 +256,9 @@ _headers_cache: dict[str, dict[str, str]] = {}
 # present. Used to refuse SSE up front — this client has no SSE transport adapter,
 # and without the guard an SSE URL silently takes the Streamable HTTP path.
 _types_cache: dict[str, str] = {}
+# Pre-registered OAuth clients keyed by server name, from an entry's "oauthClient" block.
+# Populated alongside _servers_cache by servers(); see _parse_static_clients().
+_static_clients_cache: dict[str, dict] = {}
 
 
 def _filter_str_dict(raw: dict, *, require_nonempty_key: bool = False) -> dict[str, str]:
@@ -342,6 +345,72 @@ def _parse_server_types(raw: dict) -> dict[str, str]:
     return types
 
 
+_STATIC_CLIENT_KEYS = {
+    "client_id": ("clientId", "client_id"),
+    "client_secret": ("clientSecret", "client_secret"),
+    "redirect_uris": ("redirectUris", "redirect_uris"),
+    "token_endpoint_auth_method": ("tokenEndpointAuthMethod", "token_endpoint_auth_method"),
+    "issuer": ("issuer",),
+}
+
+
+_ENV_REF = re.compile(r"\$\{(\w+)\}")
+
+
+def _expand_env_refs(text: str) -> str:
+    """*text* with each ``${VAR}`` replaced by VAR's value; an unset VAR's reference stays.
+
+    Only the braced form: a client secret may contain a bare ``$NAME`` or ``%NAME%``,
+    which ``os.path.expandvars`` would replace.
+    """
+    return _ENV_REF.sub(lambda m: os.environ.get(m.group(1), m.group(0)), text)
+
+
+def _parse_static_clients(raw: dict) -> dict[str, dict]:
+    """Return {name: client} for HTTP entries carrying an "oauthClient" block.
+
+    Each client is ``{"client_id", "client_secret", "redirect_uris", "token_endpoint_auth_method", "issuer"}``
+    with absent members as None (``redirect_uris`` as ``[]``), read from the camelCase keys or
+    their snake_case aliases. String values have ``${VAR}`` references expanded, so a secret
+    can stay in the environment. A ``redirect_uris`` that is not a list of strings is kept
+    as written, for ``StaticClient`` to refuse when the client is used: an empty list would
+    lift the restriction to registered URIs. A block without a client id is dropped. Kept
+    apart from _parse_servers() for the same reason as _parse_server_types().
+    """
+    block = raw.get("mcpServers", raw)
+    clients: dict[str, dict] = {}
+    for name, val in block.items():
+        spec = val.get("oauthClient") if isinstance(val, dict) else None
+        if not isinstance(spec, dict):
+            continue
+        client: dict[str, Any] = {}
+        for member, keys in _STATIC_CLIENT_KEYS.items():
+            value = next((spec[k] for k in keys if k in spec), None)
+            if member == "redirect_uris":
+                if value is None:
+                    client[member] = []
+                elif isinstance(value, list) and all(isinstance(u, str) for u in value):
+                    client[member] = [_expand_env_refs(u) for u in value]
+                else:
+                    client[member] = value
+            else:
+                client[member] = _expand_env_refs(value) if isinstance(value, str) and value else None
+        if client["client_id"]:
+            clients[name] = client
+    return clients
+
+
+def server_config(server_name: str, *, config_path: str | Path | None = None) -> tuple[dict[str, str], dict | None]:
+    """The {name: url} registry and *server_name*'s parsed "oauthClient" block (or None).
+
+    Both come from one `servers()` read, so an explicit *config_path*, which is read fresh
+    on every call, is read once and the two cannot come from different versions of it.
+    """
+    known = servers(config_path=config_path)
+    client = _static_clients_cache.get(server_name)
+    return known, (dict(client) if client else None)
+
+
 def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> dict[str, str]:
     """Return the {name: url} registry loaded from user config (cached).
 
@@ -349,7 +418,7 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
     search-order fallback) and always fresh, bypassing the cache.  A missing or
     unparseable explicit config raises rather than silently returning an empty dict.
     """
-    global _servers_cache, _client_names_cache, _stdio_cache, _headers_cache, _types_cache
+    global _servers_cache, _client_names_cache, _stdio_cache, _headers_cache, _types_cache, _static_clients_cache
     if config_path is None and _servers_cache is not None and not refresh:
         return _servers_cache
     if config_path is not None:
@@ -361,6 +430,7 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
             raw = json.loads(path.read_text())
             _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(raw)
             _types_cache = _parse_server_types(raw)
+            _static_clients_cache = _parse_static_clients(raw)
         except (json.JSONDecodeError, OSError, AttributeError) as e:
             raise ValueError(f"failed to parse config {path}: {e}") from e
         return _servers_cache
@@ -374,11 +444,13 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
                 raw = json.loads(path.read_text())
                 _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(raw)
                 _types_cache = _parse_server_types(raw)
+                _static_clients_cache = _parse_static_clients(raw)
                 return _servers_cache
             except (json.JSONDecodeError, OSError, AttributeError):
                 continue
     _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = {}, {}, {}, {}
     _types_cache = {}
+    _static_clients_cache = {}
     return _servers_cache
 
 

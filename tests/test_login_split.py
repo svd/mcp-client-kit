@@ -389,8 +389,8 @@ def test_begin_rejects_a_redirect_uri_that_is_not_absolute(fake, creds, uri):
         _begin(creds, redirect_uri=uri)
 
 
-@pytest.mark.parametrize("ttl", [0, -5])
-def test_begin_rejects_a_non_positive_ttl(fake, creds, ttl):
+@pytest.mark.parametrize("ttl", [0, -5, float("nan"), float("inf")])
+def test_begin_rejects_a_ttl_that_is_not_a_positive_finite_number(fake, creds, ttl):
     with pytest.raises(ValueError, match="ttl"):
         _begin(creds, ttl=ttl)
 
@@ -557,3 +557,182 @@ def test_a_callback_from_the_right_issuer_completes(fake, creds):
     _complete(pending, callback)
 
     assert _store(creds)["acme"]["tokens"]["access_token"] == "at-client-1"
+
+
+# ── Pre-registered (static) client ───────────────────────────────────────────
+
+STATIC = _login.StaticClient(client_id="static-app", client_secret="static-shh", redirect_uris=(REDIRECT,))
+
+
+def test_a_static_client_skips_registration_and_authenticates_in_the_body(fake, creds):
+    pending = _begin(creds, client=STATIC)
+
+    assert fake.registrations == []
+    assert parse_qs(urlparse(pending.authorization_url).query)["client_id"] == ["static-app"]
+    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+
+    assert fake.token_requests[-1]["client_secret"] == "static-shh"
+    entry = _store(creds)["acme"]
+    assert entry["client_info"]["client_id"] == "static-app"
+    assert entry["client_info"]["client_secret"] == "static-shh"
+    assert entry["client_info"]["token_endpoint_auth_method"] == "client_secret_post"
+    assert entry["tokens"]["access_token"] == "at-static-app"
+
+
+def test_a_public_static_client_sends_no_secret(fake, creds):
+    pending = _begin(creds, client=_login.StaticClient(client_id="pub"))
+    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+
+    assert "client_secret" not in fake.token_requests[-1]
+    assert _store(creds)["acme"]["client_info"]["token_endpoint_auth_method"] == "none"
+
+
+def test_a_static_client_refuses_an_unregistered_redirect_uri(fake, creds):
+    with pytest.raises(ValueError, match="not one the static client"):
+        _begin(creds, client=STATIC, redirect_uri="https://elsewhere.example/cb")
+    assert fake.seen == []
+
+
+@pytest.mark.parametrize(
+    "client",
+    [
+        _login.StaticClient(client_id="c", client_secret="s", token_endpoint_auth_method="client_secret_basic"),
+        _login.StaticClient(client_id="c", token_endpoint_auth_method="client_secret_post"),
+        _login.StaticClient(client_id=""),
+    ],
+)
+def test_a_static_client_that_cannot_refresh_is_refused(fake, creds, client):
+    with pytest.raises(ValueError):
+        _begin(creds, client=client)
+
+
+def test_static_client_repr_hides_the_secret():
+    assert "static-shh" not in repr(STATIC)
+    assert "static-shh" not in str(STATIC)
+
+
+def test_a_static_client_from_config(fake, creds, tmp_path, monkeypatch):
+    monkeypatch.setenv("ACME_SECRET", "from-env")
+    cfg = tmp_path / "servers.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "acme": {
+                        "type": "http",
+                        "url": MCP_URL,
+                        "oauthClient": {
+                            "clientId": "cfg-app",
+                            "clientSecret": "${ACME_SECRET}",
+                            "redirectUris": [REDIRECT],
+                        },
+                    }
+                }
+            }
+        )
+    )
+
+    pending = asyncio.run(begin_login("acme", redirect_uri=REDIRECT, creds_path=creds, config_path=cfg))
+    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+
+    assert fake.registrations == []
+    assert fake.token_requests[-1]["client_id"] == "cfg-app"
+    assert fake.token_requests[-1]["client_secret"] == "from-env"
+
+
+def test_parse_static_clients_accepts_snake_case_and_drops_blocks_without_an_id():
+    raw = {
+        "mcpServers": {
+            "a": {"url": "u", "oauthClient": {"client_id": "x", "redirect_uris": ["https://h/cb"]}},
+            "b": {"url": "u", "oauthClient": {"clientSecret": "only-secret"}},
+            "c": {"url": "u"},
+        }
+    }
+    assert _bridge._parse_static_clients(raw) == {
+        "a": {
+            "client_id": "x",
+            "client_secret": None,
+            "redirect_uris": ["https://h/cb"],
+            "token_endpoint_auth_method": None,
+            "issuer": None,
+        }
+    }
+
+
+def test_parse_static_clients_expands_only_braced_variables(monkeypatch):
+    monkeypatch.setenv("ACME_SECRET", "from-env")
+    monkeypatch.setenv("HOME", "/home/someone")
+    raw = {
+        "acme": {
+            "url": "u",
+            "oauthClient": {
+                "clientId": "app",
+                "clientSecret": "a$HOME%HOME%${ACME_SECRET}$",
+                "redirectUris": ["https://h.example/$HOME/${ACME_SECRET}"],
+            },
+        }
+    }
+
+    client = _bridge._parse_static_clients(raw)["acme"]
+
+    assert client["client_secret"] == "a$HOME%HOME%from-env$"
+    assert client["redirect_uris"] == ["https://h.example/$HOME/from-env"]
+
+
+@pytest.mark.parametrize("uris", ["https://staffing.example/_auth/callback", [5], [REDIRECT, None], {"a": REDIRECT}])
+def test_configured_redirect_uris_that_are_not_a_list_of_strings_are_refused(fake, creds, tmp_path, uris):
+    cfg = _cfg(tmp_path, {"clientId": "cfg-app", "redirectUris": uris})
+
+    with pytest.raises(ValueError, match="redirectUris must be a list of strings"):
+        asyncio.run(begin_login("acme", redirect_uri=REDIRECT, creds_path=creds, config_path=cfg))
+    assert fake.seen == []
+
+
+def _cfg(tmp_path, client: dict) -> Path:
+    cfg = tmp_path / "servers.json"
+    cfg.write_text(json.dumps({"mcpServers": {"acme": {"type": "http", "url": MCP_URL, "oauthClient": client}}}))
+    return cfg
+
+
+def test_a_configured_client_is_not_used_for_an_overridden_url(fake, creds, tmp_path):
+    cfg = _cfg(tmp_path, {"clientId": "cfg-app", "clientSecret": "s", "redirectUris": [REDIRECT]})
+
+    pending = asyncio.run(
+        begin_login("acme", redirect_uri=REDIRECT, url="https://mcp.test/mcp?other", creds_path=creds, config_path=cfg)
+    )
+
+    assert len(fake.registrations) == 1
+    assert pending.client_info["client_id"] == "client-1"
+
+
+def test_a_static_client_pinned_to_another_issuer_is_refused(fake, creds):
+    client = _login.StaticClient(client_id="c", client_secret="s", issuer="https://other-as.test")
+
+    with pytest.raises(_bridge.LoginWontHelp, match="belongs to issuer"):
+        _begin(creds, client=client)
+    assert fake.token_requests == []
+
+
+def test_a_static_client_pinned_to_the_right_issuer_proceeds(fake, creds):
+    _begin(creds, client=_login.StaticClient(client_id="c", issuer=AS_URL + "/"))
+
+
+def test_the_registered_redirect_spelling_is_sent_verbatim(fake, creds):
+    registered = "https://Staffing.Example"
+    client = _login.StaticClient(client_id="c", redirect_uris=(registered,))
+
+    pending = _begin(creds, client=client, redirect_uri="https://staffing.example/")
+    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+
+    assert parse_qs(urlparse(pending.authorization_url).query)["redirect_uri"] == [registered]
+    assert pending.redirect_uri == registered
+    assert fake.token_requests[-1]["redirect_uri"] == registered
+
+
+def test_an_unset_secret_variable_is_named(fake, creds, tmp_path, monkeypatch):
+    monkeypatch.delenv("NOPE_SECRET", raising=False)
+    cfg = _cfg(tmp_path, {"clientId": "cfg-app", "clientSecret": "${NOPE_SECRET}"})
+
+    with pytest.raises(ValueError, match=r"\$\{NOPE_SECRET\}"):
+        asyncio.run(begin_login("acme", redirect_uri=REDIRECT, creds_path=creds, config_path=cfg))
+    assert fake.seen == []

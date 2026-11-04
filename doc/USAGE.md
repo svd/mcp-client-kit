@@ -344,6 +344,57 @@ the registration and a registration past its `client_secret_expires_at`. Pass
 `LoginStateMismatch` also covers a callback whose RFC 9207 `iss` parameter names an
 issuer other than the authorization server the login was started against.
 
+*Pre-registered client.* Some authorization servers refuse Dynamic Client Registration
+for a redirect URI that is not a loopback address. Register a client with the server's
+operator and pass it, or set it per server in config:
+
+```python
+from mcpgen import StaticClient
+
+pending = await begin_login(
+    "myserver",
+    redirect_uri="https://staffing.example/_auth/callback",
+    client=StaticClient(
+        client_id="staffing-viewer",
+        client_secret=os.environ["MYSERVER_CLIENT_SECRET"],   # omit for a public client
+        redirect_uris=("https://staffing.example/_auth/callback",),
+    ),
+)
+```
+
+```jsonc
+{
+  "mcpServers": {
+    "myserver": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "oauthClient": {
+        "clientId": "staffing-viewer",
+        "clientSecret": "${MYSERVER_CLIENT_SECRET}",
+        "redirectUris": ["https://staffing.example/_auth/callback"]
+      }
+    }
+  }
+}
+```
+
+`begin_login` then skips registration. A `redirect_uri` outside the client's
+`redirectUris` is refused before any request goes out; leave `redirectUris` empty to skip
+that check. `redirectUris` must be a list of strings: any other value raises `ValueError`
+when `begin_login` uses the block. The URI is sent in the spelling it was registered with, so
+`https://staffing.example` and `https://staffing.example/` match each other and the
+authorization server sees the registered string. Set `issuer` (config `"issuer"`) to the
+client's authorization server and `begin_login` refuses a server whose discovered issuer
+differs, rather than send the secret there. The `oauthClient` block is not applied when
+`url=` overrides the configured URL. String values expand `${VAR}` from the environment;
+a bare `$VAR` or `%VAR%` stays as written, so a secret may contain `$`. An unset `${VAR}`
+in `clientId` or `clientSecret` raises `ValueError` naming the variable. The client authenticates to the token endpoint with `client_secret_post` when
+it has a secret and as a public client (`none`) when it has none; `tokenEndpointAuthMethod`
+sets either explicitly. `client_secret_basic` is refused, because token refresh sends the
+secret in the request body. The secret is saved in the credential entry, as for any
+registration, so refresh can use it. `repr()` of a `StaticClient` omits it. `login()` does
+not read `oauthClient`; it always registers for its own `localhost` redirect.
+
 *Secrets.* The `to_json()` text holds the PKCE `code_verifier` and, for a confidential
 client, its `client_secret`. Keep it server-side — a session store or an encrypted cookie,
 never a plain cookie or a URL parameter — and delete it once the login completes.

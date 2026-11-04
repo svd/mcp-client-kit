@@ -15,6 +15,13 @@
   or `CodeExchangeRejected` (base `LoginNotCompleted`). A stored registration for the same
   redirect URI is reused. See "Login driven by your own web server" in `doc/USAGE.md`.
 
+- **Pre-registered OAuth clients for `begin_login`.** `begin_login(..., client=StaticClient(
+  client_id, client_secret, redirect_uris))`, or an `"oauthClient"` block on the server's
+  config entry (`clientId`, `clientSecret` with `${VAR}` expansion, `redirectUris`,
+  `tokenEndpointAuthMethod`), uses a client registered ahead of time instead of Dynamic
+  Client Registration, for authorization servers that refuse registration for a
+  non-loopback redirect URI.
+
 ### Changed
 
 - **A one-shot `McpBridgeCaller.call` raises a call error bare.** Outside `connected()`, a
