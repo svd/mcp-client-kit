@@ -2692,6 +2692,52 @@ def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+def _load_store_for_login(storage: FileTokenStorage) -> dict:
+    """Read the whole store for a login that is about to write its entry; call under the lock.
+
+    A corrupt store must not stop this read: a login exists to produce a fresh valid
+    entry, so failing it on unparseable JSON leaves hand-deleting the file as the only
+    route back. Falling through to `{}` is no better — the caller's save would write that
+    empty view over other servers' entries, which may still be recoverable by hand. So
+    the bad file is moved aside and kept, and `{}` is returned. Only the login paths do
+    this; `_file_load` keeps raising for `_pre_flight_refresh` and the SDK's mid-flow
+    reads, which run with nobody at the keyboard.
+
+    Raises LoginWontHelp when the file cannot be moved aside.
+    """
+    try:
+        return storage._load()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # Both mean bytes on disk that are not a store: `UnicodeDecodeError` from
+        # `read_text`, `json.JSONDecodeError` from `json.loads` and from
+        # `_require_store` for a file that parses into something other than an object.
+        # Narrower than OSError on purpose — an unreadable *path* (permissions, a
+        # directory in the way) is not a corrupt store and must propagate.
+        # Nanoseconds, not seconds: two corrupt-store logins in the same second would
+        # otherwise `os.replace` one quarantine over the other.
+        quarantine = storage._path.with_name(f"{storage._path.name}.corrupt.{time.time_ns()}")
+        try:
+            os.replace(storage._path, quarantine)
+        except OSError as move_failed:
+            # Continuing would save `{}` over the bytes the quarantine exists to
+            # preserve. Stop instead: the file is still there and the message says what
+            # to do with it. `LoginWontHelp` rather than a subclass — no token was
+            # cached and the token endpoint was never contacted — and `cli.py` and the
+            # generated runner already catch the base, so this prints as a message
+            # rather than a traceback.
+            raise LoginWontHelp(
+                f"{storage._path} is not a readable credential store ({exc}) and could not be moved aside "
+                f"({move_failed}). Move or delete it by hand, then run login again."
+            ) from exc
+        print(
+            f"[mcpgen] {storage._path} is not a readable credential store ({exc}); moved to {quarantine}. "
+            f"Other servers' entries are in that file if you need them.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {}
+
+
 async def login(
     server_name: str,
     creds_path: Path = DEFAULT_CREDS_PATH,
@@ -2732,51 +2778,13 @@ async def login(
     # bottom of this function restores it so the caller is not locked out of a
     # previously-working server. Once a token has been exchanged the stash is stale.
     #
-    # A corrupt store must not stop this read: `mcpgen login` exists to produce a fresh
-    # valid entry, so failing it on unparseable JSON leaves hand-deleting the file as the
-    # only route back. Falling through to `{}` is no better — the `_save` below would
-    # write that empty view over other servers' entries, which may still be recoverable
-    # by hand. So the bad file is moved aside and kept. Only `login()` does this;
-    # `_file_load` keeps raising for `_pre_flight_refresh` and the SDK's mid-flow reads,
-    # which run with nobody at the keyboard.
-    #
     # Read, quarantine, pop and save are one cycle under the store lock, so two logins
     # finding the same corrupt file cannot each move it aside and race over the survivor.
     # The lock does not span the whole function: the window from here to the restore
     # covers the browser round, and holding it would stall every other mcpgen process for
     # as long as a human takes to click through a consent screen.
     with _store_locks(storage._lock_backend, storage._path):
-        try:
-            data = storage._load()
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            # Both mean bytes on disk that are not a store: `UnicodeDecodeError` from
-            # `read_text`, `json.JSONDecodeError` from `json.loads` and from
-            # `_require_store` for a file that parses into something other than an object.
-            # Narrower than OSError on purpose — an unreadable *path* (permissions, a
-            # directory in the way) is not a corrupt store and must propagate.
-            # Nanoseconds, not seconds: two corrupt-store logins in the same second would
-            # otherwise `os.replace` one quarantine over the other.
-            quarantine = storage._path.with_name(f"{storage._path.name}.corrupt.{time.time_ns()}")
-            try:
-                os.replace(storage._path, quarantine)
-            except OSError as move_failed:
-                # Continuing would `_save({})` over the bytes the quarantine exists to
-                # preserve. Stop instead: the file is still there and the message says what
-                # to do with it. `LoginWontHelp` rather than a subclass — no token was
-                # cached and the token endpoint was never contacted — and `cli.py` and the
-                # generated runner already catch the base, so this prints as a message
-                # rather than a traceback.
-                raise LoginWontHelp(
-                    f"{storage._path} is not a readable credential store ({exc}) and could not be moved aside "
-                    f"({move_failed}). Move or delete it by hand, then run login again."
-                ) from exc
-            print(
-                f"[mcpgen] {storage._path} is not a readable credential store ({exc}); moved to {quarantine}. "
-                f"Other servers' entries are in that file if you need them.",
-                file=sys.stderr,
-                flush=True,
-            )
-            data = {}
+        data = _load_store_for_login(storage)
         stashed = data.pop(server_name, None)
         storage._save(data)
 

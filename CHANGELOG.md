@@ -2,6 +2,19 @@
 
 ## [Unreleased] — 0.12.0
 
+### Added
+
+- **Two-step OAuth login with a caller-owned redirect URI.** `begin_login(server,
+  redirect_uri=...)` runs discovery and client registration and returns a `PendingLogin`
+  with the `authorization_url` to send the browser to; `complete_login(pending,
+  callback_url)` checks `state`, exchanges the code and writes the credential entry
+  `login()` writes. The pending login serializes with `to_json()` / `from_json()`, so the
+  two steps can run in different processes — a web server can drive the login and receive
+  the redirect at its own URL. The previous credential stays in place until a token is
+  issued. Failures raise `PendingLoginExpired`, `LoginStateMismatch`, `AuthorizationDenied`
+  or `CodeExchangeRejected` (base `LoginNotCompleted`). A stored registration for the same
+  redirect URI is reused. See "Login driven by your own web server" in `doc/USAGE.md`.
+
 ### Changed
 
 - **A one-shot `McpBridgeCaller.call` raises a call error bare.** Outside `connected()`, a

@@ -14,6 +14,18 @@ from mcpgen._bridge import (
     login,
     migrate_creds,
 )
+from mcpgen._login import (
+    AuthorizationDenied,
+    CodeExchangeRejected,
+    LoginNotCompleted,
+    LoginResult,
+    LoginStateMismatch,
+    PendingLogin,
+    PendingLoginExpired,
+    begin_login,
+    callback_state,
+    complete_login,
+)
 from mcpgen.seam import McpCaller, McpResourceReader
 
 __all__ = [
@@ -25,6 +37,16 @@ __all__ = [
     "LoginWontHelp",
     "PostLoginCheckFailed",
     "TokenRefreshUnavailable",
+    "LoginNotCompleted",
+    "LoginStateMismatch",
+    "PendingLoginExpired",
+    "AuthorizationDenied",
+    "CodeExchangeRejected",
+    "PendingLogin",
+    "LoginResult",
+    "begin_login",
+    "complete_login",
+    "callback_state",
     "delete_cred",
     "ensure_login",
     "ensure_login_all",

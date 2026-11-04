@@ -286,6 +286,70 @@ Headless mode is auto-detected when neither `DISPLAY` nor `WAYLAND_DISPLAY` is s
 and Windows are always treated as interactive). Set `MCPGEN_HEADLESS=1` or `0` to override
 the detection; an explicit `--headless` / `--no-headless` overrides both.
 
+**Login driven by your own web server (two steps, Python API):**
+
+`login()` owns the whole round: it picks a `localhost` redirect URI and waits for the
+browser in the same coroutine. When the redirect has to land on a server you run —
+`https://<host>/_auth/callback`, possibly on a host the user's browser does not share, for
+several users — split the round in two:
+
+```python
+from mcpgen import PendingLogin, begin_login, callback_state, complete_login
+
+# Request 1: start the login and send the browser to the authorization server.
+pending = await begin_login(
+    "myserver",
+    redirect_uri="https://staffing.example/_auth/callback",
+    creds_path=user_creds_path,          # whose store the token goes to
+)
+session_store[pending.state] = pending.to_json()   # server-side only — see below
+return redirect(pending.authorization_url)
+
+# Request 2 (any process): the authorization server redirected back here.
+blob = session_store.pop(callback_state(request.url))
+result = await complete_login(PendingLogin.from_json(blob), str(request.url), verify=True)
+result.tools_count   # list_tools() ran over the new credential
+```
+
+`begin_login` runs discovery and client registration and nothing else: no browser, no
+listener, no stdin. `redirect_uri` is any absolute URL, host, port and path included.
+`complete_login` checks `state`, exchanges the code and writes the same credential entry
+`login()` writes (client registration, tokens, token endpoint), under the same store
+lock, so every other mcpgen call reads it as usual. The two calls may run in different
+processes; `to_json()` / `PendingLogin.from_json()` carry everything in between.
+
+The previous credential for the server stays in place until `complete_login` has a token
+in hand. A pending login that is abandoned, expires or fails leaves it untouched. Each
+pending login is independent, so several can be open at once: different users with their
+own `creds_path`, or several servers for one user. Look one up by `state`;
+`callback_state(url)` reads it from the redirect.
+
+| Raised by `complete_login` | When | Previous credential |
+|---|---|---|
+| `PendingLoginExpired` | past `pending.expires_at` (`ttl=` on `begin_login`, default 300 s) | kept |
+| `LoginStateMismatch` | the callback's `state` is missing or belongs to another pending login | kept |
+| `AuthorizationDenied` | the callback carries `error=` (`.error`, `.error_description`), e.g. `access_denied` | kept |
+| `CodeExchangeRejected` | the token endpoint refused the code (`.status_code`, `.error`, `.error_description`) | kept |
+| `PostLoginCheckFailed` | `verify=True` and `list_tools()` failed after the token was saved | replaced |
+
+The first four share the base `LoginNotCompleted`; another `begin_login` is the way
+forward from each. A code is single-use, so retrying the same callback fails the same way.
+
+A stored public-client registration whose `redirect_uris` contains the requested URI is
+reused, so repeated logins through one callback do not register a new client each time.
+A different URI registers anew, and so do an authorization server that has moved since
+the registration and a registration past its `client_secret_expires_at`. Pass
+`reuse_registration=False` to always register.
+
+`LoginStateMismatch` also covers a callback whose RFC 9207 `iss` parameter names an
+issuer other than the authorization server the login was started against.
+
+*Secrets.* The `to_json()` text holds the PKCE `code_verifier` and, for a confidential
+client, its `client_secret`. Keep it server-side — a session store or an encrypted cookie,
+never a plain cookie or a URL parameter — and delete it once the login completes.
+`repr()` and `str()` of a `PendingLogin` print neither. mcpgen never logs or quotes the
+callback URL, which carries the authorization code; the authorization URL is safe to log.
+
 **PAT / Bearer token:**
 
 ```bash
