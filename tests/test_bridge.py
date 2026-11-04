@@ -5463,6 +5463,26 @@ def test_parse_resource_plain_text():
     )
 
 
+@pytest.mark.parametrize(
+    "mime_type",
+    ["text/markdown", "text/csv", "text/html; charset=utf-8", "application/xml", "application/yaml", "Text/Markdown"],
+)
+def test_parse_resource_keeps_declared_non_json_text_verbatim(mime_type):
+    """A text content whose mimeType names a non-JSON format comes back as the string the server sent."""
+    for text in ("123", "[1, 2]", "{'a': 1}", "true"):
+        item = mcp_types.TextResourceContents(uri="demo://doc", text=text, mimeType=mime_type)
+        assert _bridge.parse_resource([item]) == text
+
+
+@pytest.mark.parametrize(
+    "mime_type", [None, "application/json", "application/ld+json", "text/plain", "application/json; charset=utf-8"]
+)
+def test_parse_resource_parses_json_plain_and_undeclared_text(mime_type):
+    """JSON types, text/plain and an absent mimeType keep the JSON → literal_eval → str chain."""
+    item = mcp_types.TextResourceContents(uri="demo://doc", text="123", mimeType=mime_type)
+    assert _bridge.parse_resource([item]) == 123
+
+
 def test_parse_resource_blob_is_decoded_bytes():
     payload = b"\x89PNG\r\n\x1a\n\x00\xff"
     result = _bridge.parse_resource([_blob_contents(payload)])

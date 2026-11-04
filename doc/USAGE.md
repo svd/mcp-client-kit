@@ -576,8 +576,10 @@ async def read_dimension_by_unit_type(caller: McpResourceReader, *, unitType: st
   Variables in a `{?…}` or `{&…}` expression are optional (`str | None = None`) and omitted
   from the URI when `None`. The accessor expands the template itself (RFC 6570, levels 1–4),
   so `unitType="Delivery Unit"` reads `dimension://by-unit-type/Delivery%20Unit`.
-- **Return values** are decoded the way tool results are. A text content is parsed as JSON,
-  else as a Python literal (`ast.literal_eval`), else returned as the `str`; a blob content
+- **Return values** are decoded the way tool results are. A text content declared as JSON
+  (`application/json`, any `+json` type), as `text/plain`, or with no `mimeType` is parsed as
+  JSON, else as a Python literal (`ast.literal_eval`), else returned as the `str`; text of any
+  other declared type (`text/markdown`, `text/csv`, XML, YAML) is returned as the `str`; a blob content
   comes back as decoded `bytes`; several contents come back as a list in server order; no
   contents raise `ValueError`. Without a shape entry the accessor returns `Any`; a probed and
   shaped entry types it exactly as for a tool (`unwrap`, `return_model`, `return_container`).

@@ -2324,9 +2324,23 @@ def normalize_resource_uri(uri: str) -> str:
 _ASCII_WHITESPACE = re.compile(r"[ \t\n\r\f\v]+")
 
 
+def _parses_as_data(mime_type: str | None) -> bool:
+    """True when text declared as *mime_type* goes through ``_parse_text``.
+
+    An absent mimeType, ``text/plain`` and the JSON types (``application/json``,
+    any ``+json`` suffix) do; any other declared type names a format of its own
+    (Markdown, CSV, HTML, XML, YAML), whose text is kept as the server sent it.
+    ``text/plain`` stays parsed because servers commonly label JSON with it.
+    """
+    if mime_type is None:
+        return True
+    essence = mime_type.split(";", 1)[0].strip().lower()
+    return essence in ("", "text/plain", "application/json") or essence.endswith("+json")
+
+
 def _parse_resource_one(item: TextResourceContents | BlobResourceContents) -> Any:
     if isinstance(item, TextResourceContents):
-        return _parse_text(item.text)
+        return _parse_text(item.text) if _parses_as_data(item.mimeType) else item.text
     # Line-wrapped (MIME-style) base64 is accepted; anything outside the standard
     # alphabet, such as URL-safe base64, raises instead of silently decoding to
     # different bytes.
@@ -2336,11 +2350,12 @@ def _parse_resource_one(item: TextResourceContents | BlobResourceContents) -> An
 def parse_resource(contents: Sequence[TextResourceContents | BlobResourceContents]) -> Any:
     """Extract the payload from the ``contents`` of an MCP ``resources/read`` result.
 
-    Text contents parse exactly like tool text blocks (``_parse_text``); blob
-    contents are base64-decoded to ``bytes``, raising ``ValueError`` for invalid
-    base64. One content returns its value directly, several return a list of
+    Text contents declared as JSON, ``text/plain`` or with no mimeType parse
+    exactly like tool text blocks (``_parse_text``); text of any other declared
+    type is returned as the string (see ``_parses_as_data``). Blob contents are
+    base64-decoded to ``bytes``, raising ``ValueError`` for invalid base64. One content returns its value directly, several return a list of
     per-content values in server order — the same folding as ``parse``.
-    Per-content URIs and mimeTypes are not kept.
+    Per-content URIs and mimeTypes are not returned.
     """
     if not contents:
         raise ValueError("MCP resource read returned no contents")

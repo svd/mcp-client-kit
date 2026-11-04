@@ -13,6 +13,15 @@
   for code that caught the group:** catch `McpError` instead. Auth and transport failures
   while the session opens or closes are unchanged.
 
+- **Resource text keeps its declared format.** `parse_resource` — and so every `read_*`
+  accessor, `McpBridgeCaller.read_resource` and `probe --resource` — ran every text content
+  through the JSON → `literal_eval` → string chain, so a `text/markdown` body of `123` came
+  back as an `int` and a CSV row `1, 2` as a tuple. Text whose `mimeType` names a format of its
+  own (`text/markdown`, `text/csv`, `text/html`, XML, YAML) is now returned as the string the
+  server sent. JSON types (`application/json`, `+json`), `text/plain` and an absent `mimeType`
+  are parsed as before. Re-probe a resource of such a type whose shape entry recorded a parsed
+  value.
+
 ## [0.11.1] — 2026-11-03
 
 ### Fixed
