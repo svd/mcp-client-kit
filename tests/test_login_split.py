@@ -43,6 +43,22 @@ PRIOR = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _isolated_server_config(tmp_path, monkeypatch):
+    """`servers()` caches module-globally, and an explicit config_path fills that cache.
+
+    Without a reset, a test that loads an `oauthClient` block leaks it into every later
+    test that names the same server; the empty config also keeps the default search off
+    the developer's real ~/.mcpgen/servers.json.
+    """
+    empty = tmp_path / "no-servers.json"
+    empty.write_text("{}")
+    monkeypatch.setenv("MCPGEN_SERVERS", str(empty))
+    monkeypatch.setattr(_bridge, "_SERVERS_SEARCH", [])
+    monkeypatch.setattr(_bridge, "_servers_cache", None)
+    monkeypatch.setattr(_bridge, "_static_clients_cache", {})
+
+
 @pytest.fixture
 def fake(monkeypatch):
     oauth = FakeOAuth()
@@ -736,3 +752,71 @@ def test_an_unset_secret_variable_is_named(fake, creds, tmp_path, monkeypatch):
     with pytest.raises(ValueError, match=r"\$\{NOPE_SECRET\}"):
         asyncio.run(begin_login("acme", redirect_uri=REDIRECT, creds_path=creds, config_path=cfg))
     assert fake.seen == []
+
+
+# ── Parity with login() and an end-to-end call ───────────────────────────────
+
+
+def test_the_entry_matches_what_logins_sdk_writes_would_store(fake, creds, tmp_path):
+    """login() writes through FileTokenStorage.set_client_info / set_tokens (the SDK's seam)
+    and `_persist_token_endpoint`; replaying the same objects through them gives this entry."""
+    pending = _begin(creds)
+    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+    ours = _store(creds)["acme"]
+
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+    reference = _bridge.FileTokenStorage("acme", tmp_path / "ref.json")
+    asyncio.run(reference.set_client_info(OAuthClientInformationFull.model_validate(pending.client_info)))
+    token_fields = {k: v for k, v in ours["tokens"].items() if k != "expires_at"}
+    asyncio.run(reference.set_tokens(OAuthToken(**token_fields)))
+    reference._mutate(lambda d: d["acme"].__setitem__("token_endpoint", f"{AS_URL}/token"))
+    theirs = _store(tmp_path / "ref.json")["acme"]
+
+    assert abs(ours["tokens"].pop("expires_at") - theirs["tokens"].pop("expires_at")) <= 5
+    assert ours == theirs
+
+
+def test_a_later_tool_call_works_over_the_saved_credential(fake, creds, monkeypatch):
+    import httpx
+
+    pending = _begin(creds)
+    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+    seen_auth = []
+
+    def mcp(request: httpx.Request) -> httpx.Response:
+        seen_auth.append(request.headers.get("authorization"))
+        if request.headers.get("authorization") != "Bearer at-client-1":
+            return httpx.Response(401)
+        msg = json.loads(request.content)
+        if "id" not in msg:
+            return httpx.Response(202)
+        if msg["method"] == "initialize":
+            result = {
+                "protocolVersion": msg["params"]["protocolVersion"],
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "fake", "version": "1"},
+            }
+        elif msg["method"] == "tools/list":
+            result = {"tools": [{"name": "whoami", "inputSchema": {"type": "object"}}]}
+        else:
+            result = {"content": [{"type": "text", "text": '{"user": "alice"}'}], "isError": False}
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": msg["id"], "result": result})
+
+    real_factory = _bridge.create_mcp_http_client
+
+    def factory(headers=None, auth=None, **kwargs):
+        client = real_factory(headers=headers, auth=auth, **kwargs)
+        client._transport = httpx.MockTransport(mcp)
+        return client
+
+    monkeypatch.setattr(_bridge, "create_mcp_http_client", factory)
+
+    async def call():
+        async with _bridge._http_session("acme", MCP_URL, creds_path=creds, cred_backend="file") as s:
+            return await s.call_tool("whoami", {})
+
+    result = asyncio.run(asyncio.wait_for(call(), 10))
+
+    assert result.content[0].text == '{"user": "alice"}'
+    assert seen_auth and set(seen_auth) == {"Bearer at-client-1"}
