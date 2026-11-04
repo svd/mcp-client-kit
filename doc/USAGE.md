@@ -401,6 +401,31 @@ never a plain cookie or a URL parameter — and delete it once the login complet
 `repr()` and `str()` of a `PendingLogin` print neither. mcpgen never logs or quotes the
 callback URL, which carries the authorization code; the authorization URL is safe to log.
 
+**Checking a credential without ever logging in (background jobs):**
+
+```python
+from mcpgen import ReauthenticationRequired, ensure_login
+
+try:
+    await ensure_login("myserver", interactive=False)
+except ReauthenticationRequired:
+    ...  # tell the user to log in; nothing was opened
+```
+
+`interactive=False` runs the same check and silent refresh as a call does — a live token
+passes, an expiring one is renewed against the authorization server — and raises
+`ReauthenticationRequired` wherever `ensure_login` would otherwise open a login: no token
+cached, nothing to refresh with, or a refresh token the server reports dead.
+`TokenRefreshUnavailable` propagates as usual. `ensure_login_all` takes the same flag.
+Unlike reading `list_creds()`, this asks the authorization server, so a dead refresh token
+is caught once the access token is due for renewal.
+
+When a call over a dead credential raises `ReauthenticationRequired` from inside the MCP
+SDK's auth flow, the SDK's `mcp.client.auth.oauth2` logger would record it as "OAuth flow
+error" with a traceback. mcpgen filters that one record out (it installs a filter on that
+logger at import); every other record on it, including real OAuth flow errors, still
+passes.
+
 **PAT / Bearer token:**
 
 ```bash

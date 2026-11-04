@@ -22,6 +22,17 @@
   Client Registration, for authorization servers that refuse registration for a
   non-loopback redirect URI.
 
+- **`ensure_login(..., interactive=False)`** checks or silently refreshes a credential and
+  raises `ReauthenticationRequired` where it would otherwise open a login, for jobs that
+  must never start one. `ensure_login_all` takes the same flag.
+
+### Fixed
+
+- **A dead credential no longer writes an SDK traceback per call.** A call that needed a
+  browser login raised `ReauthenticationRequired` from inside the MCP SDK's auth flow, which
+  logged it to `mcp.client.auth.oauth2` as "OAuth flow error" with a full traceback, once
+  per call. That record is now filtered out; other records on the logger are unchanged.
+
 ### Changed
 
 - **A one-shot `McpBridgeCaller.call` raises a call error bare.** Outside `connected()`, a

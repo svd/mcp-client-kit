@@ -34,6 +34,7 @@ import asyncio
 import base64
 import errno as _errno
 import json
+import logging
 import os
 import re
 import shlex
@@ -544,6 +545,28 @@ _CALLBACK_TIMEOUT = 300
 
 class ReauthenticationRequired(Exception):
     """Tokens absent or the grant is dead. Run: mcpgen login <server>"""
+
+
+_SDK_AUTH_LOGGER = "mcp.client.auth.oauth2"
+
+
+class _ExpectedReauthFilter(logging.Filter):
+    """Drops the SDK's "OAuth flow error" record when the error is our ReauthenticationRequired.
+
+    A session over a dead refresh token reaches the SDK's authorization branch, where
+    `_http_session`'s redirect handler raises ReauthenticationRequired by design. The SDK
+    logs every exception there with `logger.exception`, so a run fanning out N calls would
+    write N tracebacks before the caller reports the one error that matters. Every other
+    record on that logger passes.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc = record.exc_info[1] if record.exc_info else None
+        return not isinstance(exc, ReauthenticationRequired)
+
+
+if not any(isinstance(f, _ExpectedReauthFilter) for f in logging.getLogger(_SDK_AUTH_LOGGER).filters):
+    logging.getLogger(_SDK_AUTH_LOGGER).addFilter(_ExpectedReauthFilter())
 
 
 class LoginWontHelp(Exception):
@@ -3047,6 +3070,7 @@ async def ensure_login(
     cred_backend: str | None = None,
     headless: bool | None = None,
     callback_timeout: float | None = None,
+    interactive: bool = True,
 ) -> None:
     """Ensure a usable token exists for server_name, refreshing or logging in.
 
@@ -3069,11 +3093,17 @@ async def ensure_login(
       `TokenRefreshUnavailable` propagates. The refresh token is intact in all of
       those, so a browser round has nothing to replace.
     - No token at all: browser login.
+
+    interactive=False never starts a login: each case above that would open one raises
+    `ReauthenticationRequired` instead, so a background job can check or renew a
+    credential and report the one clear error. The other cases behave as above.
     """
     storage = FileTokenStorage(server_name, creds_path, backend=resolve_cred_backend(cred_backend))
     try:
         await _pre_flight_refresh(server_name, storage)
     except ReauthenticationRequired:
+        if not interactive:
+            raise
         before, started = _stored_tokens(storage), time.time()
         await login(
             server_name,
@@ -3091,6 +3121,8 @@ async def ensure_login(
         _verify_login_took(storage, before, started)
         return
     if await storage.get_tokens() is None:  # first-time: no token cached at all
+        if not interactive:
+            raise ReauthenticationRequired(f"No token cached for '{server_name}'. Run: mcpgen login {server_name}")
         before, started = _stored_tokens(storage), time.time()
         await login(
             server_name,
@@ -3113,6 +3145,7 @@ async def ensure_login_all(
     cred_backend: str | None = None,
     headless: bool | None = None,
     callback_timeout: float | None = None,
+    interactive: bool = True,
 ) -> None:
     """Run ensure_login() for each server, one at a time.
 
@@ -3128,4 +3161,5 @@ async def ensure_login_all(
             cred_backend=cred_backend,
             headless=headless,
             callback_timeout=callback_timeout,
+            interactive=interactive,
         )

@@ -4336,6 +4336,7 @@ def test_ensure_login_all_runs_servers_in_order_with_kwargs(tmp_path):
             "cred_backend": "keyring",
             "headless": True,
             "callback_timeout": None,
+            "interactive": True,
         }
 
 
