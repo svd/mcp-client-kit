@@ -5841,6 +5841,21 @@ def test_call_tool_result_one_shot_raises_a_call_error_bare():
     assert log == [("enter", "demo"), ("exit", "demo")]
 
 
+def test_call_one_shot_raises_a_call_error_bare():
+    """``call()`` outside ``connected()`` raises the call error itself, so ``except McpError`` catches it."""
+    log: list = []
+    s = MagicMock()
+    s.call_tool = AsyncMock(side_effect=McpError(mcp_types.ErrorData(code=-32602, message="Unknown tool: nope")))
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, log)):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").call("demo", "nope", {})
+
+    with pytest.raises(McpError, match="Unknown tool"):
+        asyncio.run(run())
+    assert log == [("enter", "demo"), ("exit", "demo")]
+
+
 @pytest.mark.parametrize("is_error", [False, True], ids=["ok", "isError"])
 def test_parse_tool_result_is_what_call_returns(is_error):
     """``_parse_tool_result`` of the raw result equals ``call()``'s payload, error or not."""

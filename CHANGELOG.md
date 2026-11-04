@@ -2,6 +2,17 @@
 
 ## [Unreleased] — 0.12.0
 
+### Changed
+
+- **A one-shot `McpBridgeCaller.call` raises a call error bare.** Outside `connected()`, a
+  JSON-RPC error from `tools/call` — an unknown tool, invalid arguments, an expired
+  `call_timeout` — left the session's anyio task groups and reached the caller as
+  `ExceptionGroup(ExceptionGroup(McpError))`, so `except McpError` around a generated wrapper
+  missed it. `call()` now runs through the same path as `call_tool_result()` and
+  `read_resource()` and raises the `McpError` itself once the session has closed. **Breaking
+  for code that caught the group:** catch `McpError` instead. Auth and transport failures
+  while the session opens or closes are unchanged.
+
 ## [0.11.1] — 2026-11-03
 
 ### Fixed

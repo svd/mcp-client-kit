@@ -121,6 +121,18 @@ call that mutates may still have taken effect: check before re-issuing it. `code
 takes the same flag. In code, the same value is `call_timeout=` on `McpBridgeCaller`; its
 default, `None`, leaves generated wrappers unbounded.
 
+**A call error in code.** A JSON-RPC error from `tools/call` — an unknown tool, invalid
+arguments, an expired `call_timeout` (code 408) — raises the SDK's `McpError` from a generated
+wrapper, `McpBridgeCaller.call` and `call_tool_result`, one-shot or inside `connected()`, so
+`except McpError` around a wrapper catches it. Auth and transport failures while the session
+opens or closes still arrive as the transport raised them.
+
+**Listing timeout.** `list`, `list --resources`, `codegen` and `check` give each page of
+`tools/list`, `resources/list` and `resources/templates/list` 60 s to arrive. Past that the
+command exits `1` with `[list] error: TimeoutError: MCP server sent no tools page within 60s`
+(or `could not list resources: …` for a resource list). The bound is per page, so a long
+listing that keeps answering runs to the end. It is not configurable.
+
 **A tool that reports failure.** A tool can answer with a result flagged `isError` — MCP's way
 of saying the tool ran and failed (a validation error, a missing entitlement), as opposed to a
 JSON-RPC error. All three commands below print `[<command>] tool returned isError: <text>`,

@@ -2055,10 +2055,7 @@ class McpBridgeCaller:
 
     *call_timeout* bounds each ``tools/call`` round trip, in seconds, through the
     SDK's per-request read timeout. On expiry the SDK raises an ``McpError`` with
-    code 408: bare from ``call()`` inside ``connected()`` and from
-    ``call_tool_result()``, but wrapped as
-    ``ExceptionGroup(ExceptionGroup(McpError))`` from a one-shot ``call()``, since
-    it leaves the session's task groups. The server is not told to cancel the
+    code 408, bare from ``call()`` and ``call_tool_result()`` alike. The server is not told to cancel the
     call (no ``notifications/cancelled``), so the tool may still run to
     completion. The timeout does not cover opening the session (the
     ``initialize`` handshake, OAuth) or closing it. The bound is the SDK's rather
@@ -2136,25 +2133,22 @@ class McpBridgeCaller:
             await block.close()
 
     async def call(self, server: str, tool: str, arguments: dict) -> Any:
-        block = self._block
-        if block is None:
-            # One-shot: open, call, close. Unchanged behaviour.
-            async with self._session_cm(server) as s:
-                return await self._invoke(s, tool, arguments)
-        return await self._invoke(await block.session_for(server), tool, arguments)
+        """Call *tool* and return its parsed payload (see ``_parse_tool_result``).
 
-    async def _invoke(self, s: Any, tool: str, arguments: dict) -> Any:
-        result = await s.call_tool(tool, arguments, read_timeout_seconds=self._read_timeout)
-        return _parse_tool_result(result)
+        One-shot outside ``connected()``, the block's session for *server* inside
+        it. A call error raised in a one-shot session is re-raised bare once the
+        session has closed (see ``_one_shot``), so ``except McpError`` around a
+        generated wrapper catches it either way.
+        """
+        return _parse_tool_result(await self.call_tool_result(server, tool, arguments))
 
     async def call_tool_result(self, server: str, tool: str, arguments: dict) -> CallToolResult:
         """Call *tool* and return the SDK's unparsed ``CallToolResult``, ``isError`` included.
 
         For callers that must tell a tool's reported failure from its answer, which
         ``call()`` cannot: it parses an ``isError`` result like any other. Session
-        handling and *call_timeout* are ``call()``'s, except that a call error raised
-        in a one-shot session is re-raised bare once the session has closed (see
-        ``_one_shot``). ``_parse_tool_result`` turns the result into ``call()``'s payload.
+        handling, *call_timeout* and error propagation are ``call()``'s.
+        ``_parse_tool_result`` turns the result into ``call()``'s payload.
         """
 
         async def invoke(s: Any) -> CallToolResult:
