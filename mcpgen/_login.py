@@ -58,6 +58,7 @@ from mcp.types import LATEST_PROTOCOL_VERSION
 from mcpgen._bridge import (
     _CALLBACK_TIMEOUT,
     _ENV_REF,
+    _PENDING_KEY,
     DEFAULT_CREDS_PATH,
     FileTokenStorage,
     LoginWontHelp,
@@ -77,9 +78,6 @@ from mcpgen._bridge import (
     resolve_cred_backend,
     server_config,
 )
-
-_PENDING_KEY = "pending_login"
-"""Key of the pending-login record in a server's credential entry."""
 
 _PENDING_FORMAT = 1
 """Version of the pending-login record. A record of any other format counts as no pending
@@ -546,15 +544,38 @@ def _stored_entry(storage: FileTokenStorage, server_name: str) -> dict:
     return entry if isinstance(entry, dict) else {}
 
 
-def _reusable_registration(entry: dict, redirect_uri: str) -> OAuthClientInformationFull | None:
-    """The stored client registration, when it is one `begin_login()` would have made itself.
+def _reusable_registration(entry: dict, redirect_uri: str) -> tuple[OAuthClientInformationFull, str | None] | None:
+    """A stored client registration `begin_login()` can reuse, with the token endpoint of
+    the authorization server that issued it (None when unknown).
+
+    Tried in order: the entry's `client_info`, issued by the AS behind the entry's
+    `token_endpoint`; then the `client_info` of a usable pending login, issued by the AS in
+    the record's `oauth_metadata` — a registration made by a `begin_login()` that never
+    completed. A pending login whose metadata names no token endpoint offers nothing.
+    """
+    candidates: list[tuple[object, object]] = [(entry.get("client_info"), entry.get("token_endpoint"))]
+    record = _PendingRecord.from_dict(entry.get(_PENDING_KEY))
+    pending_endpoint = (record.oauth_metadata or {}).get("token_endpoint") if record is not None else None
+    if record is not None and pending_endpoint:
+        # Only with a known issuing endpoint: without one the moved-AS check could not run.
+        candidates.append((record.client_info, pending_endpoint))
+    for raw, endpoint in candidates:
+        client = _reusable_client(raw, redirect_uri)
+        if client is not None:
+            return client, endpoint if isinstance(endpoint, str) and endpoint else None
+    return None
+
+
+def _reusable_client(raw: object, redirect_uri: str) -> OAuthClientInformationFull | None:
+    """*raw* as a client registration, when it is one `begin_login()` would have made itself.
 
     That is: registered for *redirect_uri*, as a public client, and not past its
     `client_secret_expires_at`. A confidential registration from an older mcpgen fails the
     second test on purpose — reusing it brings back the two-authentication-methods token
     request `_client_metadata` registers as a public client to avoid.
     """
-    raw = entry.get("client_info") or {}
+    if not isinstance(raw, dict):
+        return None
     if not raw.get("client_id") or redirect_uri not in (raw.get("redirect_uris") or []):
         return None
     if raw.get("token_endpoint_auth_method") != "none":
@@ -603,8 +624,9 @@ async def begin_login(
     url / client_name / config_path: as in `login()`.
     ttl: seconds until the pending login expires; None uses 300 (the same bound as
         `login()`'s callback wait). Must be positive and finite.
-    reuse_registration: reuse the stored client registration when its `redirect_uris`
-        holds *redirect_uri* and the authorization server has not moved. False always
+    reuse_registration: reuse a stored client registration — the entry's, else the one
+        an earlier uncompleted `begin_login()` made — when its `redirect_uris` holds
+        *redirect_uri* and the authorization server has not moved. False always
         registers anew.
     client: a pre-registered client to use instead of registering one; None falls back
         to the server's "oauthClient" config block, then to registration.
@@ -634,12 +656,14 @@ async def begin_login(
     # file backend, and the record must still be written where `complete_login()` looks.
     entry = _stored_entry(FileTokenStorage(server_name, path, backend=storage._backend), server_name)
     reused: OAuthClientInformationFull | None
+    reused_endpoint: str | None = None  # token endpoint of the AS that issued `reused`
     send_uri = canonical_uri  # a registration made here is for the canonical spelling
     if client is not None:
         send_uri = client._redirect_spelling(redirect_uri)
         reused = client._client_info(canonical_uri)
     else:
-        reused = _reusable_registration(entry, canonical_uri) if reuse_registration else None
+        found = _reusable_registration(entry, canonical_uri) if reuse_registration else None
+        reused, reused_endpoint = found if found is not None else (None, None)
 
     async with _oauth_client() as http:
         staging = _StagingStorage(client_info=reused)
@@ -649,14 +673,13 @@ async def begin_login(
         try:
             ready = await _drive_until_authorization(http, provider, server_url)
             # A registration belongs to the authorization server that issued it. When the
-            # server's URL was overridden or its AS moved, the stored client_id means nothing
+            # server's URL was overridden or its AS moved, the reused client_id means nothing
             # to the AS just discovered, so register there instead.
-            stored_endpoint = entry.get("token_endpoint")
             if (
                 client is None
                 and reused is not None
-                and stored_endpoint
-                and provider._get_token_endpoint() != stored_endpoint
+                and reused_endpoint
+                and provider._get_token_endpoint() != reused_endpoint
             ):
                 metadata = _client_metadata(server_name, redirect_uri, client_name)
                 staging = _StagingStorage()

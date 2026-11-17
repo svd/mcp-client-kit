@@ -659,6 +659,70 @@ def test_a_registration_from_a_moved_authorization_server_is_not_reused(fake, cr
     assert second.authorization_url.startswith("https://as2.test/authorize?")
 
 
+def test_second_begin_reuses_the_client_the_first_registered(fake, creds):
+    _begin(creds)
+    first = _record(creds)
+
+    second = _begin(creds)
+
+    assert len(fake.registrations) == 1
+    assert first["client_info"]["client_id"] == "client-1"
+    assert _record(creds)["client_info"]["client_id"] == "client-1"
+    assert parse_qs(urlparse(second.authorization_url).query)["client_id"] == ["client-1"]
+
+
+def test_a_pending_registration_is_checked_against_its_own_token_endpoint(fake, creds):
+    _begin(creds)
+    store = _store(creds)
+    store["acme"]["token_endpoint"] = "https://retired-as.test/token"
+    _bridge.FileTokenStorage("acme", creds)._save(store)
+
+    _begin(creds)
+
+    assert len(fake.registrations) == 1
+    assert _record(creds)["client_info"]["client_id"] == "client-1"
+
+
+def test_a_pending_registration_from_a_moved_authorization_server_is_not_reused(fake, creds):
+    _begin(creds)
+    store = _store(creds)
+    del store["acme"]["token_endpoint"]  # only the record's metadata can tell the AS moved
+    _bridge.FileTokenStorage("acme", creds)._save(store)
+    fake.as_url = "https://as2.test"
+
+    second = _begin(creds)
+
+    assert len(fake.registrations) == 2
+    assert _record(creds)["client_info"]["client_id"] == "client-2"
+    assert second.authorization_url.startswith("https://as2.test/authorize?")
+
+
+def test_a_pending_registration_without_a_known_token_endpoint_is_not_reused(fake, creds):
+    _begin(creds)
+    store = _store(creds)
+    del store["acme"]["token_endpoint"]
+    store["acme"]["pending_login"]["oauth_metadata"] = None  # the AS published no metadata
+    _bridge.FileTokenStorage("acme", creds)._save(store)
+
+    _begin(creds)
+
+    assert len(fake.registrations) == 2
+
+
+def test_an_unusable_pending_record_offers_no_registration(fake, creds):
+    store = _store(creds)
+    store["acme"]["pending_login"] = {
+        "format": 1,
+        "client_info": {"client_id": "stale", "redirect_uris": [REDIRECT], "token_endpoint_auth_method": "none"},
+    }
+    _bridge.FileTokenStorage("acme", creds)._save(store)
+
+    _begin(creds)
+
+    assert len(fake.registrations) == 1
+    assert _record(creds)["client_info"]["client_id"] == "client-1"
+
+
 # ── Concurrency ──────────────────────────────────────────────────────────────
 
 

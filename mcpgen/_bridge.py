@@ -86,6 +86,10 @@ _T = TypeVar("_T")
 DEFAULT_CREDS_PATH = Path.home() / ".mcpgen" / "credentials.json"
 DEFAULT_CONFIG_PATH = Path.home() / ".mcpgen" / "config.json"
 
+_PENDING_KEY = "pending_login"
+"""Key of the pending-login record `_login.begin_login()` keeps in a server's credential
+entry. Defined here because `migrate_creds` reads it too."""
+
 # Credential backend — selects where OAuth tokens are stored.
 # Resolution order (first wins):
 #   1. CLI --cred-backend flag (passed through to FileTokenStorage)
@@ -1031,6 +1035,12 @@ def migrate_creds(
         Override path for the client config (default:
         ``~/.mcpgen/config.json``).
 
+    A pending two-step login (the entry's ``pending_login``) is not migrated: it is
+    left out of each copied entry, and an entry holding nothing else is not copied,
+    counted or purged. A target entry's pending login is kept when a copied entry
+    replaces that entry. Purging removes a copied entry whole, its pending login
+    included.
+
     Returns
     -------
     dict
@@ -1070,7 +1080,18 @@ def migrate_creds(
         else:
             source_subset = source_all
 
-        if not source_subset:
+        # Pending logins are not copied: `complete_login()` takes one from the store
+        # `begin_login()` wrote it to. An entry holding nothing else is not copied either,
+        # so it never overwrites a credential in the target.
+        copied = {}
+        for k, entry in source_subset.items():
+            if isinstance(entry, dict):
+                entry = {key: value for key, value in entry.items() if key != _PENDING_KEY}
+                if not entry:
+                    continue
+            copied[k] = entry
+
+        if not copied:
             return {
                 "from": from_backend,
                 "to": to_backend,
@@ -1082,24 +1103,29 @@ def migrate_creds(
 
         # Merge into target (source wins on collision)
         target = _read_backend(to_backend, credentials_path)
-        overwritten = sum(1 for k in source_subset if k in target)
-        merged = {**target, **source_subset}
+        overwritten = sum(1 for k in copied if k in target)
+        merged = {**target, **copied}
+        for k in copied:
+            pending = target.get(k, {}).get(_PENDING_KEY) if isinstance(target.get(k), dict) else None
+            if pending is not None and isinstance(merged[k], dict):
+                merged[k] = {**merged[k], _PENDING_KEY: pending}
         _write_backend(to_backend, credentials_path, merged)
 
         # Verify write
         verified = _read_backend(to_backend, credentials_path)
-        missing_after = [k for k in source_subset if k not in verified]
+        missing_after = [k for k in copied if k not in verified]
         if missing_after:
             raise RuntimeError(
                 f"Migration verification failed: the following server(s) are absent from "
                 f"the {to_backend!r} backend after write: {', '.join(missing_after)}"
             )
 
-        # Optional purge (remove only the migrated keys from source)
+        # Optional purge: remove the copied entries from the source, each with its pending
+        # login. An entry that was not copied stays.
         did_purge = False
         if purge:
             source_remaining = _read_backend(from_backend, credentials_path)
-            for k in source_subset:
+            for k in copied:
                 source_remaining.pop(k, None)
             if source_remaining:
                 _write_backend(from_backend, credentials_path, source_remaining)
@@ -1116,7 +1142,7 @@ def migrate_creds(
     return {
         "from": from_backend,
         "to": to_backend,
-        "migrated": len(source_subset),
+        "migrated": len(copied),
         "overwritten": overwritten,
         "purged": did_purge,
         "set_default": did_set_default,
@@ -1131,7 +1157,8 @@ def list_creds(
 ) -> list[dict]:
     """List stored credentials.
 
-    Returns a list of dicts — one per server, sorted by name — with the keys:
+    Returns a list of dicts — one per server whose entry holds ``tokens``, sorted
+    by name — with the keys:
 
     - ``name``:              server name
     - ``expires_at``:        absolute Unix epoch (int) or ``None`` if no expiry
@@ -1155,7 +1182,9 @@ def list_creds(
     now = time.time()
     out = []
     for name, entry in sorted(data.items()):
-        tok = (entry or {}).get("tokens") or {}
+        tok = entry.get("tokens") if isinstance(entry, dict) else None
+        if not tok:
+            continue
         exp = tok.get("expires_at")
         expired = exp is not None and now >= exp - _MARGIN
         if expired_only and not expired:

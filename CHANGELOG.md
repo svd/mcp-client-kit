@@ -17,7 +17,12 @@
   in place until a token is issued. Failures raise `PendingLoginExpired`,
   `LoginStateMismatch`, `AuthorizationDenied` (also a `ValueError`) or
   `CodeExchangeRejected` (base `LoginNotCompleted`). A stored registration for the same
-  redirect URI is reused. See "Login driven by your own web server" in `doc/USAGE.md`.
+  redirect URI is reused, including one made by an earlier `begin_login()` that never
+  completed. `migrate-creds` does not copy pending logins: an entry holding only one is
+  neither copied nor counted, and `--purge` leaves it in the source. `--purge` removes a
+  copied entry whole, its pending login included; a pending login already in the target
+  is kept. See "Login driven by
+  your own web server" in `doc/USAGE.md`.
 
 - **Pre-registered OAuth clients for `begin_login`.** `begin_login(..., client=StaticClient(
   client_id, client_secret, redirect_uris))`, or an `"oauthClient"` block on the server's
@@ -38,6 +43,10 @@
   per call. That record is now filtered out; other records on the logger are unchanged.
 
 ### Changed
+
+- **`list-creds` lists only credentials.** `list-creds` and `list_creds()` listed every
+  server entry in the store, so an entry holding only a client registration showed up as a
+  credential with no expiry. They now list the entries that hold tokens.
 
 - **A one-shot `McpBridgeCaller.call` raises a call error bare.** Outside `connected()`, a
   JSON-RPC error from `tools/call` — an unknown tool, invalid arguments, an expired

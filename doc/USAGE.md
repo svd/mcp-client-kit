@@ -375,8 +375,10 @@ callback raises `LoginStateMismatch`.
 
 A stored public-client registration whose `redirect_uris` contains the requested URI is
 reused, so repeated logins through one callback do not register a new client each time.
-A different URI registers anew, and so do an authorization server that has moved since
-the registration and a registration past its `client_secret_expires_at`. Pass
+That includes the registration a pending login holds, so a second `begin_login()` before
+the first completes reuses the client the first registered. A different URI registers
+anew, and so do an authorization server that has moved since the registration and a
+registration past its `client_secret_expires_at`. Pass
 `reuse_registration=False` to always register.
 
 *Pre-registered client.* Some authorization servers refuse Dynamic Client Registration
