@@ -1370,7 +1370,7 @@ def _cmd_merge(ns: argparse.Namespace) -> int:
         merged, scrubbed_tools = codegen.scrub_skeletons(merged)
         if scrubbed_tools:
             print(
-                f"[merge] scrubbed probed_args for {len(scrubbed_tools)} entry(ies):{', '.join(scrubbed_tools)}",
+                f"[merge] scrubbed probed_args for {len(scrubbed_tools)} entry(ies): {', '.join(scrubbed_tools)}",
                 file=sys.stderr,
             )
             print(

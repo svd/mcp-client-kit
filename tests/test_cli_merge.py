@@ -816,6 +816,18 @@ def test_merge_scrubs_probed_args_in_shapes_json(tmp_path):
     assert entry["probe_args_scrubbed"] is True
 
 
+def test_merge_names_the_scrubbed_entries(tmp_path, capsys):
+    target = tmp_path / "acme.shapes.json"
+    _seed_parts(
+        target,
+        {"read_file": {"source": "live", "probed_args": {"path": "/Users/ada/src/repo/img.png"}}},
+    )
+
+    _cmd_merge(_merge_ns("acme", target))
+
+    assert "[merge] scrubbed probed_args for 1 entry(ies): read_file" in capsys.readouterr().err
+
+
 def test_merge_verify_sidecar_keeps_raw_args(tmp_path):
     """The gitignored verify sidecar is the gold source — it stays pre-scrub."""
     target = tmp_path / "acme.shapes.json"

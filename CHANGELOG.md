@@ -1,6 +1,78 @@
 # Changelog
 
-## [Unreleased] — 0.12.0
+## [Unreleased] — 0.13.0
+
+## [0.12.0] — 2026-11-17
+
+### Added
+
+- **Two-step OAuth login with a caller-owned redirect URI.** `begin_login(server,
+  redirect_uri=...)` runs discovery and client registration, keeps what the code exchange
+  needs (PKCE verifier, client registration, discovered metadata) in the credential store
+  under the server entry's `pending_login` key, and returns a `PendingLogin` holding only
+  public values, among them the `authorization_url` to send the browser to. The redirect
+  URI must be `https`, or `http` on a loopback host.
+  `complete_login(server, callback_url)` takes the pending login out of the store when the
+  callback's `state` matches, exchanges the code and writes the credential entry `login()`
+  writes. The two steps can run in different processes, so a web server can drive the
+  login and receive the redirect at its own URL. A pending login is used once, and a new
+  `begin_login()` for the server replaces the earlier one; `cancel_login(server)` drops it
+  and leaves the server's tokens alone. The previous credential stays
+  in place until a token is issued. On the keyring backend these calls never fall back to
+  the plaintext file: a write the OS keychain refuses raises and writes nothing. Failures raise `PendingLoginExpired`,
+  `LoginStateMismatch`, `AuthorizationDenied` (also a `ValueError`) or
+  `CodeExchangeRejected` (base `LoginNotCompleted`). A stored registration for the same
+  redirect URI is reused, including one made by an earlier `begin_login()` that never
+  completed. `migrate-creds` does not copy pending logins: an entry holding only one is
+  neither copied nor counted, and `--purge` leaves it in the source. `--purge` removes a
+  copied entry whole, its pending login included; a pending login already in the target
+  is kept. See "Login driven by
+  your own web server" in `doc/USAGE.md`.
+
+- **Pre-registered OAuth clients for `begin_login`.** `begin_login(..., client=StaticClient(
+  client_id, client_secret, redirect_uris))`, or an `"oauthClient"` block on the server's
+  config entry (`clientId`, `clientSecret` with `${VAR}` expansion, `redirectUris`,
+  `tokenEndpointAuthMethod`), uses a client registered ahead of time instead of Dynamic
+  Client Registration, for authorization servers that refuse registration for a
+  non-loopback redirect URI.
+
+- **`ensure_login(..., interactive=False)`** checks or silently refreshes a credential and
+  raises `ReauthenticationRequired` where it would otherwise open a login, for jobs that
+  must never start one. `ensure_login_all` takes the same flag.
+
+### Fixed
+
+- **`mcpgen merge` puts a space after the colon** in its "scrubbed probed_args for N
+  entry(ies):" line.
+
+- **A dead credential no longer writes an SDK traceback per call.** A call that needed a
+  browser login raised `ReauthenticationRequired` from inside the MCP SDK's auth flow, which
+  logged it to `mcp.client.auth.oauth2` as "OAuth flow error" with a full traceback, once
+  per call. That record is now filtered out; other records on the logger are unchanged.
+
+### Changed
+
+- **`list-creds` lists only credentials.** `list-creds` and `list_creds()` listed every
+  server entry in the store, so an entry holding only a client registration showed up as a
+  credential with no expiry. They now list the entries that hold tokens.
+
+- **A one-shot `McpBridgeCaller.call` raises a call error bare.** Outside `connected()`, a
+  JSON-RPC error from `tools/call` — an unknown tool, invalid arguments, an expired
+  `call_timeout` — left the session's anyio task groups and reached the caller as
+  `ExceptionGroup(ExceptionGroup(McpError))`, so `except McpError` around a generated wrapper
+  missed it. `call()` now runs through the same path as `call_tool_result()` and
+  `read_resource()` and raises the `McpError` itself once the session has closed. **Breaking
+  for code that caught the group:** catch `McpError` instead. Auth and transport failures
+  while the session opens or closes are unchanged.
+
+- **Resource text keeps its declared format.** `parse_resource` — and so every `read_*`
+  accessor, `McpBridgeCaller.read_resource` and `probe --resource` — ran every text content
+  through the JSON → `literal_eval` → string chain, so a `text/markdown` body of `123` came
+  back as an `int` and a CSV row `1, 2` as a tuple. Text whose `mimeType` names a format of its
+  own (`text/markdown`, `text/csv`, `text/html`, XML, YAML) is now returned as the string the
+  server sent. JSON types (`application/json`, `+json`), `text/plain` and an absent `mimeType`
+  are parsed as before. Re-probe a resource of such a type whose shape entry recorded a parsed
+  value.
 
 ## [0.11.1] — 2026-11-03
 

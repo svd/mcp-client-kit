@@ -121,6 +121,18 @@ call that mutates may still have taken effect: check before re-issuing it. `code
 takes the same flag. In code, the same value is `call_timeout=` on `McpBridgeCaller`; its
 default, `None`, leaves generated wrappers unbounded.
 
+**A call error in code.** A JSON-RPC error from `tools/call` — an unknown tool, invalid
+arguments, an expired `call_timeout` (code 408) — raises the SDK's `McpError` from a generated
+wrapper, `McpBridgeCaller.call` and `call_tool_result`, one-shot or inside `connected()`, so
+`except McpError` around a wrapper catches it. Auth and transport failures while the session
+opens or closes still arrive as the transport raised them.
+
+**Listing timeout.** `list`, `list --resources`, `codegen` and `check` give each page of
+`tools/list`, `resources/list` and `resources/templates/list` 60 s to arrive. Past that the
+command exits `1` with `[list] error: TimeoutError: MCP server sent no tools page within 60s`
+(or `could not list resources: …` for a resource list). The bound is per page, so a long
+listing that keeps answering runs to the end. It is not configurable.
+
 **A tool that reports failure.** A tool can answer with a result flagged `isError` — MCP's way
 of saying the tool ran and failed (a validation error, a missing entitlement), as opposed to a
 JSON-RPC error. All three commands below print `[<command>] tool returned isError: <text>`,
@@ -273,6 +285,201 @@ paste it at the prompt.
 Headless mode is auto-detected when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set (macOS
 and Windows are always treated as interactive). Set `MCPGEN_HEADLESS=1` or `0` to override
 the detection; an explicit `--headless` / `--no-headless` overrides both.
+
+**Login driven by your own web server (two steps, Python API):**
+
+`login()` owns the whole round: it picks a `localhost` redirect URI and waits for the
+browser in the same coroutine. When the redirect has to land on a server you run —
+`https://<host>/_auth/callback`, possibly on a host the user's browser does not share, for
+several users — split the round in two:
+
+```python
+from mcpgen import begin_login, complete_login
+
+# Request 1: start the login and send the browser to the authorization server.
+pending = await begin_login(
+    "myserver",
+    redirect_uri="https://staffing.example/_auth/callback",
+    creds_path=user_creds_path,          # whose store the token goes to
+)
+return redirect(pending.authorization_url)
+
+# Request 2 (any process): the authorization server redirected back here.
+result = await complete_login("myserver", str(request.url), creds_path=user_creds_path, verify=True)
+result.tools_count   # list_tools() ran over the new credential
+```
+
+`begin_login` runs discovery and client registration and nothing else: no browser, no
+listener, no stdin. `redirect_uri` is an absolute `https` URL, or `http` on a loopback host
+(`localhost`, `127.0.0.0/8`, `::1`), host, port and path included; any other scheme or host
+raises `ValueError` before any request (RFC 6749 §3.1.2.1, RFC 8252 §7.3). What
+the code exchange needs — the PKCE verifier, the client registration and the discovered
+metadata — goes into the credential store, under the server entry's `pending_login` key.
+The returned `PendingLogin` holds public values only: `server_name`, `redirect_uri`,
+`authorization_url`, `state`, `expires_at` and the `expired` property. `ttl=` sets the
+seconds until `expires_at` (default 300, positive and finite).
+
+On the `keyring` backend, the two-step calls never fall back to the plaintext file: a write
+the OS keychain refuses raises, and nothing is written anywhere. For `begin_login` that is
+`RuntimeError`, with no pending login stored.
+
+`complete_login` takes the server name and the callback URL, with the `creds_path` and
+`cred_backend` given to `begin_login`. It checks `state`, exchanges the code and writes the
+same credential entry `login()` writes (client registration, tokens, token endpoint), under
+the same store lock, so every other mcpgen call reads it as usual. The two calls may run in
+different processes; the store carries everything between them.
+
+One pending login per server, used once. A second `begin_login` for the server replaces the
+first, whose `state` then stops being accepted. `complete_login` removes the pending login
+in the same locked write that matches the callback's `state`, before the exchange, so a
+replayed callback, or a second concurrent one with the same `state`, raises
+`LoginStateMismatch` and never reaches the token endpoint. That holds while the store lock
+can be taken; where mcpgen runs without one (an NFS mount that refuses locks, the Windows
+lock timeout), two concurrent callbacks can both get through. A callback with a different
+or missing `state` leaves the pending login in place, so a stray or forged redirect cannot
+cancel the real one. An expired pending login stays in the store until the next
+`begin_login` for that server, a `complete_login` whose `state` matches it,
+`cancel_login`, or `delete-creds`.
+
+```python
+async def cancel_login(server_name, *, creds_path=DEFAULT_CREDS_PATH, cred_backend=None) -> bool
+```
+
+`cancel_login` drops the server's pending login, for a user who abandons the round or an
+operator clearing stale ones, and returns whether there was one; a callback for it then
+raises `LoginStateMismatch`. The server's tokens and client registration stay as they
+are. An entry that held only the pending login is removed, and a store left with no entry
+is cleared, as `delete-creds` does. A pending login `complete_login` could not use is
+removed too and counts as one. When the OS keychain refuses the write, `cancel_login`
+raises `RuntimeError` and the pending login stays in the keyring. A store that does not
+parse also raises `RuntimeError` and is left where it is; `complete_login` does the same
+with `LoginNotCompleted`. Neither moves it aside the way `mcpgen login` does, because
+neither writes a fresh entry in its place.
+
+The previous credential for the server stays in place until `complete_login` has a token
+in hand: `begin_login` leaves the entry's tokens alone, so the credential keeps working and
+refreshing meanwhile. Several logins can be open at once: different users with their own
+`creds_path`, or several servers for one user. When one callback URL serves several
+servers, keep the `state` of each `PendingLogin` and route the callback by it;
+`callback_state(url)` reads it from the redirect:
+
+```python
+from mcpgen import callback_state
+
+server_for[pending.state] = "myserver"                  # at begin
+...
+server = server_for.pop(callback_state(str(request.url)))
+result = await complete_login(server, str(request.url), creds_path=user_creds_path)
+```
+
+| Raised by `complete_login` | When | Pending login | Previous credential |
+|---|---|---|---|
+| `LoginStateMismatch` | no pending login for the server, or the callback's `state` is missing or another login's | kept | kept |
+| `AuthorizationDenied` | the callback carries `error=` and no `state` | kept | kept |
+| `LoginNotCompleted` | the store does not parse, or the OS keychain refused the write that takes the pending login | kept | kept |
+| `PendingLoginExpired` | past `expires_at` (`ttl=` on `begin_login`, default 300 s) | removed | kept |
+| `LoginStateMismatch` | the callback's RFC 9207 `iss` names an issuer other than the one the login started against | removed | kept |
+| `AuthorizationDenied` | the callback carries `error=` with the matching `state` (`.error`, `.error_description`), e.g. `access_denied` | removed | kept |
+| `LoginNotCompleted` | the callback carries neither a code nor an error | removed | kept |
+| `CodeExchangeRejected` | the token endpoint refused the code (`.status_code`, `.error`, `.error_description`) | removed | kept |
+| `LoginNotCompleted` | the OS keychain refused to save the new credential | removed | kept |
+| `PostLoginCheckFailed` | `verify=True` and `list_tools()` failed after the token was saved | removed | replaced |
+
+All but `PostLoginCheckFailed` share the base `LoginNotCompleted`. After a "removed" row,
+another `begin_login` is the way forward; after a "kept" row, the real callback can still
+complete the pending login. `AuthorizationDenied` is also a `ValueError`, the type `login()`
+raises for a denied authorization. A removed pending login is used up: retrying the same
+callback raises `LoginStateMismatch`.
+
+A stored public-client registration whose `redirect_uris` contains the requested URI is
+reused, so repeated logins through one callback do not register a new client each time.
+That includes the registration a pending login holds, so a second `begin_login()` before
+the first completes reuses the client the first registered. A different URI registers
+anew, and so do an authorization server that has moved since the registration and a
+registration past its `client_secret_expires_at`. Pass
+`reuse_registration=False` to always register.
+
+*Pre-registered client.* Some authorization servers refuse Dynamic Client Registration
+for a redirect URI that is not a loopback address. Register a client with the server's
+operator and pass it, or set it per server in config:
+
+```python
+from mcpgen import StaticClient
+
+pending = await begin_login(
+    "myserver",
+    redirect_uri="https://staffing.example/_auth/callback",
+    client=StaticClient(
+        client_id="staffing-viewer",
+        client_secret=os.environ["MYSERVER_CLIENT_SECRET"],   # omit for a public client
+        redirect_uris=("https://staffing.example/_auth/callback",),
+    ),
+)
+```
+
+```jsonc
+{
+  "mcpServers": {
+    "myserver": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "oauthClient": {
+        "clientId": "staffing-viewer",
+        "clientSecret": "${MYSERVER_CLIENT_SECRET}",
+        "redirectUris": ["https://staffing.example/_auth/callback"]
+      }
+    }
+  }
+}
+```
+
+`begin_login` then skips registration. A `redirect_uri` outside the client's
+`redirectUris` is refused before any request goes out; leave `redirectUris` empty to skip
+that check. `redirectUris` must be a list of strings: any other value raises `ValueError`
+when `begin_login` uses the block. The URI is sent in the spelling it was registered with, so
+`https://staffing.example` and `https://staffing.example/` match each other and the
+authorization server sees the registered string. Set `issuer` (config `"issuer"`) to the
+client's authorization server and `begin_login` refuses a server whose discovered issuer
+differs, rather than send the secret there. The `oauthClient` block is not applied when
+`url=` overrides the configured URL. String values expand `${VAR}` from the environment;
+a bare `$VAR` or `%VAR%` stays as written, so a secret may contain `$`. An unset `${VAR}`
+in `clientId` or `clientSecret` raises `ValueError` naming the variable. The client authenticates to the token endpoint with `client_secret_post` when
+it has a secret and as a public client (`none`) when it has none; `tokenEndpointAuthMethod`
+sets either explicitly. `client_secret_basic` is refused, because token refresh sends the
+secret in the request body. The secret is saved in the credential entry, as for any
+registration, so refresh can use it. `repr()` of a `StaticClient` omits it. `login()` does
+not read `oauthClient`; it always registers for its own `localhost` redirect.
+
+*Secrets.* The PKCE `code_verifier` and, for a confidential client, its `client_secret`
+stay in the credential store — the hardened file or the OS keychain, wherever the tokens
+live — and `PendingLogin` carries neither, so the caller holds nothing secret between the
+two requests. mcpgen never logs or quotes the callback URL, which carries the authorization
+code; the authorization URL is safe to log.
+
+**Checking a credential without ever logging in (background jobs):**
+
+```python
+from mcpgen import ReauthenticationRequired, ensure_login
+
+try:
+    await ensure_login("myserver", interactive=False)
+except ReauthenticationRequired:
+    ...  # tell the user to log in; nothing was opened
+```
+
+`interactive=False` runs the same check and silent refresh as a call does — a live token
+passes, an expiring one is renewed against the authorization server — and raises
+`ReauthenticationRequired` wherever `ensure_login` would otherwise open a login: no token
+cached, nothing to refresh with, or a refresh token the server reports dead.
+`TokenRefreshUnavailable` propagates as usual. `ensure_login_all` takes the same flag.
+Unlike reading `list_creds()`, this asks the authorization server, so a dead refresh token
+is caught once the access token is due for renewal.
+
+When a call over a dead credential raises `ReauthenticationRequired` from inside the MCP
+SDK's auth flow, the SDK's `mcp.client.auth.oauth2` logger would record it as "OAuth flow
+error" with a traceback. mcpgen filters that one record out (it installs a filter on that
+logger at import); every other record on it, including real OAuth flow errors, still
+passes.
 
 **PAT / Bearer token:**
 
@@ -564,8 +771,10 @@ async def read_dimension_by_unit_type(caller: McpResourceReader, *, unitType: st
   Variables in a `{?…}` or `{&…}` expression are optional (`str | None = None`) and omitted
   from the URI when `None`. The accessor expands the template itself (RFC 6570, levels 1–4),
   so `unitType="Delivery Unit"` reads `dimension://by-unit-type/Delivery%20Unit`.
-- **Return values** are decoded the way tool results are. A text content is parsed as JSON,
-  else as a Python literal (`ast.literal_eval`), else returned as the `str`; a blob content
+- **Return values** are decoded the way tool results are. A text content declared as JSON
+  (`application/json`, any `+json` type), as `text/plain`, or with no `mimeType` is parsed as
+  JSON, else as a Python literal (`ast.literal_eval`), else returned as the `str`; text of any
+  other declared type (`text/markdown`, `text/csv`, XML, YAML) is returned as the `str`; a blob content
   comes back as decoded `bytes`; several contents come back as a list in server order; no
   contents raise `ValueError`. Without a shape entry the accessor returns `Any`; a probed and
   shaped entry types it exactly as for a tool (`unwrap`, `return_model`, `return_container`).

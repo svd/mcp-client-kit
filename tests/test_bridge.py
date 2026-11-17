@@ -685,6 +685,80 @@ def test_migrate_keyring_read_failure_propagates(tmp_path):
     # by checking that the purge path never ran (exception was raised before verify)
 
 
+_PENDING = {"format": 1, "state": "s", "code_verifier": "v"}
+
+
+def test_migrate_strips_pending_logins(tmp_path):
+    """A pending login is not copied, and an entry holding only one leaves the target alone."""
+    creds = tmp_path / "credentials.json"
+    target_tokens = {"access_token": "target_tok", "token_type": "bearer"}
+    creds.write_text(
+        json.dumps(
+            {
+                "a": {"pending_login": _PENDING},
+                "b": {"tokens": {"access_token": "b_tok", "token_type": "bearer"}, "pending_login": _PENDING},
+            }
+        )
+    )
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        _bridge._keyring_write_raw({"a": {"tokens": target_tokens}})
+        result = _bridge.migrate_creds("file", "keyring", credentials_path=creds)
+        merged = _bridge._keyring_read_raw()
+
+    assert merged["a"] == {"tokens": target_tokens}
+    assert merged["b"] == {"tokens": {"access_token": "b_tok", "token_type": "bearer"}}
+    assert result["migrated"] == 1
+    assert result["overwritten"] == 0
+
+
+def test_migrate_keeps_a_pending_login_already_in_the_target(tmp_path):
+    """A copied credential replaces the target entry but not the target's pending login."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"a": {"tokens": {"access_token": "src_tok", "token_type": "bearer"}}}))
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        _bridge._keyring_write_raw(
+            {"a": {"tokens": {"access_token": "tgt_tok", "token_type": "bearer"}, "pending_login": _PENDING}}
+        )
+        _bridge.migrate_creds("file", "keyring", credentials_path=creds)
+        merged = _bridge._keyring_read_raw()
+
+    assert merged["a"] == {"tokens": {"access_token": "src_tok", "token_type": "bearer"}, "pending_login": _PENDING}
+
+
+def test_migrate_a_requested_server_with_only_a_pending_login_is_not_copied(tmp_path):
+    """--servers naming a pending-only entry: no "not found" error, nothing copied for it."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"a": {"pending_login": _PENDING}, **_creds_data("b")}))
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        result = _bridge.migrate_creds("file", "keyring", servers=["a"], credentials_path=creds, purge=True)
+
+    assert result["migrated"] == 0
+    assert result["purged"] is False
+    assert not fake_kr.set_calls
+    assert json.loads(creds.read_text())["a"] == {"pending_login": _PENDING}
+
+
+def test_migrate_purge_keeps_an_entry_that_was_not_copied(tmp_path):
+    """--purge removes the copied entries; a pending-only entry stays in the source."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"a": {"pending_login": _PENDING}, **_creds_data("b")}))
+    fake_kr = _FakeKeyringMig()
+
+    with patch.dict("sys.modules", {"keyring": fake_kr}):
+        result = _bridge.migrate_creds("file", "keyring", credentials_path=creds, purge=True)
+        merged = _bridge._keyring_read_raw()
+
+    assert result["migrated"] == 1 and result["purged"] is True
+    assert set(merged) == {"b"}
+    assert json.loads(creds.read_text()) == {"a": {"pending_login": _PENDING}}
+
+
 # ---------------------------------------------------------------------------
 # list_creds / delete_cred
 # ---------------------------------------------------------------------------
@@ -769,6 +843,26 @@ def test_list_creds_has_refresh_token(tmp_path):
     by_name = {r["name"]: r for r in rows}
     assert by_name["with_rt"]["has_refresh_token"] is True
     assert by_name["without_rt"]["has_refresh_token"] is False
+
+
+def test_list_creds_lists_only_entries_with_tokens(tmp_path):
+    """An entry holding only a registration or a pending login is not a credential."""
+    creds = tmp_path / "credentials.json"
+    creds.write_text(
+        json.dumps(
+            {
+                "a": {"pending_login": _PENDING},
+                "b": {"client_info": {"client_id": "c"}},
+                "c": {"tokens": {"access_token": "t", "token_type": "bearer"}},
+                "d": {"tokens": {"access_token": "t", "token_type": "bearer"}, "pending_login": _PENDING},
+            }
+        )
+    )
+    os.chmod(creds, 0o600)
+
+    rows = _bridge.list_creds(credentials_path=creds)
+
+    assert [r["name"] for r in rows] == ["c", "d"]
 
 
 def test_list_creds_keyring(tmp_path):
@@ -4336,6 +4430,7 @@ def test_ensure_login_all_runs_servers_in_order_with_kwargs(tmp_path):
             "cred_backend": "keyring",
             "headless": True,
             "callback_timeout": None,
+            "interactive": True,
         }
 
 
@@ -5463,6 +5558,26 @@ def test_parse_resource_plain_text():
     )
 
 
+@pytest.mark.parametrize(
+    "mime_type",
+    ["text/markdown", "text/csv", "text/html; charset=utf-8", "application/xml", "application/yaml", "Text/Markdown"],
+)
+def test_parse_resource_keeps_declared_non_json_text_verbatim(mime_type):
+    """A text content whose mimeType names a non-JSON format comes back as the string the server sent."""
+    for text in ("123", "[1, 2]", "{'a': 1}", "true"):
+        item = mcp_types.TextResourceContents(uri="demo://doc", text=text, mimeType=mime_type)
+        assert _bridge.parse_resource([item]) == text
+
+
+@pytest.mark.parametrize(
+    "mime_type", [None, "application/json", "application/ld+json", "text/plain", "application/json; charset=utf-8"]
+)
+def test_parse_resource_parses_json_plain_and_undeclared_text(mime_type):
+    """JSON types, text/plain and an absent mimeType keep the JSON → literal_eval → str chain."""
+    item = mcp_types.TextResourceContents(uri="demo://doc", text="123", mimeType=mime_type)
+    assert _bridge.parse_resource([item]) == 123
+
+
 def test_parse_resource_blob_is_decoded_bytes():
     payload = b"\x89PNG\r\n\x1a\n\x00\xff"
     result = _bridge.parse_resource([_blob_contents(payload)])
@@ -5835,6 +5950,21 @@ def test_call_tool_result_one_shot_raises_a_call_error_bare():
     async def run():
         with patch("mcpgen._bridge.session", _anyio_like_session(s, log)):
             await _bridge.McpBridgeCaller(cmd="python srv.py").call_tool_result("demo", "nope", {})
+
+    with pytest.raises(McpError, match="Unknown tool"):
+        asyncio.run(run())
+    assert log == [("enter", "demo"), ("exit", "demo")]
+
+
+def test_call_one_shot_raises_a_call_error_bare():
+    """``call()`` outside ``connected()`` raises the call error itself, so ``except McpError`` catches it."""
+    log: list = []
+    s = MagicMock()
+    s.call_tool = AsyncMock(side_effect=McpError(mcp_types.ErrorData(code=-32602, message="Unknown tool: nope")))
+
+    async def run():
+        with patch("mcpgen._bridge.session", _anyio_like_session(s, log)):
+            await _bridge.McpBridgeCaller(cmd="python srv.py").call("demo", "nope", {})
 
     with pytest.raises(McpError, match="Unknown tool"):
         asyncio.run(run())

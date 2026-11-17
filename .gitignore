@@ -10,3 +10,5 @@ eval_preflight.py
 eval/
 .codegraph/
 .coverage
+.claude/ctx-guard.local.json
+.ctx-guard/

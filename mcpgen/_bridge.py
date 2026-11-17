@@ -34,6 +34,7 @@ import asyncio
 import base64
 import errno as _errno
 import json
+import logging
 import os
 import re
 import shlex
@@ -84,6 +85,10 @@ _T = TypeVar("_T")
 
 DEFAULT_CREDS_PATH = Path.home() / ".mcpgen" / "credentials.json"
 DEFAULT_CONFIG_PATH = Path.home() / ".mcpgen" / "config.json"
+
+_PENDING_KEY = "pending_login"
+"""Key of the pending-login record `_login.begin_login()` keeps in a server's credential
+entry. Defined here because `migrate_creds` reads it too."""
 
 # Credential backend — selects where OAuth tokens are stored.
 # Resolution order (first wins):
@@ -256,6 +261,9 @@ _headers_cache: dict[str, dict[str, str]] = {}
 # present. Used to refuse SSE up front — this client has no SSE transport adapter,
 # and without the guard an SSE URL silently takes the Streamable HTTP path.
 _types_cache: dict[str, str] = {}
+# Pre-registered OAuth clients keyed by server name, from an entry's "oauthClient" block.
+# Populated alongside _servers_cache by servers(); see _parse_static_clients().
+_static_clients_cache: dict[str, dict] = {}
 
 
 def _filter_str_dict(raw: dict, *, require_nonempty_key: bool = False) -> dict[str, str]:
@@ -342,6 +350,72 @@ def _parse_server_types(raw: dict) -> dict[str, str]:
     return types
 
 
+_STATIC_CLIENT_KEYS = {
+    "client_id": ("clientId", "client_id"),
+    "client_secret": ("clientSecret", "client_secret"),
+    "redirect_uris": ("redirectUris", "redirect_uris"),
+    "token_endpoint_auth_method": ("tokenEndpointAuthMethod", "token_endpoint_auth_method"),
+    "issuer": ("issuer",),
+}
+
+
+_ENV_REF = re.compile(r"\$\{(\w+)\}")
+
+
+def _expand_env_refs(text: str) -> str:
+    """*text* with each ``${VAR}`` replaced by VAR's value; an unset VAR's reference stays.
+
+    Only the braced form: a client secret may contain a bare ``$NAME`` or ``%NAME%``,
+    which ``os.path.expandvars`` would replace.
+    """
+    return _ENV_REF.sub(lambda m: os.environ.get(m.group(1), m.group(0)), text)
+
+
+def _parse_static_clients(raw: dict) -> dict[str, dict]:
+    """Return {name: client} for HTTP entries carrying an "oauthClient" block.
+
+    Each client is ``{"client_id", "client_secret", "redirect_uris", "token_endpoint_auth_method", "issuer"}``
+    with absent members as None (``redirect_uris`` as ``[]``), read from the camelCase keys or
+    their snake_case aliases. String values have ``${VAR}`` references expanded, so a secret
+    can stay in the environment. A ``redirect_uris`` that is not a list of strings is kept
+    as written, for ``StaticClient`` to refuse when the client is used: an empty list would
+    lift the restriction to registered URIs. A block without a client id is dropped. Kept
+    apart from _parse_servers() for the same reason as _parse_server_types().
+    """
+    block = raw.get("mcpServers", raw)
+    clients: dict[str, dict] = {}
+    for name, val in block.items():
+        spec = val.get("oauthClient") if isinstance(val, dict) else None
+        if not isinstance(spec, dict):
+            continue
+        client: dict[str, Any] = {}
+        for member, keys in _STATIC_CLIENT_KEYS.items():
+            value = next((spec[k] for k in keys if k in spec), None)
+            if member == "redirect_uris":
+                if value is None:
+                    client[member] = []
+                elif isinstance(value, list) and all(isinstance(u, str) for u in value):
+                    client[member] = [_expand_env_refs(u) for u in value]
+                else:
+                    client[member] = value
+            else:
+                client[member] = _expand_env_refs(value) if isinstance(value, str) and value else None
+        if client["client_id"]:
+            clients[name] = client
+    return clients
+
+
+def server_config(server_name: str, *, config_path: str | Path | None = None) -> tuple[dict[str, str], dict | None]:
+    """The {name: url} registry and *server_name*'s parsed "oauthClient" block (or None).
+
+    Both come from one `servers()` read, so an explicit *config_path*, which is read fresh
+    on every call, is read once and the two cannot come from different versions of it.
+    """
+    known = servers(config_path=config_path)
+    client = _static_clients_cache.get(server_name)
+    return known, (dict(client) if client else None)
+
+
 def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> dict[str, str]:
     """Return the {name: url} registry loaded from user config (cached).
 
@@ -349,7 +423,7 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
     search-order fallback) and always fresh, bypassing the cache.  A missing or
     unparseable explicit config raises rather than silently returning an empty dict.
     """
-    global _servers_cache, _client_names_cache, _stdio_cache, _headers_cache, _types_cache
+    global _servers_cache, _client_names_cache, _stdio_cache, _headers_cache, _types_cache, _static_clients_cache
     if config_path is None and _servers_cache is not None and not refresh:
         return _servers_cache
     if config_path is not None:
@@ -361,6 +435,7 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
             raw = json.loads(path.read_text())
             _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(raw)
             _types_cache = _parse_server_types(raw)
+            _static_clients_cache = _parse_static_clients(raw)
         except (json.JSONDecodeError, OSError, AttributeError) as e:
             raise ValueError(f"failed to parse config {path}: {e}") from e
         return _servers_cache
@@ -374,11 +449,13 @@ def servers(*, refresh: bool = False, config_path: str | Path | None = None) -> 
                 raw = json.loads(path.read_text())
                 _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = _parse_servers(raw)
                 _types_cache = _parse_server_types(raw)
+                _static_clients_cache = _parse_static_clients(raw)
                 return _servers_cache
             except (json.JSONDecodeError, OSError, AttributeError):
                 continue
     _servers_cache, _client_names_cache, _stdio_cache, _headers_cache = {}, {}, {}, {}
     _types_cache = {}
+    _static_clients_cache = {}
     return _servers_cache
 
 
@@ -472,6 +549,28 @@ _CALLBACK_TIMEOUT = 300
 
 class ReauthenticationRequired(Exception):
     """Tokens absent or the grant is dead. Run: mcpgen login <server>"""
+
+
+_SDK_AUTH_LOGGER = "mcp.client.auth.oauth2"
+
+
+class _ExpectedReauthFilter(logging.Filter):
+    """Drops the SDK's "OAuth flow error" record when the error is our ReauthenticationRequired.
+
+    A session over a dead refresh token reaches the SDK's authorization branch, where
+    `_http_session`'s redirect handler raises ReauthenticationRequired by design. The SDK
+    logs every exception there with `logger.exception`, so a run fanning out N calls would
+    write N tracebacks before the caller reports the one error that matters. Every other
+    record on that logger passes.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc = record.exc_info[1] if record.exc_info else None
+        return not isinstance(exc, ReauthenticationRequired)
+
+
+if not any(isinstance(f, _ExpectedReauthFilter) for f in logging.getLogger(_SDK_AUTH_LOGGER).filters):
+    logging.getLogger(_SDK_AUTH_LOGGER).addFilter(_ExpectedReauthFilter())
 
 
 class LoginWontHelp(Exception):
@@ -936,6 +1035,12 @@ def migrate_creds(
         Override path for the client config (default:
         ``~/.mcpgen/config.json``).
 
+    A pending two-step login (the entry's ``pending_login``) is not migrated: it is
+    left out of each copied entry, and an entry holding nothing else is not copied,
+    counted or purged. A target entry's pending login is kept when a copied entry
+    replaces that entry. Purging removes a copied entry whole, its pending login
+    included.
+
     Returns
     -------
     dict
@@ -975,7 +1080,18 @@ def migrate_creds(
         else:
             source_subset = source_all
 
-        if not source_subset:
+        # Pending logins are not copied: `complete_login()` takes one from the store
+        # `begin_login()` wrote it to. An entry holding nothing else is not copied either,
+        # so it never overwrites a credential in the target.
+        copied = {}
+        for k, entry in source_subset.items():
+            if isinstance(entry, dict):
+                entry = {key: value for key, value in entry.items() if key != _PENDING_KEY}
+                if not entry:
+                    continue
+            copied[k] = entry
+
+        if not copied:
             return {
                 "from": from_backend,
                 "to": to_backend,
@@ -987,24 +1103,29 @@ def migrate_creds(
 
         # Merge into target (source wins on collision)
         target = _read_backend(to_backend, credentials_path)
-        overwritten = sum(1 for k in source_subset if k in target)
-        merged = {**target, **source_subset}
+        overwritten = sum(1 for k in copied if k in target)
+        merged = {**target, **copied}
+        for k in copied:
+            pending = target.get(k, {}).get(_PENDING_KEY) if isinstance(target.get(k), dict) else None
+            if pending is not None and isinstance(merged[k], dict):
+                merged[k] = {**merged[k], _PENDING_KEY: pending}
         _write_backend(to_backend, credentials_path, merged)
 
         # Verify write
         verified = _read_backend(to_backend, credentials_path)
-        missing_after = [k for k in source_subset if k not in verified]
+        missing_after = [k for k in copied if k not in verified]
         if missing_after:
             raise RuntimeError(
                 f"Migration verification failed: the following server(s) are absent from "
                 f"the {to_backend!r} backend after write: {', '.join(missing_after)}"
             )
 
-        # Optional purge (remove only the migrated keys from source)
+        # Optional purge: remove the copied entries from the source, each with its pending
+        # login. An entry that was not copied stays.
         did_purge = False
         if purge:
             source_remaining = _read_backend(from_backend, credentials_path)
-            for k in source_subset:
+            for k in copied:
                 source_remaining.pop(k, None)
             if source_remaining:
                 _write_backend(from_backend, credentials_path, source_remaining)
@@ -1021,7 +1142,7 @@ def migrate_creds(
     return {
         "from": from_backend,
         "to": to_backend,
-        "migrated": len(source_subset),
+        "migrated": len(copied),
         "overwritten": overwritten,
         "purged": did_purge,
         "set_default": did_set_default,
@@ -1036,7 +1157,8 @@ def list_creds(
 ) -> list[dict]:
     """List stored credentials.
 
-    Returns a list of dicts — one per server, sorted by name — with the keys:
+    Returns a list of dicts — one per server whose entry holds ``tokens``, sorted
+    by name — with the keys:
 
     - ``name``:              server name
     - ``expires_at``:        absolute Unix epoch (int) or ``None`` if no expiry
@@ -1060,7 +1182,9 @@ def list_creds(
     now = time.time()
     out = []
     for name, entry in sorted(data.items()):
-        tok = (entry or {}).get("tokens") or {}
+        tok = entry.get("tokens") if isinstance(entry, dict) else None
+        if not tok:
+            continue
         exp = tok.get("expires_at")
         expired = exp is not None and now >= exp - _MARGIN
         if expired_only and not expired:
@@ -2055,10 +2179,7 @@ class McpBridgeCaller:
 
     *call_timeout* bounds each ``tools/call`` round trip, in seconds, through the
     SDK's per-request read timeout. On expiry the SDK raises an ``McpError`` with
-    code 408: bare from ``call()`` inside ``connected()`` and from
-    ``call_tool_result()``, but wrapped as
-    ``ExceptionGroup(ExceptionGroup(McpError))`` from a one-shot ``call()``, since
-    it leaves the session's task groups. The server is not told to cancel the
+    code 408, bare from ``call()`` and ``call_tool_result()`` alike. The server is not told to cancel the
     call (no ``notifications/cancelled``), so the tool may still run to
     completion. The timeout does not cover opening the session (the
     ``initialize`` handshake, OAuth) or closing it. The bound is the SDK's rather
@@ -2136,25 +2257,22 @@ class McpBridgeCaller:
             await block.close()
 
     async def call(self, server: str, tool: str, arguments: dict) -> Any:
-        block = self._block
-        if block is None:
-            # One-shot: open, call, close. Unchanged behaviour.
-            async with self._session_cm(server) as s:
-                return await self._invoke(s, tool, arguments)
-        return await self._invoke(await block.session_for(server), tool, arguments)
+        """Call *tool* and return its parsed payload (see ``_parse_tool_result``).
 
-    async def _invoke(self, s: Any, tool: str, arguments: dict) -> Any:
-        result = await s.call_tool(tool, arguments, read_timeout_seconds=self._read_timeout)
-        return _parse_tool_result(result)
+        One-shot outside ``connected()``, the block's session for *server* inside
+        it. A call error raised in a one-shot session is re-raised bare once the
+        session has closed (see ``_one_shot``), so ``except McpError`` around a
+        generated wrapper catches it either way.
+        """
+        return _parse_tool_result(await self.call_tool_result(server, tool, arguments))
 
     async def call_tool_result(self, server: str, tool: str, arguments: dict) -> CallToolResult:
         """Call *tool* and return the SDK's unparsed ``CallToolResult``, ``isError`` included.
 
         For callers that must tell a tool's reported failure from its answer, which
         ``call()`` cannot: it parses an ``isError`` result like any other. Session
-        handling and *call_timeout* are ``call()``'s, except that a call error raised
-        in a one-shot session is re-raised bare once the session has closed (see
-        ``_one_shot``). ``_parse_tool_result`` turns the result into ``call()``'s payload.
+        handling, *call_timeout* and error propagation are ``call()``'s.
+        ``_parse_tool_result`` turns the result into ``call()``'s payload.
         """
 
         async def invoke(s: Any) -> CallToolResult:
@@ -2330,9 +2448,23 @@ def normalize_resource_uri(uri: str) -> str:
 _ASCII_WHITESPACE = re.compile(r"[ \t\n\r\f\v]+")
 
 
+def _parses_as_data(mime_type: str | None) -> bool:
+    """True when text declared as *mime_type* goes through ``_parse_text``.
+
+    An absent mimeType, ``text/plain`` and the JSON types (``application/json``,
+    any ``+json`` suffix) do; any other declared type names a format of its own
+    (Markdown, CSV, HTML, XML, YAML), whose text is kept as the server sent it.
+    ``text/plain`` stays parsed because servers commonly label JSON with it.
+    """
+    if mime_type is None:
+        return True
+    essence = mime_type.split(";", 1)[0].strip().lower()
+    return essence in ("", "text/plain", "application/json") or essence.endswith("+json")
+
+
 def _parse_resource_one(item: TextResourceContents | BlobResourceContents) -> Any:
     if isinstance(item, TextResourceContents):
-        return _parse_text(item.text)
+        return _parse_text(item.text) if _parses_as_data(item.mimeType) else item.text
     # Line-wrapped (MIME-style) base64 is accepted; anything outside the standard
     # alphabet, such as URL-safe base64, raises instead of silently decoding to
     # different bytes.
@@ -2342,11 +2474,12 @@ def _parse_resource_one(item: TextResourceContents | BlobResourceContents) -> An
 def parse_resource(contents: Sequence[TextResourceContents | BlobResourceContents]) -> Any:
     """Extract the payload from the ``contents`` of an MCP ``resources/read`` result.
 
-    Text contents parse exactly like tool text blocks (``_parse_text``); blob
-    contents are base64-decoded to ``bytes``, raising ``ValueError`` for invalid
-    base64. One content returns its value directly, several return a list of
+    Text contents declared as JSON, ``text/plain`` or with no mimeType parse
+    exactly like tool text blocks (``_parse_text``); text of any other declared
+    type is returned as the string (see ``_parses_as_data``). Blob contents are
+    base64-decoded to ``bytes``, raising ``ValueError`` for invalid base64. One content returns its value directly, several return a list of
     per-content values in server order — the same folding as ``parse``.
-    Per-content URIs and mimeTypes are not kept.
+    Per-content URIs and mimeTypes are not returned.
     """
     if not contents:
         raise ValueError("MCP resource read returned no contents")
@@ -2683,6 +2816,52 @@ def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+def _load_store_for_login(storage: FileTokenStorage) -> dict:
+    """Read the whole store for a login that is about to write its entry; call under the lock.
+
+    A corrupt store must not stop this read: a login exists to produce a fresh valid
+    entry, so failing it on unparseable JSON leaves hand-deleting the file as the only
+    route back. Falling through to `{}` is no better — the caller's save would write that
+    empty view over other servers' entries, which may still be recoverable by hand. So
+    the bad file is moved aside and kept, and `{}` is returned. Only the login paths do
+    this; `_file_load` keeps raising for `_pre_flight_refresh` and the SDK's mid-flow
+    reads, which run with nobody at the keyboard.
+
+    Raises LoginWontHelp when the file cannot be moved aside.
+    """
+    try:
+        return storage._load()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # Both mean bytes on disk that are not a store: `UnicodeDecodeError` from
+        # `read_text`, `json.JSONDecodeError` from `json.loads` and from
+        # `_require_store` for a file that parses into something other than an object.
+        # Narrower than OSError on purpose — an unreadable *path* (permissions, a
+        # directory in the way) is not a corrupt store and must propagate.
+        # Nanoseconds, not seconds: two corrupt-store logins in the same second would
+        # otherwise `os.replace` one quarantine over the other.
+        quarantine = storage._path.with_name(f"{storage._path.name}.corrupt.{time.time_ns()}")
+        try:
+            os.replace(storage._path, quarantine)
+        except OSError as move_failed:
+            # Continuing would save `{}` over the bytes the quarantine exists to
+            # preserve. Stop instead: the file is still there and the message says what
+            # to do with it. `LoginWontHelp` rather than a subclass — no token was
+            # cached and the token endpoint was never contacted — and `cli.py` and the
+            # generated runner already catch the base, so this prints as a message
+            # rather than a traceback.
+            raise LoginWontHelp(
+                f"{storage._path} is not a readable credential store ({exc}) and could not be moved aside "
+                f"({move_failed}). Move or delete it by hand, then run login again."
+            ) from exc
+        print(
+            f"[mcpgen] {storage._path} is not a readable credential store ({exc}); moved to {quarantine}. "
+            f"Other servers' entries are in that file if you need them.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {}
+
+
 async def login(
     server_name: str,
     creds_path: Path = DEFAULT_CREDS_PATH,
@@ -2723,51 +2902,13 @@ async def login(
     # bottom of this function restores it so the caller is not locked out of a
     # previously-working server. Once a token has been exchanged the stash is stale.
     #
-    # A corrupt store must not stop this read: `mcpgen login` exists to produce a fresh
-    # valid entry, so failing it on unparseable JSON leaves hand-deleting the file as the
-    # only route back. Falling through to `{}` is no better — the `_save` below would
-    # write that empty view over other servers' entries, which may still be recoverable
-    # by hand. So the bad file is moved aside and kept. Only `login()` does this;
-    # `_file_load` keeps raising for `_pre_flight_refresh` and the SDK's mid-flow reads,
-    # which run with nobody at the keyboard.
-    #
     # Read, quarantine, pop and save are one cycle under the store lock, so two logins
     # finding the same corrupt file cannot each move it aside and race over the survivor.
     # The lock does not span the whole function: the window from here to the restore
     # covers the browser round, and holding it would stall every other mcpgen process for
     # as long as a human takes to click through a consent screen.
     with _store_locks(storage._lock_backend, storage._path):
-        try:
-            data = storage._load()
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            # Both mean bytes on disk that are not a store: `UnicodeDecodeError` from
-            # `read_text`, `json.JSONDecodeError` from `json.loads` and from
-            # `_require_store` for a file that parses into something other than an object.
-            # Narrower than OSError on purpose — an unreadable *path* (permissions, a
-            # directory in the way) is not a corrupt store and must propagate.
-            # Nanoseconds, not seconds: two corrupt-store logins in the same second would
-            # otherwise `os.replace` one quarantine over the other.
-            quarantine = storage._path.with_name(f"{storage._path.name}.corrupt.{time.time_ns()}")
-            try:
-                os.replace(storage._path, quarantine)
-            except OSError as move_failed:
-                # Continuing would `_save({})` over the bytes the quarantine exists to
-                # preserve. Stop instead: the file is still there and the message says what
-                # to do with it. `LoginWontHelp` rather than a subclass — no token was
-                # cached and the token endpoint was never contacted — and `cli.py` and the
-                # generated runner already catch the base, so this prints as a message
-                # rather than a traceback.
-                raise LoginWontHelp(
-                    f"{storage._path} is not a readable credential store ({exc}) and could not be moved aside "
-                    f"({move_failed}). Move or delete it by hand, then run login again."
-                ) from exc
-            print(
-                f"[mcpgen] {storage._path} is not a readable credential store ({exc}); moved to {quarantine}. "
-                f"Other servers' entries are in that file if you need them.",
-                file=sys.stderr,
-                flush=True,
-            )
-            data = {}
+        data = _load_store_for_login(storage)
         stashed = data.pop(server_name, None)
         storage._save(data)
 
@@ -2958,6 +3099,7 @@ async def ensure_login(
     cred_backend: str | None = None,
     headless: bool | None = None,
     callback_timeout: float | None = None,
+    interactive: bool = True,
 ) -> None:
     """Ensure a usable token exists for server_name, refreshing or logging in.
 
@@ -2980,11 +3122,17 @@ async def ensure_login(
       `TokenRefreshUnavailable` propagates. The refresh token is intact in all of
       those, so a browser round has nothing to replace.
     - No token at all: browser login.
+
+    interactive=False never starts a login: each case above that would open one raises
+    `ReauthenticationRequired` instead, so a background job can check or renew a
+    credential and report the one clear error. The other cases behave as above.
     """
     storage = FileTokenStorage(server_name, creds_path, backend=resolve_cred_backend(cred_backend))
     try:
         await _pre_flight_refresh(server_name, storage)
     except ReauthenticationRequired:
+        if not interactive:
+            raise
         before, started = _stored_tokens(storage), time.time()
         await login(
             server_name,
@@ -3002,6 +3150,8 @@ async def ensure_login(
         _verify_login_took(storage, before, started)
         return
     if await storage.get_tokens() is None:  # first-time: no token cached at all
+        if not interactive:
+            raise ReauthenticationRequired(f"No token cached for '{server_name}'. Run: mcpgen login {server_name}")
         before, started = _stored_tokens(storage), time.time()
         await login(
             server_name,
@@ -3024,6 +3174,7 @@ async def ensure_login_all(
     cred_backend: str | None = None,
     headless: bool | None = None,
     callback_timeout: float | None = None,
+    interactive: bool = True,
 ) -> None:
     """Run ensure_login() for each server, one at a time.
 
@@ -3039,4 +3190,5 @@ async def ensure_login_all(
             cred_backend=cred_backend,
             headless=headless,
             callback_timeout=callback_timeout,
+            interactive=interactive,
         )
