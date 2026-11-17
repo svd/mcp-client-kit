@@ -70,6 +70,18 @@ class FakeOAuth:
             if self.token_error is not None:
                 status, body = self.token_error
                 return httpx.Response(status, json=body)
+            if form.get("grant_type") == "refresh_token":
+                if form.get("refresh_token") != f"rt-{form.get('client_id')}":
+                    return httpx.Response(400, json={"error": "invalid_grant"})
+                return httpx.Response(
+                    200,
+                    json={
+                        "access_token": f"at2-{form['client_id']}",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "refresh_token": f"rt2-{form['client_id']}",
+                    },
+                )
             issued = _unb64(form["code"])
             digest = hashlib.sha256(form["code_verifier"].encode()).digest()
             challenge = base64.urlsafe_b64encode(digest).decode().rstrip("=")

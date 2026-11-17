@@ -1457,16 +1457,18 @@ def test_the_entry_matches_what_logins_sdk_writes_would_store(fake, creds, tmp_p
     assert ours == theirs
 
 
-def test_a_later_tool_call_works_over_the_saved_credential(fake, creds, monkeypatch):
+def _serve_fake_mcp(monkeypatch, access_token: str) -> list:
+    """Route `_http_session`'s MCP traffic to a fake server that accepts only *access_token*.
+
+    Returns the list of Authorization headers it saw.
+    """
     import httpx
 
-    pending = _begin(creds)
-    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
-    seen_auth = []
+    seen_auth: list = []
 
     def mcp(request: httpx.Request) -> httpx.Response:
         seen_auth.append(request.headers.get("authorization"))
-        if request.headers.get("authorization") != "Bearer at-client-1":
+        if request.headers.get("authorization") != f"Bearer {access_token}":
             return httpx.Response(401)
         msg = json.loads(request.content)
         if "id" not in msg:
@@ -1491,12 +1493,60 @@ def test_a_later_tool_call_works_over_the_saved_credential(fake, creds, monkeypa
         return client
 
     monkeypatch.setattr(_bridge, "create_mcp_http_client", factory)
+    return seen_auth
 
+
+def _call_whoami(creds: Path):
     async def call():
         async with _bridge._http_session("acme", MCP_URL, creds_path=creds, cred_backend="file") as s:
             return await s.call_tool("whoami", {})
 
-    result = asyncio.run(asyncio.wait_for(call(), 10))
+    return asyncio.run(asyncio.wait_for(call(), 10))
+
+
+def test_a_later_tool_call_works_over_the_saved_credential(fake, creds, monkeypatch):
+    pending = _begin(creds)
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+    seen_auth = _serve_fake_mcp(monkeypatch, "at-client-1")
+
+    result = _call_whoami(creds)
 
     assert result.content[0].text == '{"user": "alice"}'
     assert seen_auth and set(seen_auth) == {"Bearer at-client-1"}
+
+
+def test_a_two_step_credential_refreshes_and_serves_a_tool_call(fake, creds, monkeypatch):
+    """A client registered for an https redirect URI renews like any other.
+
+    `_pre_flight_refresh` posts to the stored token endpoint with the stored client, and
+    `_http_session` builds its client metadata from `client_info.redirect_uris[0]`.
+    """
+    import httpx
+
+    pending = _begin(creds)
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+    store = _store(creds)
+    store["acme"]["tokens"]["expires_at"] = 1  # long past
+    _bridge.FileTokenStorage("acme", creds)._save(store)
+
+    real_client = httpx.AsyncClient
+
+    class _ToFakeAuthorizationServer(real_client):  # type: ignore[misc,valid-type]
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("transport", httpx.MockTransport(fake.handle))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _ToFakeAuthorizationServer)
+    seen_auth = _serve_fake_mcp(monkeypatch, "at2-client-1")
+
+    result = _call_whoami(creds)
+
+    assert result.content[0].text == '{"user": "alice"}'
+    assert set(seen_auth) == {"Bearer at2-client-1"}
+    refresh = [r for r in fake.token_requests if r.get("grant_type") == "refresh_token"]
+    assert refresh == [{"grant_type": "refresh_token", "refresh_token": "rt-client-1", "client_id": "client-1"}]
+    entry = _store(creds)["acme"]
+    assert entry["tokens"]["access_token"] == "at2-client-1"
+    assert entry["tokens"]["refresh_token"] == "rt2-client-1"
+    assert entry["client_info"]["redirect_uris"] == [REDIRECT]
+    assert "pending_login" not in entry
