@@ -40,6 +40,9 @@
 
 ### Fixed
 
+- **`mcpgen merge` puts a space after the colon** in its "scrubbed probed_args for N
+  entry(ies):" line.
+
 - **A dead credential no longer writes an SDK traceback per call.** A call that needed a
   browser login raised `ReauthenticationRequired` from inside the MCP SDK's auth flow, which
   logged it to `mcp.client.auth.oauth2` as "OAuth flow error" with a full traceback, once
