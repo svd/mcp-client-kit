@@ -336,8 +336,23 @@ can be taken; where mcpgen runs without one (an NFS mount that refuses locks, th
 lock timeout), two concurrent callbacks can both get through. A callback with a different
 or missing `state` leaves the pending login in place, so a stray or forged redirect cannot
 cancel the real one. An expired pending login stays in the store until the next
-`begin_login` for that server, a `complete_login` whose `state` matches it, or
-`delete-creds`.
+`begin_login` for that server, a `complete_login` whose `state` matches it,
+`cancel_login`, or `delete-creds`.
+
+```python
+async def cancel_login(server_name, *, creds_path=DEFAULT_CREDS_PATH, cred_backend=None) -> bool
+```
+
+`cancel_login` drops the server's pending login, for a user who abandons the round or an
+operator clearing stale ones, and returns whether there was one; a callback for it then
+raises `LoginStateMismatch`. The server's tokens and client registration stay as they
+are. An entry that held only the pending login is removed, and a store left with no entry
+is cleared, as `delete-creds` does. A pending login `complete_login` could not use is
+removed too and counts as one. When the OS keychain refuses the write, `cancel_login`
+raises `RuntimeError` and the pending login stays in the keyring. A store that does not
+parse also raises `RuntimeError` and is left where it is; `complete_login` does the same
+with `LoginNotCompleted`. Neither moves it aside the way `mcpgen login` does, because
+neither writes a fresh entry in its place.
 
 The previous credential for the server stays in place until `complete_login` has a token
 in hand: `begin_login` leaves the entry's tokens alone, so the credential keeps working and
@@ -359,12 +374,13 @@ result = await complete_login(server, str(request.url), creds_path=user_creds_pa
 |---|---|---|---|
 | `LoginStateMismatch` | no pending login for the server, or the callback's `state` is missing or another login's | kept | kept |
 | `AuthorizationDenied` | the callback carries `error=` and no `state` | kept | kept |
-| `LoginNotCompleted` | the OS keychain refused the write that takes the pending login | kept | kept |
+| `LoginNotCompleted` | the store does not parse, or the OS keychain refused the write that takes the pending login | kept | kept |
 | `PendingLoginExpired` | past `expires_at` (`ttl=` on `begin_login`, default 300 s) | removed | kept |
 | `LoginStateMismatch` | the callback's RFC 9207 `iss` names an issuer other than the one the login started against | removed | kept |
 | `AuthorizationDenied` | the callback carries `error=` with the matching `state` (`.error`, `.error_description`), e.g. `access_denied` | removed | kept |
 | `LoginNotCompleted` | the callback carries neither a code nor an error | removed | kept |
 | `CodeExchangeRejected` | the token endpoint refused the code (`.status_code`, `.error`, `.error_description`) | removed | kept |
+| `LoginNotCompleted` | the OS keychain refused to save the new credential | removed | kept |
 | `PostLoginCheckFailed` | `verify=True` and `list_tools()` failed after the token was saved | removed | replaced |
 
 All but `PostLoginCheckFailed` share the base `LoginNotCompleted`. After a "removed" row,

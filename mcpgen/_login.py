@@ -64,6 +64,7 @@ from mcpgen._bridge import (
     LoginWontHelp,
     PostLoginCheckFailed,
     _body_excerpt,
+    _clear_backend,
     _client_metadata,
     _describe,
     _explain_registration_error,
@@ -74,6 +75,7 @@ from mcpgen._bridge import (
     _store_locks,
     _user_agent,
     _user_agent_hook,
+    _write_backend,
     package_version,
     resolve_cred_backend,
     server_config,
@@ -722,7 +724,13 @@ async def begin_login(
         if not isinstance(slot, dict):
             slot = data[server_name] = {}
         slot[_PENDING_KEY] = record.to_dict()
-        storage._save(data)
+        try:
+            _write_store(storage, data)
+        except _KeyringRefused as exc:
+            raise RuntimeError(
+                f"The OS keychain refused the write that stores the pending login for {server_name}, "
+                f"so nothing was stored ({exc})."
+            ) from None
     return PendingLogin(
         server_name=server_name,
         redirect_uri=record.redirect_uri,
@@ -737,6 +745,66 @@ def _callback_params(callback_url: str) -> dict[str, str]:
     return {key: values[0] for key, values in parse_qs(urlparse(callback_url).query).items() if values}
 
 
+class _KeyringRefused(Exception):
+    """The OS keychain refused a `_write_store()`; nothing was written anywhere."""
+
+
+class _StoreUnreadable(Exception):
+    """The credential store does not parse; see `_read_store()`."""
+
+
+def _write_store(storage: FileTokenStorage, data: dict) -> None:
+    """Write *data*, read under `_store_locks`, back to *storage*'s backend, with no fallback.
+
+    A store left with no entry is cleared the way `delete_cred()` clears it — file unlinked,
+    keyring item deleted — so no empty object is left behind.
+
+    Raises _KeyringRefused when the keyring refuses the save or the clear. Every write on
+    the two-step paths goes through here rather than `FileTokenStorage._save`, which on a
+    refusal copies the whole store — every server's tokens — to the plaintext file and
+    carries on: the keyring would then hold one version of the login and the file another,
+    and the next keyring read would not see the write. Here the keyring still holds what it
+    held, and no file is written.
+    """
+    try:
+        if data:
+            _write_backend(storage._backend, storage._path, data)
+        else:
+            _clear_backend(storage._backend, storage._path)
+    except Exception as exc:
+        if storage._backend != "keyring":
+            raise
+        raise _KeyringRefused(str(exc)) from exc
+
+
+def _read_store(storage: FileTokenStorage) -> dict:
+    """Read the whole store under `_store_locks`, for a write that only removes a record.
+
+    Raises _StoreUnreadable on a corrupt store, which stays where it is. Unlike
+    `_load_store_for_login`, nothing is moved aside: that is for a login about to write a
+    fresh entry in its place, and taking or cancelling a pending login writes none, so
+    moving the file would lose every server's credential to a stray callback or a cleanup.
+    """
+    try:
+        return storage._load()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # Same two errors `_load_store_for_login` treats as corrupt bytes on disk.
+        raise _StoreUnreadable(f"{storage._path} is not a readable credential store ({exc})") from None
+
+
+def _drop_pending(storage: FileTokenStorage, data: dict, server_name: str) -> None:
+    """Remove the server's `pending_login` from *data*, read by `_read_store()`, and write it.
+
+    An entry the record was alone in is removed, and a store left empty is cleared
+    (`_write_store`). Raises _KeyringRefused like `_write_store()`.
+    """
+    entry = data[server_name]
+    del entry[_PENDING_KEY]
+    if not entry:
+        del data[server_name]
+    _write_store(storage, data)
+
+
 def _take_pending(storage: FileTokenStorage, server_name: str, callback_url: str) -> _PendingRecord:
     """Remove the server's pending login from the store when *callback_url* is its callback.
 
@@ -747,16 +815,19 @@ def _take_pending(storage: FileTokenStorage, server_name: str, callback_url: str
         LoginStateMismatch — no usable pending login, a different `state`, or no `state`
             and no `error`.
         AuthorizationDenied — no `state`, and `error=`.
-    Raises LoginNotCompleted when the keyring refused the write and `FileTokenStorage` fell
-    back to the file: the record is still in the keyring, so the login is not used up.
+    Raises LoginNotCompleted, with the store untouched, when the store does not parse, and
+    when the keyring refused the write: the record is still in the keyring, so the login is
+    not used up.
 
     No message here quotes *callback_url*: it carries the code.
     """
     params = _callback_params(callback_url)
     state = params.get("state")
     with _store_locks(storage._lock_backend, storage._path):
-        data = _load_store_for_login(storage)
-        backend = storage._backend  # after the load, which may itself have fallen back
+        try:
+            data = _read_store(storage)
+        except _StoreUnreadable as exc:
+            raise LoginNotCompleted(f"{exc}; fix or move it, then start a new login with begin_login().") from None
         entry = data.get(server_name)
         if not isinstance(entry, dict):
             entry = {}
@@ -769,15 +840,13 @@ def _take_pending(storage: FileTokenStorage, server_name: str, callback_url: str
             raise LoginStateMismatch(f"The callback carries no state parameter ({server_name}).")
         if not secrets.compare_digest(state.encode(), record.state.encode()):
             raise LoginStateMismatch(f"The callback's state does not belong to the pending login for {server_name}.")
-        del entry[_PENDING_KEY]
-        if not entry:
-            del data[server_name]
-        storage._save(data)
-        if storage._backend != backend:
+        try:
+            _drop_pending(storage, data, server_name)
+        except _KeyringRefused as exc:
             raise LoginNotCompleted(
                 f"The OS keychain refused the write that marks the pending login for {server_name} used, "
-                f"so it was not completed; start a new one with begin_login()."
-            )
+                f"so it was not completed ({exc}); start a new one with begin_login()."
+            ) from None
     return record
 
 
@@ -851,12 +920,14 @@ async def complete_login(
         LoginStateMismatch — no pending login for the server, or a callback whose
             `state` is missing or another login's.
         AuthorizationDenied — a callback with `error=` and no `state`.
-        LoginNotCompleted — the keyring refused the write that takes the pending login.
+        LoginNotCompleted — the store does not parse (it is left as it is), or the
+            keyring refused the write that takes the pending login.
     Raises with the previous credential in place, the pending login used up:
         PendingLoginExpired — past its `expires_at`.
         LoginStateMismatch — the callback's `iss` names another issuer (RFC 9207).
         AuthorizationDenied — the callback carries `error=` (`access_denied`, …).
-        LoginNotCompleted — the callback carries neither a code nor an error.
+        LoginNotCompleted — the callback carries neither a code nor an error, or the
+            keyring refused to save the new credential.
         CodeExchangeRejected — the token endpoint refused the code.
     Raises after saving the new credential:
         PostLoginCheckFailed — *verify* was set and `list_tools()` failed.
@@ -897,7 +968,13 @@ async def complete_login(
         if newer is not None:
             entry[_PENDING_KEY] = newer
         data[server_name] = entry
-        storage._save(data)
+        try:
+            _write_store(storage, data)
+        except _KeyringRefused as exc:
+            raise LoginNotCompleted(
+                f"The OS keychain refused to save the new credential for {server_name} ({exc}); "
+                f"the previous one is still in place. Start a new login with begin_login()."
+            ) from None
 
     tools_count: int | None = None
     if verify:
@@ -933,3 +1010,42 @@ def _exchange_rejected(server_name: str, response: httpx.Response) -> CodeExchan
         error=error,
         error_description=description,
     )
+
+
+async def cancel_login(
+    server_name: str,
+    *,
+    creds_path: Path | str = DEFAULT_CREDS_PATH,
+    cred_backend: str | None = None,
+) -> bool:
+    """Drop the server's pending login; return whether there was one.
+
+    Removes the `pending_login` record `begin_login()` stored for *server_name* in one
+    locked write, so a later callback for it raises `LoginStateMismatch`. The server's
+    tokens and client registration stay as they are. An entry the record was alone in is
+    removed, and a store left with no entry is cleared, as `delete_cred()` does. A record
+    `complete_login()` could not use (another format, a missing or invalid field) is
+    removed all the same and counts as one; an entry that is not an object holds no record.
+
+    creds_path / cred_backend: the store `begin_login()` was given.
+
+    Raises RuntimeError, with the store untouched, when the store does not parse, and when
+    the OS keychain refused the write: the pending login is still in the keyring.
+    """
+    storage = FileTokenStorage(server_name, Path(creds_path), backend=resolve_cred_backend(cred_backend))
+    with _store_locks(storage._lock_backend, storage._path):
+        try:
+            data = _read_store(storage)
+        except _StoreUnreadable as exc:
+            raise RuntimeError(f"{exc}; fix or move it, then cancel again.") from None
+        entry = data.get(server_name)
+        if not isinstance(entry, dict) or _PENDING_KEY not in entry:
+            return False
+        try:
+            _drop_pending(storage, data, server_name)
+        except _KeyringRefused as exc:
+            raise RuntimeError(
+                f"The OS keychain refused the write that removes the pending login for {server_name}; "
+                f"it is still there ({exc})."
+            ) from None
+    return True

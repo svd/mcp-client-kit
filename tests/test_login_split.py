@@ -28,6 +28,7 @@ from mcpgen._login import (
     PendingLoginExpired,
     begin_login,
     callback_state,
+    cancel_login,
     complete_login,
 )
 
@@ -500,33 +501,50 @@ def test_complete_swaps_a_corrupt_store_aside_for_the_final_write(fake, creds, m
     assert list(creds.parent.glob("credentials.json.corrupt.*"))
 
 
-def test_complete_on_a_corrupt_store_quarantines_it(fake, creds):
+def test_complete_on_a_corrupt_store_leaves_it_in_place(fake, creds):
     pending = _begin(creds)
     creds.write_text("{not json")
 
-    with pytest.raises(LoginStateMismatch, match="no pending login"):
+    with pytest.raises(LoginNotCompleted, match="not a readable credential store") as info:
         _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
 
-    assert list(creds.parent.glob("credentials.json.corrupt.*"))
+    assert type(info.value) is LoginNotCompleted
+    assert creds.read_text() == "{not json"
+    assert not list(creds.parent.glob("credentials.json.corrupt.*"))
     assert fake.token_requests == []
 
 
-def test_keyring_fallback_during_the_take_refuses_the_exchange(fake, tmp_path, monkeypatch):
-    creds = tmp_path / "credentials.json"
+def _fake_ring(tmp_path: Path, monkeypatch) -> dict[str, str]:
+    """An in-memory OS keyring: the store lives under `ring["store"]` while it exists."""
     ring: dict[str, str] = {}
     monkeypatch.setattr(_bridge, "_KEYRING_LOCK_PATH", tmp_path / "keyring")
     monkeypatch.setattr(_bridge, "_keyring_read_raw", lambda: json.loads(ring.get("store", "{}")))
     monkeypatch.setattr(_bridge, "_keyring_write_raw", lambda data: ring.__setitem__("store", json.dumps(data)))
+    monkeypatch.setattr(_bridge, "_keyring_clear_raw", lambda: ring.pop("store", None))
+    return ring
+
+
+def _refuse_keyring_writes(monkeypatch) -> None:
+    def broken(*_args):
+        raise RuntimeError("keychain locked")
+
+    monkeypatch.setattr(_bridge, "_keyring_write_raw", broken)
+    monkeypatch.setattr(_bridge, "_keyring_clear_raw", broken)
+
+
+@pytest.mark.parametrize("others", [False, True], ids=["clear", "save"])
+def test_keyring_fallback_during_the_take_refuses_the_exchange(fake, tmp_path, monkeypatch, others):
+    creds = tmp_path / "credentials.json"
+    ring = _fake_ring(tmp_path, monkeypatch)
+    if others:
+        _bridge._keyring_write_raw({"other": {"tokens": {"access_token": "x"}}})
     pending = asyncio.run(
         begin_login("acme", redirect_uri=REDIRECT, url=MCP_URL, creds_path=creds, cred_backend="keyring")
     )
     assert json.loads(ring["store"])["acme"]["pending_login"]["state"] == pending.state
 
-    def broken(data):
-        raise RuntimeError("keychain locked")
-
-    monkeypatch.setattr(_bridge, "_keyring_write_raw", broken)
-    with pytest.warns(UserWarning, match="keyring unusable"), pytest.raises(LoginNotCompleted) as info:
+    _refuse_keyring_writes(monkeypatch)
+    with pytest.raises(LoginNotCompleted, match="keychain refused") as info:
         asyncio.run(
             complete_login(
                 "acme",
@@ -540,6 +558,55 @@ def test_keyring_fallback_during_the_take_refuses_the_exchange(fake, tmp_path, m
     assert type(info.value) is LoginNotCompleted
     assert fake.token_requests == []
     assert json.loads(ring["store"])["acme"]["pending_login"]["state"] == pending.state
+    assert not creds.exists()
+
+
+def test_begin_refused_by_the_keyring_raises_and_writes_nothing(fake, tmp_path, monkeypatch):
+    creds = tmp_path / "credentials.json"
+    ring = _fake_ring(tmp_path, monkeypatch)
+    _bridge._keyring_write_raw({"other": {"tokens": {"access_token": "x"}}})
+    _refuse_keyring_writes(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="keychain refused"):
+        asyncio.run(begin_login("acme", redirect_uri=REDIRECT, url=MCP_URL, creds_path=creds, cred_backend="keyring"))
+
+    assert json.loads(ring["store"]) == {"other": {"tokens": {"access_token": "x"}}}
+    assert not creds.exists()
+
+
+def test_complete_whose_save_the_keyring_refuses_keeps_the_previous_credential(fake, tmp_path, monkeypatch):
+    creds = tmp_path / "credentials.json"
+    ring = _fake_ring(tmp_path, monkeypatch)
+    _bridge._keyring_write_raw({"acme": PRIOR, "other": {"tokens": {"access_token": "x"}}})
+    pending = asyncio.run(
+        begin_login("acme", redirect_uri=REDIRECT, url=MCP_URL, creds_path=creds, cred_backend="keyring")
+    )
+    writes = {"n": 0}
+    real_write = _bridge._keyring_write_raw
+
+    def refuse_after_the_take(data):
+        writes["n"] += 1
+        if writes["n"] > 1:
+            raise RuntimeError("keychain locked")
+        real_write(data)
+
+    monkeypatch.setattr(_bridge, "_keyring_write_raw", refuse_after_the_take)
+
+    with pytest.raises(LoginNotCompleted, match="keychain refused") as info:
+        asyncio.run(
+            complete_login(
+                "acme",
+                FakeOAuth.authorize(pending.authorization_url),
+                creds_path=creds,
+                cred_backend="keyring",
+                verify=True,
+            )
+        )
+
+    assert type(info.value) is LoginNotCompleted
+    assert len(fake.token_requests) == 1
+    assert json.loads(ring["store"]) == {"acme": PRIOR, "other": {"tokens": {"access_token": "x"}}}
+    assert not creds.exists()
 
 
 def test_a_keyring_read_error_before_the_round_does_not_send_the_record_to_the_file(fake, tmp_path, monkeypatch):
@@ -612,6 +679,151 @@ def test_two_processes_taking_the_same_record_serialize_on_the_store_lock(fake, 
 
     assert sum(isinstance(o, _login._PendingRecord) for o in outcomes) == 1
     assert sum(isinstance(o, LoginStateMismatch) for o in outcomes) == 1
+
+
+def test_a_take_that_empties_the_store_removes_the_file(fake, tmp_path, monkeypatch):
+    creds = tmp_path / "credentials.json"
+    pending = _begin(creds, ttl=60)
+    _expire(monkeypatch)
+
+    with pytest.raises(PendingLoginExpired):
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+
+    assert not creds.exists()
+
+
+# ── Cancel ───────────────────────────────────────────────────────────────────
+
+
+def _cancel(creds: Path, server: str = "acme", backend: str = "file") -> bool:
+    return asyncio.run(cancel_login(server, creds_path=creds, cred_backend=backend))
+
+
+def test_cancel_removes_only_the_record(fake, creds):
+    pending = _begin(creds)
+
+    assert _cancel(creds) is True
+
+    entry = _store(creds)["acme"]
+    assert "pending_login" not in entry and entry == PRIOR
+    assert _store(creds)["other"] == {"tokens": {"access_token": "x"}}
+    with pytest.raises(LoginStateMismatch, match="no pending login"):
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+
+
+def test_cancel_without_a_pending_login_returns_false(fake, creds):
+    before = creds.read_text()
+
+    assert _cancel(creds) is False
+    assert _cancel(creds, "nobody") is False
+
+    assert creds.read_text() == before
+
+
+def test_cancel_without_a_store_returns_false(fake, tmp_path):
+    creds = tmp_path / "credentials.json"
+
+    assert _cancel(creds) is False
+    assert not creds.exists()
+
+
+@pytest.mark.parametrize("entry", [None, "x", []])
+def test_cancel_on_an_entry_that_is_not_an_object_returns_false(fake, tmp_path, entry):
+    creds = tmp_path / "credentials.json"
+    _bridge.FileTokenStorage("acme", creds)._save({"acme": entry})
+
+    assert _cancel(creds) is False
+    assert _store(creds) == {"acme": entry}
+
+
+def test_cancel_drops_a_pending_only_entry_and_clears_an_empty_store(fake, tmp_path):
+    creds = tmp_path / "credentials.json"
+    _begin(creds)
+
+    assert _cancel(creds) is True
+
+    assert not creds.exists()
+
+
+def test_cancel_drops_a_pending_only_entry_and_keeps_the_others(fake, tmp_path):
+    creds = tmp_path / "credentials.json"
+    _bridge.FileTokenStorage("acme", creds)._save({"other": {"tokens": {"access_token": "x"}}})
+    _begin(creds)
+
+    assert _cancel(creds) is True
+
+    assert _store(creds) == {"other": {"tokens": {"access_token": "x"}}}
+
+
+def test_cancel_removes_an_unusable_record(fake, creds):
+    _begin(creds)
+    _put_record(creds, {**_record(creds), "format": 2, "client_info": {"client_secret": "shh"}})
+
+    assert _cancel(creds) is True
+
+    assert _store(creds)["acme"] == PRIOR
+    assert "shh" not in creds.read_text()
+
+
+@pytest.mark.parametrize("others", [False, True], ids=["pending-only", "with-others"])
+def test_cancel_on_a_keyring_store(fake, tmp_path, monkeypatch, others):
+    creds = tmp_path / "credentials.json"
+    ring = _fake_ring(tmp_path, monkeypatch)
+    if others:
+        _bridge._keyring_write_raw({"other": {"tokens": {"access_token": "x"}}})
+    asyncio.run(begin_login("acme", redirect_uri=REDIRECT, url=MCP_URL, creds_path=creds, cred_backend="keyring"))
+
+    assert _cancel(creds, backend="keyring") is True
+
+    if others:
+        assert json.loads(ring["store"]) == {"other": {"tokens": {"access_token": "x"}}}
+    else:
+        assert "store" not in ring
+    assert not creds.exists()
+
+
+@pytest.mark.parametrize("others", [False, True], ids=["clear", "save"])
+def test_cancel_refused_by_the_keyring_raises_and_keeps_the_record(fake, tmp_path, monkeypatch, others):
+    creds = tmp_path / "credentials.json"
+    ring = _fake_ring(tmp_path, monkeypatch)
+    if others:
+        _bridge._keyring_write_raw({"other": {"tokens": {"access_token": "x"}}})
+    pending = asyncio.run(
+        begin_login("acme", redirect_uri=REDIRECT, url=MCP_URL, creds_path=creds, cred_backend="keyring")
+    )
+    _refuse_keyring_writes(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="still there"):
+        _cancel(creds, backend="keyring")
+
+    assert json.loads(ring["store"])["acme"]["pending_login"]["state"] == pending.state
+    assert not creds.exists()
+
+
+def test_cancel_on_a_corrupt_store_leaves_it_in_place(fake, creds):
+    creds.write_text("{not json")
+
+    with pytest.raises(RuntimeError, match="not a readable credential store"):
+        _cancel(creds)
+
+    assert creds.read_text() == "{not json"
+    assert not list(creds.parent.glob("credentials.json.corrupt.*"))
+
+
+def test_cancel_is_exported():
+    import mcpgen
+
+    assert mcpgen.cancel_login is cancel_login
+    assert "cancel_login" in mcpgen.__all__
+
+
+def test_delete_cred_removes_a_pending_only_entry(fake, tmp_path):
+    creds = tmp_path / "credentials.json"
+    _begin(creds)
+
+    assert _bridge.delete_cred("acme", backend="file", credentials_path=creds) is True
+
+    assert not creds.exists()
 
 
 # ── Client registration reuse ────────────────────────────────────────────────

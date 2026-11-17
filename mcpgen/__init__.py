@@ -25,6 +25,7 @@ from mcpgen._login import (
     StaticClient,
     begin_login,
     callback_state,
+    cancel_login,
     complete_login,
 )
 from mcpgen.seam import McpCaller, McpResourceReader
@@ -48,6 +49,7 @@ __all__ = [
     "LoginResult",
     "begin_login",
     "complete_login",
+    "cancel_login",
     "callback_state",
     "delete_cred",
     "ensure_login",

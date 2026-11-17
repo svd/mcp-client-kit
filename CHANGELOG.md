@@ -13,8 +13,10 @@
   callback's `state` matches, exchanges the code and writes the credential entry `login()`
   writes. The two steps can run in different processes, so a web server can drive the
   login and receive the redirect at its own URL. A pending login is used once, and a new
-  `begin_login()` for the server replaces the earlier one. The previous credential stays
-  in place until a token is issued. Failures raise `PendingLoginExpired`,
+  `begin_login()` for the server replaces the earlier one; `cancel_login(server)` drops it
+  and leaves the server's tokens alone. The previous credential stays
+  in place until a token is issued. On the keyring backend these calls never fall back to
+  the plaintext file: a write the OS keychain refuses raises and writes nothing. Failures raise `PendingLoginExpired`,
   `LoginStateMismatch`, `AuthorizationDenied` (also a `ValueError`) or
   `CodeExchangeRejected` (base `LoginNotCompleted`). A stored registration for the same
   redirect URI is reused, including one made by an earlier `begin_login()` that never
