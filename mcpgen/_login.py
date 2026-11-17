@@ -31,6 +31,7 @@ names the endpoint `_pre_flight_refresh` later renews against.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import secrets
@@ -516,6 +517,17 @@ async def _drive_until_authorization(
         await flow.aclose()
 
 
+def _is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _validate_redirect_uri(redirect_uri: str) -> None:
     parsed = urlparse(redirect_uri)
     if not parsed.scheme or not (parsed.netloc or parsed.path):
@@ -523,6 +535,16 @@ def _validate_redirect_uri(redirect_uri: str) -> None:
     if parsed.fragment:
         # RFC 6749 §3.1.2: the redirection endpoint URI must not include a fragment.
         raise ValueError(f"redirect_uri must not carry a fragment, got {redirect_uri!r}")
+    # RFC 6749 §3.1.2.1 asks a redirection endpoint to use TLS; RFC 8252 §7.3 exempts the
+    # loopback interface, where the code never crosses the network.
+    scheme = parsed.scheme.lower()
+    if scheme == "https" and parsed.hostname:
+        return
+    if scheme == "http" and _is_loopback_host(parsed.hostname):
+        return
+    raise ValueError(
+        f"redirect_uri must use https, or http on a loopback host (localhost, 127.0.0.0/8, ::1), got {redirect_uri!r}"
+    )
 
 
 def _stored_entry(storage: FileTokenStorage, server_name: str) -> dict:
@@ -620,7 +642,9 @@ async def begin_login(
     token endpoint stay usable until `complete_login()` replaces them. Any earlier
     pending login for the server is replaced, so its `state` stops being accepted.
 
-    redirect_uri: any absolute URL — host, port and path are the caller's.
+    redirect_uri: an absolute `https` URL, or `http` on a loopback host (`localhost`,
+        127.0.0.0/8, ::1); host, port and path are the caller's. Anything else raises
+        ValueError before any request.
     creds_path / cred_backend: the store the pending login is kept in; pass the same
         to `complete_login()`.
     url / client_name / config_path: as in `login()`.

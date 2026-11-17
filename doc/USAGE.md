@@ -310,7 +310,9 @@ result.tools_count   # list_tools() ran over the new credential
 ```
 
 `begin_login` runs discovery and client registration and nothing else: no browser, no
-listener, no stdin. `redirect_uri` is any absolute URL, host, port and path included. What
+listener, no stdin. `redirect_uri` is an absolute `https` URL, or `http` on a loopback host
+(`localhost`, `127.0.0.0/8`, `::1`), host, port and path included; any other scheme or host
+raises `ValueError` before any request (RFC 6749 §3.1.2.1, RFC 8252 §7.3). What
 the code exchange needs — the PKCE verifier, the client registration and the discovered
 metadata — goes into the credential store, under the server entry's `pending_login` key.
 The returned `PendingLogin` holds public values only: `server_name`, `redirect_uri`,

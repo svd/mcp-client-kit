@@ -1050,6 +1050,44 @@ def test_begin_rejects_a_redirect_uri_that_is_not_absolute(fake, creds, uri):
         _begin(creds, redirect_uri=uri)
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://staffing.example/cb",
+        "http://10.0.0.5:8080/cb",
+        "http://localhost.evil.example/cb",
+        "ftp://h.example/cb",
+        "com.example.app:/cb",
+    ],
+)
+def test_begin_refuses_a_redirect_uri_without_tls(fake, creds, uri):
+    with pytest.raises(ValueError, match="redirect_uri"):
+        _begin(creds, redirect_uri=uri)
+    assert fake.registrations == [] and fake.token_requests == []
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://localhost:8080/cb",
+        "http://LOCALHOST/cb",
+        "http://127.0.0.1/cb",
+        "http://127.8.9.10:1/cb",
+        "http://[::1]:9/cb",
+        "https://h.example/cb",
+    ],
+)
+def test_begin_accepts_https_and_loopback_http(fake, creds, uri):
+    pending = _begin(creds, redirect_uri=uri)
+    assert parse_qs(urlparse(pending.authorization_url).query)["redirect_uri"]
+
+
+def test_a_static_client_registered_uri_is_held_to_the_same_rule(fake, creds):
+    client = _login.StaticClient(client_id="c", redirect_uris=("http://intranet.example/cb",))
+    with pytest.raises(ValueError, match="redirect_uri"):
+        _begin(creds, client=client, redirect_uri="http://intranet.example/cb")
+
+
 @pytest.mark.parametrize("ttl", [0, -5, float("nan"), float("inf")])
 def test_begin_rejects_a_ttl_that_is_not_a_positive_finite_number(fake, creds, ttl):
     with pytest.raises(ValueError, match="ttl"):

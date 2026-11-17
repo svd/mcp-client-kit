@@ -8,7 +8,8 @@
   redirect_uri=...)` runs discovery and client registration, keeps what the code exchange
   needs (PKCE verifier, client registration, discovered metadata) in the credential store
   under the server entry's `pending_login` key, and returns a `PendingLogin` holding only
-  public values, among them the `authorization_url` to send the browser to.
+  public values, among them the `authorization_url` to send the browser to. The redirect
+  URI must be `https`, or `http` on a loopback host.
   `complete_login(server, callback_url)` takes the pending login out of the store when the
   callback's `state` matches, exchanges the code and writes the credential entry `login()`
   writes. The two steps can run in different processes, so a web server can drive the
