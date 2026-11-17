@@ -5,14 +5,18 @@
 ### Added
 
 - **Two-step OAuth login with a caller-owned redirect URI.** `begin_login(server,
-  redirect_uri=...)` runs discovery and client registration and returns a `PendingLogin`
-  with the `authorization_url` to send the browser to; `complete_login(pending,
-  callback_url)` checks `state`, exchanges the code and writes the credential entry
-  `login()` writes. The pending login serializes with `to_json()` / `from_json()`, so the
-  two steps can run in different processes — a web server can drive the login and receive
-  the redirect at its own URL. The previous credential stays in place until a token is
-  issued. Failures raise `PendingLoginExpired`, `LoginStateMismatch`, `AuthorizationDenied`
-  or `CodeExchangeRejected` (base `LoginNotCompleted`). A stored registration for the same
+  redirect_uri=...)` runs discovery and client registration, keeps what the code exchange
+  needs (PKCE verifier, client registration, discovered metadata) in the credential store
+  under the server entry's `pending_login` key, and returns a `PendingLogin` holding only
+  public values, among them the `authorization_url` to send the browser to.
+  `complete_login(server, callback_url)` takes the pending login out of the store when the
+  callback's `state` matches, exchanges the code and writes the credential entry `login()`
+  writes. The two steps can run in different processes, so a web server can drive the
+  login and receive the redirect at its own URL. A pending login is used once, and a new
+  `begin_login()` for the server replaces the earlier one. The previous credential stays
+  in place until a token is issued. Failures raise `PendingLoginExpired`,
+  `LoginStateMismatch`, `AuthorizationDenied` (also a `ValueError`) or
+  `CodeExchangeRejected` (base `LoginNotCompleted`). A stored registration for the same
   redirect URI is reused. See "Login driven by your own web server" in `doc/USAGE.md`.
 
 - **Pre-registered OAuth clients for `begin_login`.** `begin_login(..., client=StaticClient(

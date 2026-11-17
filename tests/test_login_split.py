@@ -22,6 +22,7 @@ from mcpgen import _bridge, _login
 from mcpgen._login import (
     AuthorizationDenied,
     CodeExchangeRejected,
+    LoginNotCompleted,
     LoginStateMismatch,
     PendingLogin,
     PendingLoginExpired,
@@ -77,25 +78,26 @@ def _store(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def _record(path: Path, server: str = "acme") -> dict:
+    return _store(path)[server]["pending_login"]
+
+
 def _begin(creds: Path, **kwargs) -> PendingLogin:
     kwargs.setdefault("redirect_uri", REDIRECT)
     return asyncio.run(begin_login("acme", url=MCP_URL, creds_path=creds, cred_backend="file", **kwargs))
 
 
-def _complete(pending: PendingLogin, callback: str, **kwargs):
+def _complete(creds: Path, server: str, callback: str, **kwargs):
     kwargs.setdefault("verify", False)
-    return asyncio.run(complete_login(pending, callback, **kwargs))
+    return asyncio.run(complete_login(server, callback, creds_path=creds, cred_backend="file", **kwargs))
 
 
 # ── Happy path ───────────────────────────────────────────────────────────────
 
 
-def test_begin_returns_an_authorization_url_and_leaves_the_store_untouched(fake, creds):
-    before = creds.read_bytes()
-
+def test_begin_returns_an_authorization_url(fake, creds):
     pending = _begin(creds)
 
-    assert creds.read_bytes() == before
     query = parse_qs(urlparse(pending.authorization_url).query)
     assert pending.authorization_url.startswith(f"{AS_URL}/authorize?")
     assert query["redirect_uri"] == [REDIRECT]
@@ -103,15 +105,31 @@ def test_begin_returns_an_authorization_url_and_leaves_the_store_untouched(fake,
     assert query["code_challenge_method"] == ["S256"]
     assert query["resource"] == [MCP_URL]
     assert fake.registrations[0]["redirect_uris"] == [REDIRECT]
+    assert pending.server_name == "acme"
     assert pending.redirect_uri == REDIRECT
     assert not pending.expired
 
 
-def test_complete_after_json_round_trip_writes_the_entry_login_writes(fake, creds):
-    blob = _begin(creds).to_json()
+def test_begin_stores_the_record_and_keeps_the_tokens(fake, creds):
+    pending = _begin(creds)
 
-    pending = PendingLogin.from_json(blob)
-    result = _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+    entry = _store(creds)["acme"]
+    assert entry["tokens"] == PRIOR["tokens"] and entry["client_info"] == PRIOR["client_info"]
+    assert entry["token_endpoint"] == PRIOR["token_endpoint"]
+    record = entry["pending_login"]
+    assert record["format"] == 1 and record["state"] == pending.state
+    assert record["redirect_uri"] == REDIRECT and record["code_verifier"]
+    assert record["authorization_url"] == pending.authorization_url
+    assert record["expires_at"] == pending.expires_at
+    assert record["client_info"]["client_id"] == "client-1"
+    assert _store(creds)["other"] == {"tokens": {"access_token": "x"}}
+    assert oct(creds.stat().st_mode & 0o777) == "0o600"
+
+
+def test_complete_writes_the_entry_login_writes_and_removes_the_record(fake, creds):
+    pending = _begin(creds)
+
+    result = _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
 
     entry = _store(creds)["acme"]
     assert set(entry) == {"client_info", "tokens", "token_endpoint"}
@@ -147,7 +165,7 @@ def test_complete_verify_runs_list_tools_over_the_saved_credential(fake, creds, 
     monkeypatch.setattr(_login, "_http_session", fake_session)
     pending = _begin(creds)
 
-    result = _complete(pending, FakeOAuth.authorize(pending.authorization_url), verify=True)
+    result = _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url), verify=True)
 
     assert result.tools_count == 3
     assert seen["url"] == MCP_URL
@@ -164,61 +182,82 @@ def test_complete_verify_failure_keeps_the_new_token(fake, creds, monkeypatch):
     pending = _begin(creds)
 
     with pytest.raises(_bridge.PostLoginCheckFailed, match="502 from origin"):
-        _complete(pending, FakeOAuth.authorize(pending.authorization_url), verify=True)
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url), verify=True)
 
     assert _store(creds)["acme"]["tokens"]["access_token"] == "at-client-1"
+    assert "pending_login" not in _store(creds)["acme"]
 
 
 # ── Failures leave the previous credential in place ──────────────────────────
 
 
-def test_wrong_state_raises_and_keeps_the_previous_credential(fake, creds):
-    pending = _begin(creds)
+def _without_record(path: Path) -> dict:
+    return {k: v for k, v in _store(path)["acme"].items() if k != "pending_login"}
 
-    with pytest.raises(LoginStateMismatch):
-        _complete(pending, FakeOAuth.authorize(pending.authorization_url, state="someone-else"))
+
+def test_complete_without_a_pending_login_is_a_state_mismatch(fake, creds):
+    with pytest.raises(LoginStateMismatch, match="no pending login"):
+        _complete(creds, "acme", f"{REDIRECT}?code=abc&state=s1")
 
     assert _store(creds)["acme"] == PRIOR
     assert fake.token_requests == []
 
 
-def test_missing_state_raises_state_mismatch(fake, creds):
+def test_mismatched_state_keeps_the_record(fake, creds):
+    pending = _begin(creds)
+    before = _record(creds)
+
+    with pytest.raises(LoginStateMismatch):
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url, state="someone-else"))
+
+    assert _record(creds) == before
+    assert _without_record(creds) == PRIOR
+    assert fake.token_requests == []
+    # The real callback still completes.
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+
+
+def test_missing_state_raises_state_mismatch_and_keeps_the_record(fake, creds):
     pending = _begin(creds)
     callback = FakeOAuth.authorize(pending.authorization_url).split("&state=")[0]
 
     with pytest.raises(LoginStateMismatch, match="no state"):
-        _complete(pending, callback)
+        _complete(creds, "acme", callback)
 
-
-def test_expired_pending_login_raises_and_keeps_the_previous_credential(fake, creds, monkeypatch):
-    pending = _begin(creds, ttl=60)
-    callback = FakeOAuth.authorize(pending.authorization_url)
-    real_time = _login.time.time
-    monkeypatch.setattr(_login.time, "time", lambda: real_time() + 61)
-
-    with pytest.raises(PendingLoginExpired):
-        _complete(pending, callback)
-
-    assert _store(creds)["acme"] == PRIOR
+    assert _record(creds)["state"] == pending.state
     assert fake.token_requests == []
 
 
-def test_access_denied_raises_typed_error_with_the_servers_detail(fake, creds):
+def test_error_without_state_keeps_the_record(fake, creds):
     pending = _begin(creds)
+    callback = f"{REDIRECT}?error=access_denied&error_description=User+declined"
 
     with pytest.raises(AuthorizationDenied) as info:
-        _complete(pending, FakeOAuth.authorize(pending.authorization_url, deny=True))
+        _complete(creds, "acme", callback)
 
     assert info.value.error == "access_denied"
-    assert info.value.error_description == "User declined"
-    assert _store(creds)["acme"] == PRIOR
+    assert _record(creds)["state"] == pending.state
+    assert _without_record(creds) == PRIOR
 
 
 def test_error_redirect_for_another_login_is_a_state_mismatch(fake, creds):
     pending = _begin(creds)
 
     with pytest.raises(LoginStateMismatch):
-        _complete(pending, FakeOAuth.authorize(pending.authorization_url, deny=True, state="other"))
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url, deny=True, state="other"))
+
+    assert _record(creds)["state"] == pending.state
+
+
+def test_access_denied_raises_typed_error_with_the_servers_detail(fake, creds):
+    pending = _begin(creds)
+
+    with pytest.raises(AuthorizationDenied) as info:
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url, deny=True))
+
+    assert info.value.error == "access_denied"
+    assert info.value.error_description == "User declined"
+    assert _store(creds)["acme"] == PRIOR
 
 
 def test_rejected_code_exchange_raises_typed_error(fake, creds):
@@ -226,7 +265,7 @@ def test_rejected_code_exchange_raises_typed_error(fake, creds):
     pending = _begin(creds)
 
     with pytest.raises(CodeExchangeRejected) as info:
-        _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
 
     assert info.value.status_code == 400
     assert info.value.error == "invalid_grant"
@@ -234,12 +273,49 @@ def test_rejected_code_exchange_raises_typed_error(fake, creds):
     assert _store(creds)["acme"] == PRIOR
 
 
+def _expire(monkeypatch) -> None:
+    real_time = _login.time.time
+    monkeypatch.setattr(_login.time, "time", lambda: real_time() + 61)
+
+
+@pytest.mark.parametrize("case", ["expired", "denied", "no_code", "iss", "exchange_rejected"])
+def test_failure_after_the_state_matched_removes_the_record(fake, creds, monkeypatch, case):
+    pending = _begin(creds, ttl=60)
+    callback = FakeOAuth.authorize(pending.authorization_url, deny=case == "denied")
+    expected: type[Exception] = {
+        "expired": PendingLoginExpired,
+        "denied": AuthorizationDenied,
+        "no_code": LoginNotCompleted,
+        "iss": LoginStateMismatch,
+        "exchange_rejected": CodeExchangeRejected,
+    }[case]
+    if case == "expired":
+        _expire(monkeypatch)
+    elif case == "no_code":
+        callback = f"{REDIRECT}?state={pending.state}"
+    elif case == "iss":
+        callback += "&iss=https%3A%2F%2Fevil.test"
+    elif case == "exchange_rejected":
+        fake.token_error = (400, {"error": "invalid_grant"})
+
+    with pytest.raises(expected) as info:
+        _complete(creds, "acme", callback)
+
+    assert type(info.value) is expected
+    assert _store(creds)["acme"] == PRIOR
+    if case != "exchange_rejected":
+        assert fake.token_requests == []
+    # Used up: the same callback again finds no pending login.
+    with pytest.raises(LoginStateMismatch, match="no pending login"):
+        _complete(creds, "acme", callback)
+
+
 def test_a_200_that_is_not_a_token_is_a_rejected_exchange(fake, creds):
     fake.token_error = (200, {"access_token": "leaky-secret", "token_type": "Bearer", "expires_in": "soon"})
     pending = _begin(creds)
 
     with pytest.raises(CodeExchangeRejected) as info:
-        _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
 
     assert "leaky-secret" not in str(info.value)
     assert info.value.__cause__ is None
@@ -251,9 +327,291 @@ def test_wrong_verifier_is_rejected_by_the_token_endpoint(fake, creds):
     other = _begin(creds)
 
     with pytest.raises(CodeExchangeRejected, match="invalid_grant"):
-        # `other`'s callback carries a code bound to `other`'s PKCE challenge.
-        tampered = FakeOAuth.authorize(other.authorization_url, state=pending.state)
-        _complete(pending, tampered)
+        # A code bound to `pending`'s PKCE challenge, sent with the stored login's state.
+        tampered = FakeOAuth.authorize(pending.authorization_url, state=other.state)
+        _complete(creds, "acme", tampered)
+
+
+def test_authorization_denied_is_a_value_error():
+    assert issubclass(AuthorizationDenied, ValueError)
+    assert issubclass(AuthorizationDenied, LoginNotCompleted)
+
+
+# ── Single use and supersession ──────────────────────────────────────────────
+
+
+def test_second_begin_supersedes_the_first(fake, creds):
+    first = _begin(creds)
+    second = _begin(creds)
+
+    with pytest.raises(LoginStateMismatch):
+        _complete(creds, first.server_name, FakeOAuth.authorize(first.authorization_url))
+
+    assert _record(creds)["state"] == second.state
+    client_id = _record(creds)["client_info"]["client_id"]
+    _complete(creds, "acme", FakeOAuth.authorize(second.authorization_url))
+    assert _store(creds)["acme"]["tokens"]["access_token"] == f"at-{client_id}"
+
+
+def test_replayed_callback_after_success_is_refused(fake, creds):
+    pending = _begin(creds)
+    callback = FakeOAuth.authorize(pending.authorization_url)
+    _complete(creds, "acme", callback)
+    saved = _store(creds)["acme"]
+
+    with pytest.raises(LoginStateMismatch):
+        _complete(creds, "acme", callback)
+
+    assert len(fake.token_requests) == 1
+    assert _store(creds)["acme"] == saved
+
+
+def test_two_concurrent_completes_make_one_exchange(fake, creds):
+    pending = _begin(creds)
+    callback = FakeOAuth.authorize(pending.authorization_url)
+
+    async def run():
+        return await asyncio.gather(
+            complete_login("acme", callback, creds_path=creds, cred_backend="file", verify=False),
+            complete_login("acme", callback, creds_path=creds, cred_backend="file", verify=False),
+            return_exceptions=True,
+        )
+
+    outcomes = asyncio.run(run())
+
+    assert sum(isinstance(o, _login.LoginResult) for o in outcomes) == 1
+    assert sum(isinstance(o, LoginStateMismatch) for o in outcomes) == 1
+    assert len(fake.token_requests) == 1
+    assert _store(creds)["acme"]["tokens"]["access_token"] == "at-client-1"
+
+
+def test_refresh_between_begin_and_complete_keeps_the_record(fake, creds):
+    from mcp.shared.auth import OAuthToken
+
+    pending = _begin(creds)
+    storage = _bridge.FileTokenStorage("acme", creds)
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="refreshed", token_type="Bearer", expires_in=3600)))
+
+    entry = _store(creds)["acme"]
+    assert entry["tokens"]["access_token"] == "refreshed"
+    assert entry["pending_login"]["state"] == pending.state
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+    assert _store(creds)["acme"]["tokens"]["access_token"] == "at-client-1"
+
+
+def test_begin_during_the_exchange_survives_the_final_write(fake, creds, monkeypatch):
+    first = _begin(creds)
+    newer: dict[str, PendingLogin] = {}
+    real = OAuthClientProvider._handle_token_response
+
+    async def begin_then_handle(self, response):
+        newer["p"] = await begin_login(
+            "acme", redirect_uri=REDIRECT, url=MCP_URL, creds_path=creds, cred_backend="file"
+        )
+        return await real(self, response)
+
+    monkeypatch.setattr(OAuthClientProvider, "_handle_token_response", begin_then_handle)
+    _complete(creds, "acme", FakeOAuth.authorize(first.authorization_url))
+    monkeypatch.setattr(OAuthClientProvider, "_handle_token_response", real)
+
+    entry = _store(creds)["acme"]
+    assert entry["tokens"]["access_token"] == "at-client-1"
+    assert entry["pending_login"]["state"] == newer["p"].state
+    _complete(creds, "acme", FakeOAuth.authorize(newer["p"].authorization_url))
+    assert "pending_login" not in _store(creds)["acme"]
+
+
+# ── Store edge cases ─────────────────────────────────────────────────────────
+
+
+def test_begin_quarantines_a_corrupt_store(fake, tmp_path):
+    creds = tmp_path / "credentials.json"
+    creds.write_text("{not json")
+    creds.chmod(0o600)
+
+    pending = _begin(creds)
+
+    assert list(tmp_path.glob("credentials.json.corrupt.*"))
+    assert set(_store(creds)) == {"acme"}
+    assert _record(creds)["state"] == pending.state
+
+
+def test_begin_on_a_server_with_no_entry_creates_a_pending_only_entry(fake, tmp_path):
+    creds = tmp_path / "credentials.json"
+
+    pending = _begin(creds)
+
+    assert set(_store(creds)) == {"acme"}
+    assert set(_store(creds)["acme"]) == {"pending_login"}
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+    assert set(_store(creds)["acme"]) == {"client_info", "tokens", "token_endpoint"}
+
+
+def _put_record(creds: Path, record: dict) -> None:
+    store = _store(creds)
+    store["acme"]["pending_login"] = record
+    _bridge.FileTokenStorage("acme", creds)._save(store)
+
+
+def test_unknown_record_format_is_no_pending_login(fake, creds):
+    pending = _begin(creds)
+    _put_record(creds, {**_record(creds), "format": 2})
+
+    with pytest.raises(LoginStateMismatch, match="no pending login"):
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+    assert fake.token_requests == []
+
+
+def test_a_record_missing_a_field_is_no_pending_login(fake, creds):
+    pending = _begin(creds)
+    record = _record(creds)
+    del record["code_verifier"]
+    _put_record(creds, record)
+
+    with pytest.raises(LoginStateMismatch, match="no pending login"):
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+
+
+def test_unusable_record_is_no_pending_login(fake, creds):
+    pending = _begin(creds)
+    _put_record(creds, {**_record(creds), "client_info": {"client_secret": "shh", "redirect_uris": "bad"}})
+
+    with pytest.raises(LoginStateMismatch, match="no pending login") as info:
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+
+    chain = [info.value, info.value.__context__, info.value.__cause__]
+    assert all("shh" not in str(e) for e in chain if e is not None)
+    assert info.value.__context__ is None and info.value.__cause__ is None
+    assert fake.token_requests == []
+
+
+def test_complete_swaps_a_corrupt_store_aside_for_the_final_write(fake, creds, monkeypatch):
+    pending = _begin(creds)
+    real = OAuthClientProvider._handle_token_response
+
+    async def corrupt_then_handle(self, response):
+        creds.write_text("{not json")
+        return await real(self, response)
+
+    monkeypatch.setattr(OAuthClientProvider, "_handle_token_response", corrupt_then_handle)
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+
+    assert _store(creds)["acme"]["tokens"]["access_token"] == "at-client-1"
+    assert list(creds.parent.glob("credentials.json.corrupt.*"))
+
+
+def test_complete_on_a_corrupt_store_quarantines_it(fake, creds):
+    pending = _begin(creds)
+    creds.write_text("{not json")
+
+    with pytest.raises(LoginStateMismatch, match="no pending login"):
+        _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
+
+    assert list(creds.parent.glob("credentials.json.corrupt.*"))
+    assert fake.token_requests == []
+
+
+def test_keyring_fallback_during_the_take_refuses_the_exchange(fake, tmp_path, monkeypatch):
+    creds = tmp_path / "credentials.json"
+    ring: dict[str, str] = {}
+    monkeypatch.setattr(_bridge, "_KEYRING_LOCK_PATH", tmp_path / "keyring")
+    monkeypatch.setattr(_bridge, "_keyring_read_raw", lambda: json.loads(ring.get("store", "{}")))
+    monkeypatch.setattr(_bridge, "_keyring_write_raw", lambda data: ring.__setitem__("store", json.dumps(data)))
+    pending = asyncio.run(
+        begin_login("acme", redirect_uri=REDIRECT, url=MCP_URL, creds_path=creds, cred_backend="keyring")
+    )
+    assert json.loads(ring["store"])["acme"]["pending_login"]["state"] == pending.state
+
+    def broken(data):
+        raise RuntimeError("keychain locked")
+
+    monkeypatch.setattr(_bridge, "_keyring_write_raw", broken)
+    with pytest.warns(UserWarning, match="keyring unusable"), pytest.raises(LoginNotCompleted) as info:
+        asyncio.run(
+            complete_login(
+                "acme",
+                FakeOAuth.authorize(pending.authorization_url),
+                creds_path=creds,
+                cred_backend="keyring",
+                verify=False,
+            )
+        )
+
+    assert type(info.value) is LoginNotCompleted
+    assert fake.token_requests == []
+    assert json.loads(ring["store"])["acme"]["pending_login"]["state"] == pending.state
+
+
+def test_a_keyring_read_error_before_the_round_does_not_send_the_record_to_the_file(fake, tmp_path, monkeypatch):
+    creds = tmp_path / "credentials.json"
+    ring: dict[str, str] = {}
+    reads = {"n": 0}
+
+    def flaky_read():
+        reads["n"] += 1
+        if reads["n"] == 1:
+            raise RuntimeError("keychain busy")
+        return json.loads(ring.get("store", "{}"))
+
+    monkeypatch.setattr(_bridge, "_KEYRING_LOCK_PATH", tmp_path / "keyring")
+    monkeypatch.setattr(_bridge, "_keyring_read_raw", flaky_read)
+    monkeypatch.setattr(_bridge, "_keyring_write_raw", lambda data: ring.__setitem__("store", json.dumps(data)))
+
+    with pytest.warns(UserWarning, match="keyring unusable"):
+        pending = asyncio.run(
+            begin_login("acme", redirect_uri=REDIRECT, url=MCP_URL, creds_path=creds, cred_backend="keyring")
+        )
+
+    assert json.loads(ring["store"])["acme"]["pending_login"]["state"] == pending.state
+    assert not creds.exists()
+
+
+@pytest.mark.parametrize("entry", [None, "x", []])
+def test_begin_replaces_an_entry_that_is_not_an_object(fake, tmp_path, entry):
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"acme": entry, "other": {"tokens": {"access_token": "x"}}}))
+
+    pending = _begin(creds)
+
+    assert _record(creds)["state"] == pending.state
+    assert _store(creds)["other"] == {"tokens": {"access_token": "x"}}
+
+
+def test_two_processes_taking_the_same_record_serialize_on_the_store_lock(fake, creds, monkeypatch):
+    """Threads stand in for processes: each take loads, pauses, then saves.
+
+    Without the lock both would load the record before either saved its removal.
+    """
+    import threading
+    import time as _time
+
+    pending = _begin(creds)
+    callback = FakeOAuth.authorize(pending.authorization_url)
+    real_load = _login._load_store_for_login
+
+    def slow_load(storage):
+        data = real_load(storage)
+        _time.sleep(0.3)
+        return data
+
+    monkeypatch.setattr(_login, "_load_store_for_login", slow_load)
+    outcomes: list[object] = []
+
+    def take():
+        storage = _bridge.FileTokenStorage("acme", creds, backend="file")
+        try:
+            outcomes.append(_login._take_pending(storage, "acme", callback))
+        except LoginStateMismatch as exc:
+            outcomes.append(exc)
+
+    threads = [threading.Thread(target=take) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(isinstance(o, _login._PendingRecord) for o in outcomes) == 1
+    assert sum(isinstance(o, LoginStateMismatch) for o in outcomes) == 1
 
 
 # ── Client registration reuse ────────────────────────────────────────────────
@@ -261,28 +619,28 @@ def test_wrong_verifier_is_rejected_by_the_token_endpoint(fake, creds):
 
 def test_second_begin_with_the_same_redirect_uri_reuses_the_registration(fake, creds):
     first = _begin(creds)
-    _complete(first, FakeOAuth.authorize(first.authorization_url))
+    _complete(creds, "acme", FakeOAuth.authorize(first.authorization_url))
 
     second = _begin(creds)
 
     assert len(fake.registrations) == 1
-    assert second.client_info["client_id"] == "client-1"
+    assert _record(creds)["client_info"]["client_id"] == "client-1"
     assert parse_qs(urlparse(second.authorization_url).query)["client_id"] == ["client-1"]
 
 
 def test_a_different_redirect_uri_registers_anew(fake, creds):
     first = _begin(creds)
-    _complete(first, FakeOAuth.authorize(first.authorization_url))
+    _complete(creds, "acme", FakeOAuth.authorize(first.authorization_url))
 
-    second = _begin(creds, redirect_uri="https://staffing.example:8443/other/callback")
+    _begin(creds, redirect_uri="https://staffing.example:8443/other/callback")
 
     assert len(fake.registrations) == 2
-    assert second.client_info["client_id"] == "client-2"
+    assert _record(creds)["client_info"]["client_id"] == "client-2"
 
 
 def test_reuse_can_be_turned_off(fake, creds):
     first = _begin(creds)
-    _complete(first, FakeOAuth.authorize(first.authorization_url))
+    _complete(creds, "acme", FakeOAuth.authorize(first.authorization_url))
 
     _begin(creds, reuse_registration=False)
 
@@ -291,13 +649,13 @@ def test_reuse_can_be_turned_off(fake, creds):
 
 def test_a_registration_from_a_moved_authorization_server_is_not_reused(fake, creds):
     first = _begin(creds)
-    _complete(first, FakeOAuth.authorize(first.authorization_url))
+    _complete(creds, "acme", FakeOAuth.authorize(first.authorization_url))
     fake.as_url = "https://as2.test"
 
     second = _begin(creds)
 
     assert len(fake.registrations) == 2
-    assert second.client_info["client_id"] == "client-2"
+    assert _record(creds)["client_info"]["client_id"] == "client-2"
     assert second.authorization_url.startswith("https://as2.test/authorize?")
 
 
@@ -314,9 +672,14 @@ def test_two_pending_logins_against_two_stores_complete_independently(fake, tmp_
         )
         assert pa.state != pb.state
         # Completed in the opposite order, each routed by the state its callback carries.
-        pending = {pa.state: pa, pb.state: pb}
+        store_for = {pa.state: alice, pb.state: bob}
         callbacks = [FakeOAuth.authorize(pb.authorization_url), FakeOAuth.authorize(pa.authorization_url)]
-        await asyncio.gather(*(complete_login(pending[callback_state(cb)], cb, verify=False) for cb in callbacks))
+        await asyncio.gather(
+            *(
+                complete_login("acme", cb, creds_path=store_for[callback_state(cb)], cred_backend="file", verify=False)
+                for cb in callbacks
+            )
+        )
 
     asyncio.run(run())
 
@@ -342,13 +705,15 @@ def test_begin_and_complete_in_two_processes(tmp_path):
         f"""
         p = asyncio.run(_login.begin_login("acme", redirect_uri={REDIRECT!r}, url=MCP_URL,
                                            creds_path={str(creds)!r}, cred_backend="file"))
-        sys.stdout.write(p.to_json())
+        sys.stdout.write(p.authorization_url)
         """
     )
+    # The second process gets only the server name and the callback URL.
     complete = prelude + textwrap.dedent(
-        """
-        p = _login.PendingLogin.from_json(sys.stdin.read())
-        r = asyncio.run(_login.complete_login(p, FakeOAuth.authorize(p.authorization_url), verify=False))
+        f"""
+        callback = FakeOAuth.authorize(sys.stdin.read())
+        r = asyncio.run(_login.complete_login("acme", callback, creds_path={str(creds)!r}, cred_backend="file",
+                                              verify=False))
         print(r.token_endpoint)
         """
     )
@@ -360,33 +725,37 @@ def test_begin_and_complete_in_two_processes(tmp_path):
     assert b.stdout.strip() == f"{AS_URL}/token"
     entry = _store(creds)["acme"]
     assert entry["tokens"]["access_token"] == "at-client-1"
+    assert "pending_login" not in entry
 
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
 
 
-def test_repr_and_str_hide_the_verifier_and_client_secret(fake, creds):
-    pending = _begin(creds)
-    pending = PendingLogin.from_json(
-        pending.to_json().replace('"client_id": "client-1"', '"client_id": "client-1", "client_secret": "shh-secret"')
-    )
+def test_the_pending_login_carries_no_verifier_or_client_secret(fake, creds):
+    pending = _begin(creds, client=STATIC)
+    record = _record(creds)
+    assert record["client_info"]["client_secret"] == "static-shh"
 
     for text in (repr(pending), str(pending), f"{pending}"):
-        assert pending.code_verifier not in text
-        assert "shh-secret" not in text
-    assert pending.code_verifier in pending.to_json()
+        assert record["code_verifier"] not in text
+        assert "static-shh" not in text
+    assert not hasattr(pending, "code_verifier")
+    assert not hasattr(pending, "client_info")
+    assert not hasattr(pending, "to_json")
+    assert "static-shh" not in repr(_login._PendingRecord.from_dict(record))
 
 
 def test_no_secret_or_code_reaches_the_log(fake, creds, caplog):
     caplog.set_level(logging.DEBUG)
     pending = _begin(creds)
+    verifier = _record(creds)["code_verifier"]
     callback = FakeOAuth.authorize(pending.authorization_url)
     code = parse_qs(urlparse(callback).query)["code"][0]
 
-    _complete(pending, callback)
+    _complete(creds, "acme", callback)
 
     logged = "\n".join(r.getMessage() for r in caplog.records)
-    for secret in (pending.code_verifier, code, "at-client-1", "rt-client-1", callback):
+    for secret in (verifier, code, "at-client-1", "rt-client-1", callback):
         assert secret not in logged
 
 
@@ -409,6 +778,14 @@ def test_begin_rejects_a_redirect_uri_that_is_not_absolute(fake, creds, uri):
 def test_begin_rejects_a_ttl_that_is_not_a_positive_finite_number(fake, creds, ttl):
     with pytest.raises(ValueError, match="ttl"):
         _begin(creds, ttl=ttl)
+    assert "pending_login" not in _store(creds)["acme"]
+
+
+@pytest.mark.parametrize("expires_at", [float("nan"), float("inf")])
+def test_a_record_whose_expiry_is_not_finite_is_unusable(fake, creds, expires_at):
+    _begin(creds)
+
+    assert _login._PendingRecord.from_dict({**_record(creds), "expires_at": expires_at}) is None
 
 
 def test_begin_defaults_to_the_callback_timeout(fake, creds):
@@ -434,9 +811,11 @@ def test_begin_surfaces_a_refused_registration(fake, creds, monkeypatch):
             return httpx.Response(400, json={"error": "invalid_redirect_uri"})
         return real(request)
 
+    before = creds.read_bytes()
     monkeypatch.setattr(fake, "handle", refuse)
     with pytest.raises(OAuthRegistrationError, match="invalid_redirect_uri"):
         _begin(creds)
+    assert creds.read_bytes() == before
 
 
 def test_unknown_server_without_url(fake, creds, tmp_path):
@@ -446,28 +825,9 @@ def test_unknown_server_without_url(fake, creds, tmp_path):
         asyncio.run(begin_login("nope", redirect_uri=REDIRECT, creds_path=creds, config_path=cfg))
 
 
-def test_from_json_rejects_foreign_text():
-    with pytest.raises(ValueError):
-        PendingLogin.from_json("not json")
-    with pytest.raises(ValueError):
-        PendingLogin.from_json(json.dumps({"format": 999}))
-    with pytest.raises(ValueError, match="missing"):
-        PendingLogin.from_json(json.dumps({"format": 1, "server_name": "x"}))
-
-
 def test_callback_state_reads_the_state_parameter():
     assert callback_state(f"{REDIRECT}?code=abc&state=s1") == "s1"
     assert callback_state(REDIRECT) is None
-
-
-def test_complete_swaps_a_corrupt_store_aside(fake, creds, capsys):
-    pending = _begin(creds)
-    creds.write_text("{not json")
-
-    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
-
-    assert _store(creds)["acme"]["tokens"]["access_token"] == "at-client-1"
-    assert list(creds.parent.glob("credentials.json.corrupt.*"))
 
 
 # ── SDK pins ─────────────────────────────────────────────────────────────────
@@ -483,7 +843,7 @@ def test_authorization_url_matches_the_sdks_own(fake, creds):
     pending = _begin(creds)
     ours = parse_qs(urlparse(pending.authorization_url).query)
 
-    provider = _restore_provider_for_sdk_url(pending)
+    provider = _login._restore_provider(_login._PendingRecord.from_dict(_record(creds)), _login._StagingStorage())
     captured = {}
 
     async def redirect(url):
@@ -505,10 +865,6 @@ def test_authorization_url_matches_the_sdks_own(fake, creds):
         assert sdk[key] == ours[key]
 
 
-def _restore_provider_for_sdk_url(pending: PendingLogin) -> OAuthClientProvider:
-    return _login._restore_provider(pending, _login._StagingStorage())
-
-
 # ── Review fixes ─────────────────────────────────────────────────────────────
 
 
@@ -522,15 +878,15 @@ def test_a_confidential_registration_is_not_reused(fake, creds):
     }
     _bridge.FileTokenStorage("acme", creds)._save(store)
 
-    pending = _begin(creds)
+    _begin(creds)
 
     assert len(fake.registrations) == 1
-    assert pending.client_info["client_id"] == "client-1"
+    assert _record(creds)["client_info"]["client_id"] == "client-1"
 
 
 def test_a_registration_past_its_secret_expiry_is_not_reused(fake, creds):
     first = _begin(creds)
-    _complete(first, FakeOAuth.authorize(first.authorization_url))
+    _complete(creds, "acme", FakeOAuth.authorize(first.authorization_url))
     store = _store(creds)
     store["acme"]["client_info"]["client_secret_expires_at"] = 1
     _bridge.FileTokenStorage("acme", creds)._save(store)
@@ -540,17 +896,9 @@ def test_a_registration_past_its_secret_expiry_is_not_reused(fake, creds):
     assert len(fake.registrations) == 2
 
 
-def test_begin_does_not_repair_the_store_mode(fake, creds):
-    os.chmod(creds, 0o644)
-
-    _begin(creds)
-
-    assert os.stat(creds).st_mode & 0o777 == 0o644
-
-
 def test_every_request_carries_a_timeout(fake, creds):
     pending = _begin(creds)
-    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
 
     assert fake.seen
     for request in fake.seen:
@@ -562,7 +910,7 @@ def test_a_callback_from_another_issuer_is_refused(fake, creds):
     callback = FakeOAuth.authorize(pending.authorization_url) + "&iss=https%3A%2F%2Fevil.test"
 
     with pytest.raises(LoginStateMismatch, match="issuer"):
-        _complete(pending, callback)
+        _complete(creds, "acme", callback)
     assert fake.token_requests == []
 
 
@@ -570,7 +918,7 @@ def test_a_callback_from_the_right_issuer_completes(fake, creds):
     pending = _begin(creds)
     callback = FakeOAuth.authorize(pending.authorization_url) + "&iss=https%3A%2F%2Fas.test"
 
-    _complete(pending, callback)
+    _complete(creds, "acme", callback)
 
     assert _store(creds)["acme"]["tokens"]["access_token"] == "at-client-1"
 
@@ -585,7 +933,7 @@ def test_a_static_client_skips_registration_and_authenticates_in_the_body(fake, 
 
     assert fake.registrations == []
     assert parse_qs(urlparse(pending.authorization_url).query)["client_id"] == ["static-app"]
-    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
 
     assert fake.token_requests[-1]["client_secret"] == "static-shh"
     entry = _store(creds)["acme"]
@@ -597,7 +945,7 @@ def test_a_static_client_skips_registration_and_authenticates_in_the_body(fake, 
 
 def test_a_public_static_client_sends_no_secret(fake, creds):
     pending = _begin(creds, client=_login.StaticClient(client_id="pub"))
-    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
 
     assert "client_secret" not in fake.token_requests[-1]
     assert _store(creds)["acme"]["client_info"]["token_endpoint_auth_method"] == "none"
@@ -649,7 +997,7 @@ def test_a_static_client_from_config(fake, creds, tmp_path, monkeypatch):
     )
 
     pending = asyncio.run(begin_login("acme", redirect_uri=REDIRECT, creds_path=creds, config_path=cfg))
-    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
 
     assert fake.registrations == []
     assert fake.token_requests[-1]["client_id"] == "cfg-app"
@@ -704,6 +1052,23 @@ def test_configured_redirect_uris_that_are_not_a_list_of_strings_are_refused(fak
     assert fake.seen == []
 
 
+def test_begin_reads_an_explicit_config_once(fake, creds, tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, {"clientId": "cfg-app", "redirectUris": [REDIRECT]})
+    reads = {"n": 0}
+    real_parse = _bridge._parse_servers
+
+    def counting_parse(raw):
+        reads["n"] += 1
+        return real_parse(raw)
+
+    monkeypatch.setattr(_bridge, "_parse_servers", counting_parse)
+
+    asyncio.run(begin_login("acme", redirect_uri=REDIRECT, creds_path=creds, config_path=cfg))
+
+    assert reads["n"] == 1
+    assert _record(creds)["client_info"]["client_id"] == "cfg-app"
+
+
 def _cfg(tmp_path, client: dict) -> Path:
     cfg = tmp_path / "servers.json"
     cfg.write_text(json.dumps({"mcpServers": {"acme": {"type": "http", "url": MCP_URL, "oauthClient": client}}}))
@@ -713,12 +1078,12 @@ def _cfg(tmp_path, client: dict) -> Path:
 def test_a_configured_client_is_not_used_for_an_overridden_url(fake, creds, tmp_path):
     cfg = _cfg(tmp_path, {"clientId": "cfg-app", "clientSecret": "s", "redirectUris": [REDIRECT]})
 
-    pending = asyncio.run(
+    asyncio.run(
         begin_login("acme", redirect_uri=REDIRECT, url="https://mcp.test/mcp?other", creds_path=creds, config_path=cfg)
     )
 
     assert len(fake.registrations) == 1
-    assert pending.client_info["client_id"] == "client-1"
+    assert _record(creds)["client_info"]["client_id"] == "client-1"
 
 
 def test_a_static_client_pinned_to_another_issuer_is_refused(fake, creds):
@@ -738,7 +1103,7 @@ def test_the_registered_redirect_spelling_is_sent_verbatim(fake, creds):
     client = _login.StaticClient(client_id="c", redirect_uris=(registered,))
 
     pending = _begin(creds, client=client, redirect_uri="https://staffing.example/")
-    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
 
     assert parse_qs(urlparse(pending.authorization_url).query)["redirect_uri"] == [registered]
     assert pending.redirect_uri == registered
@@ -761,13 +1126,14 @@ def test_the_entry_matches_what_logins_sdk_writes_would_store(fake, creds, tmp_p
     """login() writes through FileTokenStorage.set_client_info / set_tokens (the SDK's seam)
     and `_persist_token_endpoint`; replaying the same objects through them gives this entry."""
     pending = _begin(creds)
-    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+    client_info = _record(creds)["client_info"]
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
     ours = _store(creds)["acme"]
 
     from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
     reference = _bridge.FileTokenStorage("acme", tmp_path / "ref.json")
-    asyncio.run(reference.set_client_info(OAuthClientInformationFull.model_validate(pending.client_info)))
+    asyncio.run(reference.set_client_info(OAuthClientInformationFull.model_validate(client_info)))
     token_fields = {k: v for k, v in ours["tokens"].items() if k != "expires_at"}
     asyncio.run(reference.set_tokens(OAuthToken(**token_fields)))
     reference._mutate(lambda d: d["acme"].__setitem__("token_endpoint", f"{AS_URL}/token"))
@@ -781,7 +1147,7 @@ def test_a_later_tool_call_works_over_the_saved_credential(fake, creds, monkeypa
     import httpx
 
     pending = _begin(creds)
-    _complete(pending, FakeOAuth.authorize(pending.authorization_url))
+    _complete(creds, "acme", FakeOAuth.authorize(pending.authorization_url))
     seen_auth = []
 
     def mcp(request: httpx.Request) -> httpx.Response:

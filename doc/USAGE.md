@@ -294,7 +294,7 @@ browser in the same coroutine. When the redirect has to land on a server you run
 several users — split the round in two:
 
 ```python
-from mcpgen import PendingLogin, begin_login, callback_state, complete_login
+from mcpgen import begin_login, complete_login
 
 # Request 1: start the login and send the browser to the authorization server.
 pending = await begin_login(
@@ -302,47 +302,82 @@ pending = await begin_login(
     redirect_uri="https://staffing.example/_auth/callback",
     creds_path=user_creds_path,          # whose store the token goes to
 )
-session_store[pending.state] = pending.to_json()   # server-side only — see below
 return redirect(pending.authorization_url)
 
 # Request 2 (any process): the authorization server redirected back here.
-blob = session_store.pop(callback_state(request.url))
-result = await complete_login(PendingLogin.from_json(blob), str(request.url), verify=True)
+result = await complete_login("myserver", str(request.url), creds_path=user_creds_path, verify=True)
 result.tools_count   # list_tools() ran over the new credential
 ```
 
 `begin_login` runs discovery and client registration and nothing else: no browser, no
-listener, no stdin. `redirect_uri` is any absolute URL, host, port and path included.
-`complete_login` checks `state`, exchanges the code and writes the same credential entry
-`login()` writes (client registration, tokens, token endpoint), under the same store
-lock, so every other mcpgen call reads it as usual. The two calls may run in different
-processes; `to_json()` / `PendingLogin.from_json()` carry everything in between.
+listener, no stdin. `redirect_uri` is any absolute URL, host, port and path included. What
+the code exchange needs — the PKCE verifier, the client registration and the discovered
+metadata — goes into the credential store, under the server entry's `pending_login` key.
+The returned `PendingLogin` holds public values only: `server_name`, `redirect_uri`,
+`authorization_url`, `state`, `expires_at` and the `expired` property. `ttl=` sets the
+seconds until `expires_at` (default 300, positive and finite).
+
+On the `keyring` backend, the two-step calls never fall back to the plaintext file: a write
+the OS keychain refuses raises, and nothing is written anywhere. For `begin_login` that is
+`RuntimeError`, with no pending login stored.
+
+`complete_login` takes the server name and the callback URL, with the `creds_path` and
+`cred_backend` given to `begin_login`. It checks `state`, exchanges the code and writes the
+same credential entry `login()` writes (client registration, tokens, token endpoint), under
+the same store lock, so every other mcpgen call reads it as usual. The two calls may run in
+different processes; the store carries everything between them.
+
+One pending login per server, used once. A second `begin_login` for the server replaces the
+first, whose `state` then stops being accepted. `complete_login` removes the pending login
+in the same locked write that matches the callback's `state`, before the exchange, so a
+replayed callback, or a second concurrent one with the same `state`, raises
+`LoginStateMismatch` and never reaches the token endpoint. That holds while the store lock
+can be taken; where mcpgen runs without one (an NFS mount that refuses locks, the Windows
+lock timeout), two concurrent callbacks can both get through. A callback with a different
+or missing `state` leaves the pending login in place, so a stray or forged redirect cannot
+cancel the real one. An expired pending login stays in the store until the next
+`begin_login` for that server, a `complete_login` whose `state` matches it, or
+`delete-creds`.
 
 The previous credential for the server stays in place until `complete_login` has a token
-in hand. A pending login that is abandoned, expires or fails leaves it untouched. Each
-pending login is independent, so several can be open at once: different users with their
-own `creds_path`, or several servers for one user. Look one up by `state`;
-`callback_state(url)` reads it from the redirect.
+in hand: `begin_login` leaves the entry's tokens alone, so the credential keeps working and
+refreshing meanwhile. Several logins can be open at once: different users with their own
+`creds_path`, or several servers for one user. When one callback URL serves several
+servers, keep the `state` of each `PendingLogin` and route the callback by it;
+`callback_state(url)` reads it from the redirect:
 
-| Raised by `complete_login` | When | Previous credential |
-|---|---|---|
-| `PendingLoginExpired` | past `pending.expires_at` (`ttl=` on `begin_login`, default 300 s) | kept |
-| `LoginStateMismatch` | the callback's `state` is missing or belongs to another pending login | kept |
-| `AuthorizationDenied` | the callback carries `error=` (`.error`, `.error_description`), e.g. `access_denied` | kept |
-| `CodeExchangeRejected` | the token endpoint refused the code (`.status_code`, `.error`, `.error_description`) | kept |
-| `PostLoginCheckFailed` | `verify=True` and `list_tools()` failed after the token was saved | replaced |
+```python
+from mcpgen import callback_state
 
-The first four share the base `LoginNotCompleted`; another `begin_login` is the way
-forward from each. A code is single-use, so retrying the same callback fails the same way.
+server_for[pending.state] = "myserver"                  # at begin
+...
+server = server_for.pop(callback_state(str(request.url)))
+result = await complete_login(server, str(request.url), creds_path=user_creds_path)
+```
+
+| Raised by `complete_login` | When | Pending login | Previous credential |
+|---|---|---|---|
+| `LoginStateMismatch` | no pending login for the server, or the callback's `state` is missing or another login's | kept | kept |
+| `AuthorizationDenied` | the callback carries `error=` and no `state` | kept | kept |
+| `LoginNotCompleted` | the OS keychain refused the write that takes the pending login | kept | kept |
+| `PendingLoginExpired` | past `expires_at` (`ttl=` on `begin_login`, default 300 s) | removed | kept |
+| `LoginStateMismatch` | the callback's RFC 9207 `iss` names an issuer other than the one the login started against | removed | kept |
+| `AuthorizationDenied` | the callback carries `error=` with the matching `state` (`.error`, `.error_description`), e.g. `access_denied` | removed | kept |
+| `LoginNotCompleted` | the callback carries neither a code nor an error | removed | kept |
+| `CodeExchangeRejected` | the token endpoint refused the code (`.status_code`, `.error`, `.error_description`) | removed | kept |
+| `PostLoginCheckFailed` | `verify=True` and `list_tools()` failed after the token was saved | removed | replaced |
+
+All but `PostLoginCheckFailed` share the base `LoginNotCompleted`. After a "removed" row,
+another `begin_login` is the way forward; after a "kept" row, the real callback can still
+complete the pending login. `AuthorizationDenied` is also a `ValueError`, the type `login()`
+raises for a denied authorization. A removed pending login is used up: retrying the same
+callback raises `LoginStateMismatch`.
 
 A stored public-client registration whose `redirect_uris` contains the requested URI is
 reused, so repeated logins through one callback do not register a new client each time.
 A different URI registers anew, and so do an authorization server that has moved since
 the registration and a registration past its `client_secret_expires_at`. Pass
 `reuse_registration=False` to always register.
-
-`LoginStateMismatch` also covers a callback whose RFC 9207 `iss` parameter names an
-issuer other than the authorization server the login was started against.
 
 *Pre-registered client.* Some authorization servers refuse Dynamic Client Registration
 for a redirect URI that is not a loopback address. Register a client with the server's
@@ -395,11 +430,11 @@ secret in the request body. The secret is saved in the credential entry, as for 
 registration, so refresh can use it. `repr()` of a `StaticClient` omits it. `login()` does
 not read `oauthClient`; it always registers for its own `localhost` redirect.
 
-*Secrets.* The `to_json()` text holds the PKCE `code_verifier` and, for a confidential
-client, its `client_secret`. Keep it server-side — a session store or an encrypted cookie,
-never a plain cookie or a URL parameter — and delete it once the login completes.
-`repr()` and `str()` of a `PendingLogin` print neither. mcpgen never logs or quotes the
-callback URL, which carries the authorization code; the authorization URL is safe to log.
+*Secrets.* The PKCE `code_verifier` and, for a confidential client, its `client_secret`
+stay in the credential store — the hardened file or the OS keychain, wherever the tokens
+live — and `PendingLogin` carries neither, so the caller holds nothing secret between the
+two requests. mcpgen never logs or quotes the callback URL, which carries the authorization
+code; the authorization URL is safe to log.
 
 **Checking a credential without ever logging in (background jobs):**
 

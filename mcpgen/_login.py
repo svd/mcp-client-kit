@@ -1,16 +1,25 @@
 """Two-step OAuth login with a caller-owned redirect URI.
 
-`begin_login()` discovers the authorization server, registers a client (or reuses one) and
-returns a `PendingLogin`: the authorization URL to send the browser to, and everything the
-code exchange needs. `complete_login()` takes that object — possibly in another process, via
-`to_json()` / `from_json()` — and the URL the browser was redirected to, exchanges the code
-and writes the credential entry `login()` would have written.
+`begin_login()` discovers the authorization server, registers a client (or reuses one),
+keeps what the code exchange needs — PKCE verifier, client registration, discovered
+metadata — in the credential store under the server entry's `pending_login` key, and
+returns a `PendingLogin` holding only public values: the authorization URL to send the
+browser to and the `state` that identifies the login. `complete_login()` takes the server
+name and the URL the browser was redirected to, possibly in another process, takes the
+pending login back out of the store, exchanges the code and writes the credential entry
+`login()` would have written.
 
-The round never touches the credential store until a token is in hand: discovery,
-registration and the exchange all run against an in-memory `_StagingStorage`, and
-`complete_login()` replaces the server's entry in one locked write. A pending login that is
-abandoned, expires or fails therefore leaves the previous credential in place, with no
-stash to restore.
+One pending login per server, used once. `begin_login()` overwrites any earlier one;
+`complete_login()` removes it in the same locked write that matches the callback's
+`state`, before the exchange, so a replayed or concurrent callback with that `state` finds
+nothing to complete. The match holds only while `_store_lock` is held: where it proceeds
+unlocked, two callbacks can both take the record.
+
+The rest of the entry stays as it was until a token is in hand: discovery, registration
+and the exchange run against an in-memory `_StagingStorage`, and `complete_login()`
+replaces the server's tokens, client registration and token endpoint in one locked write.
+A pending login that is abandoned, expires or fails therefore leaves the previous
+credential in place, with no stash to restore.
 
 SDK coupling. The flow is driven through `OAuthClientProvider.async_auth_flow` so discovery,
 scope selection and registration behave exactly as in `login()`. Three private members are
@@ -69,9 +78,12 @@ from mcpgen._bridge import (
     server_config,
 )
 
+_PENDING_KEY = "pending_login"
+"""Key of the pending-login record in a server's credential entry."""
+
 _PENDING_FORMAT = 1
-"""Version of the `to_json()` document. `from_json()` refuses any other value, so a blob
-written by a later mcpgen fails loudly instead of completing with a misread field."""
+"""Version of the pending-login record. A record of any other format counts as no pending
+login, so one written by a later mcpgen is never completed with a misread field."""
 
 
 # ── Errors ───────────────────────────────────────────────────────────────────
@@ -80,8 +92,9 @@ written by a later mcpgen fails loudly instead of completing with a misread fiel
 class LoginNotCompleted(Exception):
     """A pending login ended without a token. The previous credential is untouched.
 
-    Base of the two-step errors below; another `begin_login()` is the way forward from any
-    of them.
+    Base of the two-step errors below. When the error used up the pending login, another
+    `begin_login()` is the way forward; when it left the pending login in place, the real
+    callback can still complete it.
     """
 
 
@@ -93,11 +106,12 @@ class PendingLoginExpired(LoginNotCompleted):
     """The pending login is past its `expires_at`."""
 
 
-class AuthorizationDenied(LoginNotCompleted):
+class AuthorizationDenied(LoginNotCompleted, ValueError):
     """The authorization server redirected back with `error=` instead of a code.
 
     `error` is the RFC 6749 §4.1.2.1 code (`access_denied` when the user declined);
-    `error_description` is the server's text, or None when it sent none.
+    `error_description` is the server's text, or None when it sent none. Also a
+    ValueError, the type `login()` raises for a denied authorization.
     """
 
     def __init__(self, error: str, error_description: str | None = None) -> None:
@@ -132,69 +146,28 @@ class CodeExchangeRejected(LoginNotCompleted):
 # ── Public data ──────────────────────────────────────────────────────────────
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True)
 class PendingLogin:
     """A login between `begin_login()` and `complete_login()`.
 
-    `authorization_url` is where to send the browser, `state` the OAuth `state` parameter
-    that identifies which pending login a callback belongs to, and `expires_at` the epoch
-    second after which `complete_login()` refuses it.
+    `authorization_url` is where to send the browser, `redirect_uri` the URI the
+    authorization server will redirect to (in the spelling sent on the wire), `state` the
+    OAuth `state` parameter that identifies which pending login a callback belongs to, and
+    `expires_at` the epoch second after which `complete_login()` refuses it.
 
-    `to_json()` carries `code_verifier` and, for a confidential client, `client_secret`.
-    Store the blob where only the server can read it — a server-side session or an
-    encrypted cookie, never a plain cookie or a URL — and drop it once the login completes.
-    `repr()` and `str()` print neither.
+    Holds no secret: the PKCE verifier and the client registration stay in the credential
+    store until `complete_login()` takes them.
     """
 
     server_name: str
-    server_url: str
     redirect_uri: str
     authorization_url: str
     state: str
     expires_at: float
-    code_verifier: str
-    creds_path: str
-    cred_backend: str
-    client_info: dict
-    client_metadata: dict
-    oauth_metadata: dict | None
-    protected_resource_metadata: dict | None
-    auth_server_url: str | None
-    protocol_version: str | None
-
-    def __repr__(self) -> str:
-        return (
-            f"PendingLogin(server_name={self.server_name!r}, redirect_uri={self.redirect_uri!r}, "
-            f"state={self.state!r}, expires_at={self.expires_at!r})"
-        )
-
-    __str__ = __repr__
 
     @property
     def expired(self) -> bool:
         return time.time() >= self.expires_at
-
-    def to_json(self) -> str:
-        """Serialize for `from_json()` in this or another process. The text holds secrets."""
-        return json.dumps({"format": _PENDING_FORMAT, **asdict(self)})
-
-    @classmethod
-    def from_json(cls, blob: str | bytes) -> PendingLogin:
-        """Rebuild a pending login from `to_json()` output.
-
-        Raises ValueError for text that is not a pending login of this format.
-        """
-        try:
-            raw = json.loads(blob)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ValueError(f"not a pending login: {exc}") from None
-        if not isinstance(raw, dict) or raw.get("format") != _PENDING_FORMAT:
-            raise ValueError(f"not a pending login of format {_PENDING_FORMAT}")
-        names = [f.name for f in fields(cls)]
-        missing = [n for n in names if n not in raw]
-        if missing:
-            raise ValueError(f"pending login is missing {missing}")
-        return cls(**{n: raw[n] for n in names})
 
 
 @dataclass(frozen=True)
@@ -307,8 +280,7 @@ def _canonical_uri(uri: str) -> str:
 
 def callback_state(callback_url: str) -> str | None:
     """The `state` parameter of a redirect URL: the key to look up its pending login by."""
-    values = parse_qs(urlparse(callback_url).query).get("state")
-    return values[0] if values else None
+    return _callback_params(callback_url).get("state")
 
 
 # ── Internals ────────────────────────────────────────────────────────────────
@@ -332,6 +304,76 @@ class _StagingStorage(TokenStorage):
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         self.client_info = client_info
+
+
+@dataclass(frozen=True, repr=False)
+class _PendingRecord:
+    """What `begin_login()` keeps in the store for `complete_login()`'s code exchange.
+
+    `repr=False`: `code_verifier` and `client_info` (a confidential client's
+    `client_secret`) must not reach a log line or a traceback.
+    """
+
+    server_url: str
+    redirect_uri: str
+    authorization_url: str
+    state: str
+    expires_at: float
+    code_verifier: str
+    client_info: dict
+    client_metadata: dict
+    oauth_metadata: dict | None
+    protected_resource_metadata: dict | None
+    auth_server_url: str | None
+    protocol_version: str | None
+
+    @property
+    def expired(self) -> bool:
+        return time.time() >= self.expires_at
+
+    def to_dict(self) -> dict:
+        return {"format": _PENDING_FORMAT, **asdict(self)}
+
+    @classmethod
+    def from_dict(cls, raw: object) -> _PendingRecord | None:
+        """The record stored as *raw*, or None when it is not a usable one.
+
+        Usable means this format, every field with its type, and `client_info`,
+        `client_metadata` and the metadata validating as the SDK models they were dumped
+        from. A failed validation is swallowed whole: its text quotes input values, which
+        may include a `client_secret`.
+        """
+        if not isinstance(raw, dict) or raw.get("format") != _PENDING_FORMAT:
+            return None
+        names = [f.name for f in fields(cls)]
+        if any(name not in raw for name in names):
+            return None
+        record = cls(**{name: raw[name] for name in names})
+        try:
+            record._validate()
+        except Exception:  # noqa: BLE001 — any failure means unusable; see the docstring
+            return None
+        return record
+
+    def _validate(self) -> None:
+        for text in (self.server_url, self.redirect_uri, self.authorization_url, self.state, self.code_verifier):
+            if not isinstance(text, str) or not text:
+                raise TypeError("expected a non-empty string")
+        if (
+            isinstance(self.expires_at, bool)
+            or not isinstance(self.expires_at, (int, float))
+            or not math.isfinite(self.expires_at)
+        ):
+            raise TypeError("expires_at must be a finite number")
+        for optional in (self.auth_server_url, self.protocol_version):
+            if optional is not None and not isinstance(optional, str):
+                raise TypeError("expected a string or null")
+        OAuthClientInformationFull.model_validate(self.client_info)
+        OAuthClientMetadata.model_validate(self.client_metadata)
+        if self.oauth_metadata is not None:
+            OAuthMetadata.model_validate(self.oauth_metadata)
+        if self.protected_resource_metadata is not None:
+            ProtectedResourceMetadata.model_validate(self.protected_resource_metadata)
 
 
 class _AuthorizationReady(BaseException):
@@ -486,10 +528,10 @@ def _validate_redirect_uri(redirect_uri: str) -> None:
 def _stored_entry(storage: FileTokenStorage, server_name: str) -> dict:
     """The server's current entry, or {} when the store is absent or unreadable.
 
-    Read-only and best effort: `begin_login()` only consults it for a registration to
-    reuse, and an unreadable store is `complete_login()`'s to deal with when it writes.
-    The file is read directly rather than through `_file_load`, which repairs the file's
-    mode: `begin_login()` changes nothing on disk.
+    Read-only and best effort: `begin_login()` consults it before its round, for a
+    registration to reuse; an unreadable store is dealt with by the locked write that
+    stores the pending login. The file is read directly rather than through `_file_load`,
+    which repairs the file's mode: nothing on disk changes unless the round succeeds.
     """
     try:
         if storage._backend == "file":
@@ -549,13 +591,15 @@ async def begin_login(
     """Start an OAuth login whose redirect lands on *redirect_uri*; no browser, no listener.
 
     Runs discovery and, unless a registration can be reused, Dynamic Client Registration
-    for *redirect_uri*, then returns the `PendingLogin` to send the user on with. The
-    credential store is read, never written: the server's current entry stays usable
-    until `complete_login()` replaces it.
+    for *redirect_uri*, stores the pending login in the server's credential entry under
+    `pending_login`, and returns the `PendingLogin` to send the user on with. The store
+    is written only on success, and only that key: the server's tokens, registration and
+    token endpoint stay usable until `complete_login()` replaces them. Any earlier
+    pending login for the server is replaced, so its `state` stops being accepted.
 
     redirect_uri: any absolute URL — host, port and path are the caller's.
-    creds_path / cred_backend: the store `complete_login()` will write to, recorded in
-        the pending login.
+    creds_path / cred_backend: the store the pending login is kept in; pass the same
+        to `complete_login()`.
     url / client_name / config_path: as in `login()`.
     ttl: seconds until the pending login expires; None uses 300 (the same bound as
         `login()`'s callback wait). Must be positive and finite.
@@ -579,7 +623,6 @@ async def begin_login(
         raise ValueError(f"Unknown server {server_name!r}. Pass url= or add it to config. Known: {list(known)}")
     path = Path(creds_path)
     storage = FileTokenStorage(server_name, path, backend=resolve_cred_backend(cred_backend))
-    backend = storage._backend  # concrete ("auto" resolved), before a keyring fallback can flip it
 
     metadata = _client_metadata(server_name, redirect_uri, client_name)
     canonical_uri = str(metadata.redirect_uris[0])  # type: ignore[index]  # set just above
@@ -587,7 +630,9 @@ async def begin_login(
         # Not for an overridden url=: the configured client belongs to the configured
         # server's authorization server, and its secret must not go to another one.
         client = StaticClient._from_config(configured)
-    entry = _stored_entry(storage, server_name)
+    # A separate instance: a keyring read error downgrades the instance it happens on to the
+    # file backend, and the record must still be written where `complete_login()` looks.
+    entry = _stored_entry(FileTokenStorage(server_name, path, backend=storage._backend), server_name)
     reused: OAuthClientInformationFull | None
     send_uri = canonical_uri  # a registration made here is for the canonical spelling
     if client is not None:
@@ -632,16 +677,13 @@ async def begin_login(
                 f"{server_url} is served by {discovered or 'an authorization server with no metadata'}."
             )
     assert ctx.client_info is not None  # _BeginProvider refuses to stop without one
-    return PendingLogin(
-        server_name=server_name,
+    record = _PendingRecord(
         server_url=server_url,
         redirect_uri=send_uri,
         authorization_url=ready.authorization_url,
         state=ready.state,
         expires_at=time.time() + lifetime,
         code_verifier=ready.code_verifier,
-        creds_path=str(path),
-        cred_backend=backend,
         client_info=_dump(ctx.client_info) or {},
         client_metadata=_dump(ctx.client_metadata) or {},
         oauth_metadata=_dump(ctx.oauth_metadata),
@@ -649,132 +691,207 @@ async def begin_login(
         auth_server_url=ctx.auth_server_url,
         protocol_version=ctx.protocol_version,
     )
+    # Re-read under the lock and set only this key: a token refresh or another writer
+    # that landed during the round keeps its change.
+    with _store_locks(storage._lock_backend, storage._path):
+        data = _load_store_for_login(storage)
+        slot = data.get(server_name)
+        if not isinstance(slot, dict):
+            slot = data[server_name] = {}
+        slot[_PENDING_KEY] = record.to_dict()
+        storage._save(data)
+    return PendingLogin(
+        server_name=server_name,
+        redirect_uri=record.redirect_uri,
+        authorization_url=record.authorization_url,
+        state=record.state,
+        expires_at=record.expires_at,
+    )
 
 
-def _read_callback(pending: PendingLogin, callback_url: str) -> str:
-    """Validate the redirect against *pending* and return its authorization code.
+def _callback_params(callback_url: str) -> dict[str, str]:
+    """The first value of each query parameter of *callback_url*."""
+    return {key: values[0] for key, values in parse_qs(urlparse(callback_url).query).items() if values}
+
+
+def _take_pending(storage: FileTokenStorage, server_name: str, callback_url: str) -> _PendingRecord:
+    """Remove the server's pending login from the store when *callback_url* is its callback.
+
+    Under the store lock: a callback whose `state` matches the record takes it, in the
+    same write, so of two callbacks carrying that `state` only one gets a record to
+    exchange. A callback that does not match leaves the record in place — a stray or forged
+    redirect cannot cancel the real login — and raises:
+        LoginStateMismatch — no usable pending login, a different `state`, or no `state`
+            and no `error`.
+        AuthorizationDenied — no `state`, and `error=`.
+    Raises LoginNotCompleted when the keyring refused the write and `FileTokenStorage` fell
+    back to the file: the record is still in the keyring, so the login is not used up.
 
     No message here quotes *callback_url*: it carries the code.
     """
-    params = parse_qs(urlparse(callback_url).query)
+    params = _callback_params(callback_url)
+    state = params.get("state")
+    with _store_locks(storage._lock_backend, storage._path):
+        data = _load_store_for_login(storage)
+        backend = storage._backend  # after the load, which may itself have fallen back
+        entry = data.get(server_name)
+        if not isinstance(entry, dict):
+            entry = {}
+        record = _PendingRecord.from_dict(entry.get(_PENDING_KEY))
+        if record is None:
+            raise LoginStateMismatch(f"There is no pending login for {server_name}; start one with begin_login().")
+        if state is None:
+            if params.get("error"):
+                raise AuthorizationDenied(params["error"], params.get("error_description"))
+            raise LoginStateMismatch(f"The callback carries no state parameter ({server_name}).")
+        if not secrets.compare_digest(state.encode(), record.state.encode()):
+            raise LoginStateMismatch(f"The callback's state does not belong to the pending login for {server_name}.")
+        del entry[_PENDING_KEY]
+        if not entry:
+            del data[server_name]
+        storage._save(data)
+        if storage._backend != backend:
+            raise LoginNotCompleted(
+                f"The OS keychain refused the write that marks the pending login for {server_name} used, "
+                f"so it was not completed; start a new one with begin_login()."
+            )
+    return record
 
-    def first(key: str) -> str | None:
-        values = params.get(key)
-        return values[0] if values else None
 
-    state, error = first("state"), first("error")
-    # A state that names another login is checked before the error it may carry: an error
-    # redirect for someone else's login says nothing about this one.
-    if state is not None and not secrets.compare_digest(state.encode(), pending.state.encode()):
-        raise LoginStateMismatch(f"The callback's state does not belong to this pending login ({pending.server_name}).")
+def _read_callback(record: _PendingRecord, server_name: str, callback_url: str) -> str:
+    """Check the callback of a taken *record* and return its authorization code.
+
+    No message here quotes *callback_url*: it carries the code.
+    """
+    if record.expired:
+        raise PendingLoginExpired(f"The pending login for {server_name} expired; start a new one.")
+    params = _callback_params(callback_url)
     # RFC 9207 §2.4: a callback naming an issuer other than the one this login was started
     # against is a mix-up, whatever its state says.
-    issuer = first("iss")
-    expected_issuer = (pending.oauth_metadata or {}).get("issuer")
+    issuer = params.get("iss")
+    expected_issuer = (record.oauth_metadata or {}).get("issuer")
     if issuer is not None and expected_issuer and issuer.rstrip("/") != str(expected_issuer).rstrip("/"):
-        raise LoginStateMismatch(
-            f"The callback names issuer {issuer!r}, not {expected_issuer!r} ({pending.server_name})."
-        )
+        raise LoginStateMismatch(f"The callback names issuer {issuer!r}, not {expected_issuer!r} ({server_name}).")
+    error = params.get("error")
     if error:
-        raise AuthorizationDenied(error, first("error_description"))
-    if state is None:
-        raise LoginStateMismatch(f"The callback carries no state parameter ({pending.server_name}).")
-    code = first("code")
+        raise AuthorizationDenied(error, params.get("error_description"))
+    code = params.get("code")
     if not code:
-        raise LoginNotCompleted(f"The callback carries neither a code nor an error ({pending.server_name}).")
+        raise LoginNotCompleted(f"The callback carries neither a code nor an error ({server_name}).")
     return code
 
 
-def _restore_provider(pending: PendingLogin, staging: _StagingStorage) -> OAuthClientProvider:
+def _restore_provider(record: _PendingRecord, staging: _StagingStorage) -> OAuthClientProvider:
     """An SDK provider whose context is the one `begin_login()` stopped with."""
-    client_info = OAuthClientInformationFull.model_validate(pending.client_info)
+    client_info = OAuthClientInformationFull.model_validate(record.client_info)
     staging.client_info = client_info
     provider = OAuthClientProvider(
-        server_url=pending.server_url,
-        client_metadata=OAuthClientMetadata.model_validate(pending.client_metadata),
+        server_url=record.server_url,
+        client_metadata=OAuthClientMetadata.model_validate(record.client_metadata),
         storage=staging,
     )
     ctx = provider.context
     ctx.client_info = client_info
-    if pending.oauth_metadata is not None:
-        ctx.oauth_metadata = OAuthMetadata.model_validate(pending.oauth_metadata)
-    if pending.protected_resource_metadata is not None:
-        ctx.protected_resource_metadata = ProtectedResourceMetadata.model_validate(pending.protected_resource_metadata)
-    ctx.auth_server_url = pending.auth_server_url
-    ctx.protocol_version = pending.protocol_version
+    if record.oauth_metadata is not None:
+        ctx.oauth_metadata = OAuthMetadata.model_validate(record.oauth_metadata)
+    if record.protected_resource_metadata is not None:
+        ctx.protected_resource_metadata = ProtectedResourceMetadata.model_validate(record.protected_resource_metadata)
+    ctx.auth_server_url = record.auth_server_url
+    ctx.protocol_version = record.protocol_version
     # The token request has to repeat the authorization request's redirect_uri exactly
     # (RFC 6749 §4.1.3); see `_BeginProvider` for why that may not be the AnyUrl spelling.
     # A plain assignment: the model does not validate on assignment, so the string stays as is.
-    ctx.client_metadata.redirect_uris = [pending.redirect_uri]  # type: ignore[list-item]
+    ctx.client_metadata.redirect_uris = [record.redirect_uri]  # type: ignore[list-item]
     return provider
 
 
-async def complete_login(pending: PendingLogin, callback_url: str, *, verify: bool = True) -> LoginResult:
-    """Finish *pending* with the URL the authorization server redirected the browser to.
+async def complete_login(
+    server_name: str,
+    callback_url: str,
+    *,
+    creds_path: Path | str = DEFAULT_CREDS_PATH,
+    cred_backend: str | None = None,
+    verify: bool = True,
+) -> LoginResult:
+    """Finish the server's pending login with the URL the authorization server redirected to.
 
-    Validates `state`, exchanges the code and replaces the server's credential entry —
-    client registration, tokens and token endpoint — in one locked write to the store
-    `begin_login()` recorded. That entry is the one `login()` writes. With *verify*, runs
-    `list_tools()` over the new credential.
+    Takes the pending login `begin_login()` stored for *server_name* out of the store when
+    the callback's `state` matches it, exchanges the code and replaces the server's
+    credential entry — client registration, tokens and token endpoint — in one locked
+    write. That entry is the one `login()` writes; a pending login a `begin_login()`
+    stored during the exchange is kept in it. With *verify*, runs `list_tools()` over the
+    new credential.
 
-    Raises, leaving the previous credential in place:
-        PendingLoginExpired — past `pending.expires_at`.
-        LoginStateMismatch — the callback's `state` is missing or another login's.
+    creds_path / cred_backend: the store `begin_login()` was given.
+
+    Raises with the previous credential and the pending login in place:
+        LoginStateMismatch — no pending login for the server, or a callback whose
+            `state` is missing or another login's.
+        AuthorizationDenied — a callback with `error=` and no `state`.
+        LoginNotCompleted — the keyring refused the write that takes the pending login.
+    Raises with the previous credential in place, the pending login used up:
+        PendingLoginExpired — past its `expires_at`.
+        LoginStateMismatch — the callback's `iss` names another issuer (RFC 9207).
         AuthorizationDenied — the callback carries `error=` (`access_denied`, …).
-        CodeExchangeRejected — the token endpoint refused the code.
         LoginNotCompleted — the callback carries neither a code nor an error.
+        CodeExchangeRejected — the token endpoint refused the code.
     Raises after saving the new credential:
         PostLoginCheckFailed — *verify* was set and `list_tools()` failed.
     """
-    if pending.expired:
-        raise PendingLoginExpired(f"The pending login for {pending.server_name} expired; start a new one.")
-    code = _read_callback(pending, callback_url)
+    storage = FileTokenStorage(server_name, Path(creds_path), backend=resolve_cred_backend(cred_backend))
+    record = _take_pending(storage, server_name, callback_url)
+    code = _read_callback(record, server_name, callback_url)
 
     staging = _StagingStorage()
-    provider = _restore_provider(pending, staging)
+    provider = _restore_provider(record, staging)
     async with _oauth_client() as client:
-        request = await provider._exchange_token_authorization_code(code, pending.code_verifier)
+        request = await provider._exchange_token_authorization_code(code, record.code_verifier)
         response = await client.send(_bounded(client, request))
         if response.status_code != 200:
-            raise _exchange_rejected(pending.server_name, response)
+            raise _exchange_rejected(server_name, response)
         try:
             await provider._handle_token_response(response)
         except Exception as exc:  # noqa: BLE001 — any parse failure means no token
             # `from None` and `_describe`: the SDK's message quotes the body it rejected.
             raise CodeExchangeRejected(
-                f"The token endpoint for {pending.server_name} answered 200 without a usable token: {_describe(exc)}",
+                f"The token endpoint for {server_name} answered 200 without a usable token: {_describe(exc)}",
                 status_code=response.status_code,
             ) from None
     assert staging.tokens is not None  # _handle_token_response stores before returning
     token_endpoint = provider._get_token_endpoint()
 
-    entry = {
-        "client_info": pending.client_info,
+    entry: dict[str, Any] = {
+        "client_info": record.client_info,
         "tokens": FileTokenStorage._serialize_tokens(staging.tokens),
         "token_endpoint": token_endpoint,
     }
-    storage = FileTokenStorage(pending.server_name, Path(pending.creds_path), backend=pending.cred_backend)
     with _store_locks(storage._lock_backend, storage._path):
         data = _load_store_for_login(storage)
-        data[pending.server_name] = entry
+        current = data.get(server_name)
+        # Present only when a `begin_login()` ran during the exchange: this login's record
+        # was taken above. That newer login stays completable.
+        newer = current.get(_PENDING_KEY) if isinstance(current, dict) else None
+        if newer is not None:
+            entry[_PENDING_KEY] = newer
+        data[server_name] = entry
         storage._save(data)
 
     tools_count: int | None = None
     if verify:
         try:
             async with _http_session(
-                pending.server_name,
-                pending.server_url,
-                cred_backend=pending.cred_backend,
-                creds_path=Path(pending.creds_path),
+                server_name,
+                record.server_url,
+                cred_backend=storage._lock_backend,
+                creds_path=storage._path,
             ) as session:
                 tools_count = len((await session.list_tools()).tools)
         except Exception as exc:  # noqa: BLE001 — interrupts are BaseException and propagate
             raise PostLoginCheckFailed(
-                f"Login succeeded ({pending.server_name}) and the token was saved, but the check that "
+                f"Login succeeded ({server_name}) and the token was saved, but the check that "
                 f"follows it failed: {_describe(exc)}. Logging in again will not change this."
             ) from None
-    return LoginResult(server_name=pending.server_name, token_endpoint=token_endpoint, tools_count=tools_count)
+    return LoginResult(server_name=server_name, token_endpoint=token_endpoint, tools_count=tools_count)
 
 
 def _exchange_rejected(server_name: str, response: httpx.Response) -> CodeExchangeRejected:
